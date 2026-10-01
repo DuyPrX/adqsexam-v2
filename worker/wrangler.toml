@@ -1,0 +1,24 @@
+name = "docx-extractor-v2"
+main = "src/index.ts"
+compatibility_date = "2026-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# ---------------------------------------------------------------------------
+# Secrets — NEVER put real values in this file.
+# Provision them with:
+#   npx wrangler secret put GEMINI_API_KEY
+#   npx wrangler secret put INTERNAL_SECRET
+# For local development put them in `worker/.dev.vars` (git-ignored):
+#   GEMINI_API_KEY="..."
+#   INTERNAL_SECRET="local-dev-secret"
+# ---------------------------------------------------------------------------
+# GEMINI_API_KEY  — Google AI Studio key. Required only for mode=ai / auto fallback.
+# INTERNAL_SECRET — Shared secret required in the `X-Internal-Secret` header.
+#                   When unset (local dev), the header check is bypassed.
+
+[vars]
+# Overridable Gemini model for Engine 2 (Engine 2 fallback).
+GEMINI_MODEL = "gemini-2.5-flash"
+
+[observability]
+enabled = true

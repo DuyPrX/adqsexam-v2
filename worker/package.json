@@ -1,0 +1,24 @@
+{
+  "name": "docx-extractor-v2",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Worker dual-engine DOCX exam extractor for ADQS Exam v2 (Phase 2).",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "build": "tsc --noEmit",
+    "check": "tsc --noEmit",
+    "verify:sample": "esbuild scripts/verify-sample.ts --bundle --platform=node --format=esm --external:@google/genai --outfile=.verify/verify.mjs --log-level=warning && node .verify/verify.mjs"
+  },
+  "dependencies": {
+    "@google/genai": "^1.0.0",
+    "fflate": "^0.8.2",
+    "hono": "^4.6.14"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.0.0",
+    "typescript": "^5.7.2",
+    "wrangler": "^4.0.0"
+  }
+}
