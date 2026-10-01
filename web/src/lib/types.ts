@@ -1,0 +1,111 @@
+/**
+ * Domain types for the ADQS Exam v2 teacher web (Phase 3).
+ *
+ * The extractor shape mirrors v2/worker/src/types.ts verbatim — it is dictated by
+ * the Phase 1 Supabase schema (v2/supabase/schema.sql) and ARCHITECTURE_FREEZE.md.
+ */
+
+/** Classification vocabulary — frozen in Phase 2, must match the Worker exactly. */
+export type QuestionType = 'MULTIPLE_CHOICE' | 'TRUE_FALSE' | 'SHORT_ANSWER' | 'ESSAY';
+
+/** Engine selection understood by the Worker (`?mode=`). */
+export type ExtractionMode = 'rule' | 'ai' | 'auto';
+
+/** Engine that actually produced the payload. */
+export type EngineUsed = 'rule' | 'ai';
+
+/**
+ * A question returned by the Worker and persisted into `public.question_bank`.
+ *
+ * `correct_answer` shapes (v2/supabase/schema.sql §A.2):
+ *   MULTIPLE_CHOICE : integer 0-3       e.g. 2
+ *   TRUE_FALSE      : ["Đ"|"S", x4]     e.g. ["Đ","S","Đ","S"]  (keys only)
+ *                     `options` holds the four sub-item STATEMENTS.
+ *   SHORT_ANSWER    : string            e.g. "3"  (null when the key was absent)
+ *   ESSAY           : null              (never auto-graded)
+ */
+export interface ExtractedQuestion {
+  /** 1-based ordinal within the document. */
+  position: number;
+  question_type: QuestionType;
+  question_text: string;
+  options: string[];
+  correct_answer: number | string[] | string | null;
+  explanation: string | null;
+}
+
+/** Worker response envelope (`POST /api/v1/extract`). */
+export interface ExtractionResponse {
+  success: boolean;
+  engine_used: EngineUsed | null;
+  count: number;
+  data: ExtractedQuestion[];
+  meta?: {
+    filename: string;
+    mode: ExtractionMode;
+    correct_spans_detected: number;
+    has_answers: boolean;
+    fallback_reason: string | null;
+  };
+  error?: { code: string; message: string };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Database row shapes (only the columns this app reads/writes).              */
+/* -------------------------------------------------------------------------- */
+
+export interface ExamRow {
+  id: string;
+  user_id: string;
+  code: string;
+  title: string;
+  duration_minutes: number;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface QuestionBankRow {
+  id: string;
+  user_id: string;
+  exam_id: string | null;
+  question_text: string;
+  question_type: string;
+  options: string[];
+  correct_answer: number | string[] | string | null;
+  explanation: string | null;
+  position: number;
+  created_at: string;
+}
+
+export interface ExamResultRow {
+  id: string;
+  exam_code: string;
+  student_code: string;
+  student_name: string;
+  class_name: string;
+  score: number;
+  total_questions: number;
+  answers_json: CorrectedAnswer[];
+  blur_count: number;
+  fullscreen_exit_count: number;
+  elapsed_seconds: number;
+  needs_grading: boolean;
+  submitted_at: string;
+}
+
+/**
+ * One entry of `exam_results.answers_json`, as produced by `submit_exam_result`.
+ * The shape varies by `type` — this union documents every branch the RPC emits.
+ */
+export type CorrectedAnswer =
+  | { questionIndex: number; type: 'MCQ'; selectedIndex: number | null; correctIndex: number | null; isCorrect: boolean }
+  | { questionIndex: number; type: 'TRUE_FALSE'; selectedAnswers: string[]; correctAnswers: string[]; isCorrect: boolean }
+  | { questionIndex: number; type: 'SHORT_ANSWER'; selectedAnswerText: string; correctAnswer: string; isCorrect: boolean }
+  | { questionIndex: number; type: 'ESSAY'; selectedAnswerText: string; isCorrect: boolean };
+
+/** A roster row parsed from a teacher-supplied spreadsheet. */
+export interface RosterEntry {
+  student_code: string;
+  full_name: string;
+  class_name: string;
+}

@@ -1,0 +1,23 @@
+@import 'tailwindcss';
+
+/*
+ * ADQS Exam v2 — teacher web.
+ * Tailwind v4: theme tokens are declared with @theme instead of tailwind.config.
+ */
+@theme {
+  --color-ink-50: oklch(0.985 0.002 250);
+  --color-ink-100: oklch(0.968 0.004 250);
+  --color-ink-200: oklch(0.929 0.006 250);
+  --color-ink-500: oklch(0.554 0.014 250);
+  --color-ink-700: oklch(0.372 0.016 250);
+  --color-ink-900: oklch(0.208 0.014 250);
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  @apply bg-slate-50 text-slate-900 antialiased;
+}
