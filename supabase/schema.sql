@@ -62,6 +62,11 @@ comment on table public.exams is 'Teacher-owned exam metadata. Multi-tenant via 
 --                           (e.g. ["a) ...","b) ...","c) ...","d) ..."])
 --         SHORT_ANSWER : bare string     e.g.  "1.5"
 --         ESSAY        : null  (never auto-graded)
+--
+--      NULLABLE on purpose: an ESSAY (or an unresolved MCQ) has no key, and the
+--      teacher client writes through PostgREST, where a JSON null becomes SQL
+--      NULL. A NOT NULL constraint here would reject every such insert with
+--      SQLSTATE 23502. Raw SQL could store 'null'::jsonb, but PostgREST cannot.
 -- ----------------------------------------------------------------------------
 create table if not exists public.question_bank (
     id              uuid        primary key default gen_random_uuid(),
@@ -70,7 +75,7 @@ create table if not exists public.question_bank (
     question_text   text        not null,
     question_type   varchar(30) not null,
     options         jsonb       not null default '[]'::jsonb,
-    correct_answer  jsonb       not null,
+    correct_answer  jsonb,
     explanation     text,
     cognitive_level varchar(50),
     subject         varchar(100),
@@ -838,7 +843,7 @@ commit;
 --      '[]'::jsonb, '"3"'::jsonb, 2),
 --     (:'teacher_uid', (select id from public.exams where code='ABC123'),
 --      'Trình bày cảm nhận của em về quê hương.', 'ESSAY',
---      '[]'::jsonb, 'null'::jsonb, 3);
+--      '[]'::jsonb, null, 3);
 --
 --   insert into public.students (student_code, full_name, class_name, exam_code)
 --   values ('HS001', 'Nguyễn Văn A', '12A1', 'ABC123');
@@ -866,7 +871,7 @@ commit;
 --   select public.record_student_heartbeat('ABC123', 'HS001', '<session_token>'::uuid, 1, 1, 0, 0);
 --   -- -> {"success": true, "message": "OK", "server_time": "..."}
 --
--- -- (4) Submit — server-side scoring (MCQ correct, 2/4 T/F, SHORT correct, ESSAY):
+-- -- (4) Submit — server-side scoring (MCQ correct, 4/4 T/F, SHORT correct, ESSAY):
 --   select public.submit_exam_result(
 --            'ABC123', 'HS001', '<session_token>'::uuid,
 --            '[{"questionIndex":0,"selectedIndex":0},
@@ -874,8 +879,8 @@ commit;
 --              {"questionIndex":2,"selectedAnswerText":"3"},
 --              {"questionIndex":3,"selectedAnswerText":"Quê hương em rất đẹp."}]'::jsonb,
 --            '{"blurCount":2,"fullscreenExitCount":0,"elapsedSeconds":1720}'::jsonb);
---   -- Expected: score = 1.0 (MCQ) + 0.25 (2/4 T/F) + 1.0 (SHORT) + 0.0 (ESSAY)
---   --           = 2.25 ; total_questions = 4 ; needs_grading = true
+--   -- Expected: score = 1.0 (MCQ) + 1.0 (4/4 T/F) + 1.0 (SHORT) + 0.0 (ESSAY)
+--   --           = 3.00 ; total_questions = 4 ; needs_grading = true
 --
 -- -- (5) Duplicate submission is rejected:
 --   select public.submit_exam_result('ABC123', 'HS001', '<session_token>'::uuid, '[]'::jsonb, '{}'::jsonb);
