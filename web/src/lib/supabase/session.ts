@@ -10,13 +10,17 @@ import { NextResponse, type NextRequest } from 'next/server';
  *
  * Invoked from src/proxy.ts (Next.js 16 replaced the `middleware` convention
  * with `proxy`).
+ *
+ * Key selection mirrors client.ts/server.ts so the refreshed session is usable
+ * by both.
  */
 export async function updateSession(request: NextRequest) {
   let response = NextResponse.next({ request });
 
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ??
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
       cookies: {
         getAll() {
