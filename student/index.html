@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="robots" content="noindex, nofollow" />
+  <meta name="color-scheme" content="light dark" />
+  <title>Phòng làm bài</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <a class="skip-link" href="#questionHost">Bỏ qua tới nội dung câu hỏi</a>
+
+  <!-- Reading progress -->
+  <div id="progressWrap" class="progress-wrap hidden" aria-hidden="true">
+    <div id="progressBar" class="progress-bar"></div>
+  </div>
+
+  <!-- Exam header: identity + timer + navigation -->
+  <header id="examHeader" class="exam-header hidden">
+    <div class="exam-header__left">
+      <span id="examTitle" class="exam-header__title"></span>
+      <span id="qCounter" class="exam-header__counter"></span>
+    </div>
+    <div class="exam-header__right">
+      <span id="metricFlags" class="metric-flag hidden" title="Câu đã đánh dấu"></span>
+      <span id="timerDisplay" class="timer" role="timer" aria-label="Thời gian còn lại">--:--</span>
+      <button id="themeBtn" type="button" class="icon-btn" aria-label="Đổi giao diện sáng/tối"></button>
+      <button id="navToggleBtn" type="button" class="icon-btn" aria-label="Danh sách câu hỏi" aria-haspopup="dialog"></button>
+    </div>
+  </header>
+
+  <main class="app">
+    <!-- ================= LOGIN ================= -->
+    <section id="loginScreen" class="screen login" aria-labelledby="loginHeading">
+      <div class="login__card">
+        <div class="login__brand" aria-hidden="true">ADQS</div>
+        <h1 id="loginHeading" class="login__title">Vào phòng làm bài</h1>
+        <p class="login__subtitle">
+          Nhập chính xác thông tin đã được giáo viên ghi trong danh sách dự thi.
+        </p>
+
+        <form id="loginForm" class="login__form" novalidate>
+          <div class="field">
+            <label for="examCode">Mã đề thi</label>
+            <input id="examCode" name="examCode" type="text" inputmode="numeric"
+                   autocomplete="off" maxlength="6" placeholder="6 chữ số" required />
+          </div>
+          <div class="field">
+            <label for="studentCode">Mã học sinh</label>
+            <input id="studentCode" name="studentCode" type="text"
+                   autocomplete="off" maxlength="50" placeholder="VD: HS001" required />
+          </div>
+          <div class="field">
+            <label for="fullName">Họ và tên</label>
+            <input id="fullName" name="fullName" type="text"
+                   autocomplete="off" maxlength="150" placeholder="VD: Nguyễn Văn A" required />
+          </div>
+          <div class="field">
+            <label for="className">Lớp</label>
+            <input id="className" name="className" type="text"
+                   autocomplete="off" maxlength="50" placeholder="VD: 12A1" required />
+          </div>
+
+          <p id="loginError" class="alert alert--error hidden" role="alert"></p>
+
+          <button id="startBtn" type="submit" class="btn btn--primary btn--block">
+            Vào làm bài
+          </button>
+          <p class="login__note">
+            Bài thi yêu cầu chế độ toàn màn hình và ghi nhận việc rời màn hình.
+          </p>
+        </form>
+      </div>
+    </section>
+
+    <!-- ================= QUIZ ================= -->
+    <section id="quizScreen" class="screen quiz hidden" aria-label="Nội dung bài thi">
+      <div id="questionHost" class="question-host"></div>
+
+      <div id="actionBar" class="action-bar">
+        <button id="prevBtn" type="button" class="btn btn--ghost">&larr; Câu trước</button>
+        <button id="confirmBtn" type="button" class="btn btn--primary hidden">Xác nhận</button>
+        <button id="nextBtn" type="button" class="btn btn--primary hidden">Câu tiếp theo &rarr;</button>
+      </div>
+    </section>
+
+    <!-- ================= RESULT ================= -->
+    <section id="resultScreen" class="screen result hidden" aria-labelledby="resultHeading">
+      <div class="result__ring-wrap">
+        <svg class="result__ring" viewBox="0 0 200 200" aria-hidden="true">
+          <circle class="result__ring-track" cx="100" cy="100" r="86"></circle>
+          <circle id="ringValue" class="result__ring-value" cx="100" cy="100" r="86"></circle>
+        </svg>
+        <div class="result__ring-label">
+          <span id="resultPercent" class="result__percent">0%</span>
+          <span class="result__percent-caption">Điểm tự động</span>
+        </div>
+      </div>
+
+      <h1 id="resultHeading" class="result__heading"></h1>
+      <p id="resultScore" class="result__score" role="status"></p>
+      <p id="resultSub" class="result__sub"></p>
+      <p id="resultPending" class="result__pending hidden"></p>
+      <p id="resultElapsed" class="result__elapsed"></p>
+
+      <div id="resultNotice" class="alert hidden"></div>
+      <button id="restartBtn" type="button" class="btn btn--primary btn--block">Làm bài khác</button>
+    </section>
+  </main>
+
+  <!-- ================= NAVIGATION PANEL ================= -->
+  <div id="navBackdrop" class="nav-backdrop hidden"></div>
+  <aside id="navPanel" class="nav-panel" role="dialog" aria-modal="true"
+         aria-labelledby="navTitle" aria-hidden="true">
+    <div class="nav-panel__head">
+      <h2 id="navTitle" class="nav-panel__title">Danh sách câu hỏi</h2>
+      <button id="navCloseBtn" type="button" class="icon-btn" aria-label="Đóng danh sách câu hỏi"></button>
+    </div>
+    <p id="navProgress" class="nav-panel__progress"></p>
+    <ul id="navLegend" class="nav-panel__legend">
+      <li><span class="dot dot--answered"></span>Đã trả lời</li>
+      <li><span class="dot dot--flagged"></span>Đánh dấu</li>
+      <li><span class="dot dot--current"></span>Đang làm</li>
+    </ul>
+    <div id="navGrid" class="nav-grid"></div>
+  </aside>
+
+  <!-- ================= BLOCKING OVERLAYS ================= -->
+  <!-- Fullscreen lost -->
+  <div id="fullscreenOverlay" class="overlay hidden" role="alertdialog" aria-modal="true"
+       aria-labelledby="fsHeading" aria-describedby="fsBody">
+    <div class="overlay__card">
+      <div class="overlay__icon overlay__icon--warn" aria-hidden="true">!</div>
+      <h2 id="fsHeading" class="overlay__title">Chế độ toàn màn hình đã bị tắt</h2>
+      <p id="fsBody" class="overlay__body">
+        Bài thi yêu cầu làm bài ở chế độ toàn màn hình. Hành vi này đã được ghi nhận.
+        Nhấn nút bên dưới để quay lại và tiếp tục làm bài.
+      </p>
+      <button id="fsResumeBtn" type="button" class="btn btn--primary btn--block">
+        Quay lại toàn màn hình
+      </button>
+    </div>
+  </div>
+
+  <!-- Session taken over / expired -->
+  <div id="evictedOverlay" class="overlay hidden" role="alertdialog" aria-modal="true"
+       aria-labelledby="evictedHeading" aria-describedby="evictedBody">
+    <div class="overlay__card">
+      <div class="overlay__icon overlay__icon--danger" aria-hidden="true">!</div>
+      <h2 id="evictedHeading" class="overlay__title">Tài khoản của bạn đã được đăng nhập từ một thiết bị khác!</h2>
+      <p id="evictedBody" class="overlay__body">
+        Phiên làm bài hiện tại đã bị dừng để bảo vệ tính công bằng của bài thi.
+        Vui lòng liên hệ giáo viên coi thi nếu đây là nhầm lẫn.
+      </p>
+      <button id="evictedBtn" type="button" class="btn btn--primary btn--block">Đóng</button>
+    </div>
+  </div>
+
+  <!-- Submit confirmation -->
+  <div id="confirmOverlay" class="overlay hidden" role="dialog" aria-modal="true"
+       aria-labelledby="submitHeading" aria-describedby="submitBody">
+    <div class="overlay__card">
+      <h2 id="submitHeading" class="overlay__title">Nộp bài?</h2>
+      <p id="submitBody" class="overlay__body"></p>
+      <div class="overlay__actions">
+        <button id="submitCancelBtn" type="button" class="btn btn--ghost">Tiếp tục làm bài</button>
+        <button id="submitConfirmBtn" type="button" class="btn btn--primary">Nộp bài</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Busy indicator -->
+  <div id="loadingOverlay" class="overlay overlay--busy hidden" role="status" aria-live="polite">
+    <div class="spinner" aria-hidden="true"></div>
+    <p id="loadingText" class="overlay__body">Đang xử lý…</p>
+  </div>
+
+  <!-- Non-blocking toast -->
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <script src="./config.js"></script>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
