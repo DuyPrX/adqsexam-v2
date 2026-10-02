@@ -20,7 +20,7 @@ import { stripMarkers } from '../parser/xml-preprocessor';
  * Resolution order (Phase 5.3): explicit `modelName` option -> the
  * `DEFAULT_AI_MODEL` Worker binding -> this constant.
  */
-export const DEFAULT_MODEL = 'gemini-2.5-flash';
+export const DEFAULT_MODEL = 'gemini-3.5-flash-lite';
 
 /**
  * Resolves which model to call, applying the documented fallback priority.
