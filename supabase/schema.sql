@@ -45,8 +45,16 @@ create table if not exists public.exams (
     title            varchar(255) not null,
     duration_minutes integer      not null default 45,
     is_active        boolean      not null default true,
+    -- Scheduling window (Phase 5.4). NULL = unbounded on that side.
+    starts_at        timestamptz,
+    ends_at          timestamptz,
     created_at       timestamptz  not null default now()
 );
+
+-- Idempotency: databases created before Phase 5.4 lack the scheduling columns,
+-- and `create table if not exists` would silently skip them.
+alter table public.exams add column if not exists starts_at timestamptz;
+alter table public.exams add column if not exists ends_at   timestamptz;
 
 comment on table public.exams is 'Teacher-owned exam metadata. Multi-tenant via user_id + RLS.';
 
@@ -305,11 +313,14 @@ revoke all on public.proctoring_snapshots from anon;
 
 -- ----------------------------------------------------------------------------
 -- C.1  verify_and_acquire_session
---      Whitelist verification + single-device lock + reload tolerance.
+--      Whitelist verification + scheduling window + single-device lock + reload.
 --      Returns: { success, session_token, message }
 --        SESSION_ACQUIRED        -> brand new session
 --        SESSION_RESUMED         -> same device reloaded (token matched)
 --        SESSION_ACTIVE_ELSEWHERE-> another live device holds the lock
+--        EXAM_INACTIVE           -> teacher closed the exam (is_active = false)
+--        EXAM_NOT_STARTED        -> now() is before starts_at
+--        EXAM_EXPIRED            -> now() is after ends_at
 -- ----------------------------------------------------------------------------
 create or replace function public.verify_and_acquire_session(
     p_exam_code      varchar,
@@ -334,8 +345,18 @@ begin
     if not found then
         return jsonb_build_object('success', false, 'message', 'EXAM_NOT_FOUND');
     end if;
+
+    -- 1.a Teacher open/close switch.
     if v_exam.is_active is not true then
-        return jsonb_build_object('success', false, 'message', 'EXAM_CLOSED');
+        return jsonb_build_object('success', false, 'message', 'EXAM_INACTIVE');
+    end if;
+
+    -- 1.b Scheduling window. A NULL bound means "unbounded on that side".
+    if v_exam.starts_at is not null and now() < v_exam.starts_at then
+        return jsonb_build_object('success', false, 'message', 'EXAM_NOT_STARTED');
+    end if;
+    if v_exam.ends_at is not null and now() > v_exam.ends_at then
+        return jsonb_build_object('success', false, 'message', 'EXAM_EXPIRED');
     end if;
 
     -- 2. Candidate must be whitelisted for this exam.
@@ -923,6 +944,163 @@ end;
 $$;
 
 
+-- ----------------------------------------------------------------------------
+-- C.8  update_exam_questions_safe  (teacher — authenticated, Phase 5.4)
+--      Post-creation question CRUD with an integrity guard.
+--
+--      Ownership is checked inside the function (auth.uid() = exams.user_id)
+--      because SECURITY DEFINER bypasses RLS; the grant is `authenticated` only.
+--
+--      Behaviour depends on whether the exam has any submission:
+--
+--        * SUBMISSIONS EXIST -> immutable structure. A count change (=> a
+--          deletion or an addition) or an ordered type change is rejected with
+--          STRUCTURAL_CHANGE_BLOCKED. Only in-place content edits are applied
+--          (question_text / options / correct_answer / explanation) so already
+--          scored answers keep pointing at the same question.
+--
+--        * ZERO SUBMISSIONS  -> safe to rewrite the whole bank: the existing
+--          rows are deleted and the incoming array is re-inserted with a clean
+--          contiguous 1-based `position`.
+--
+--      p_questions shape (array):
+--        [{ position?, question_type, question_text, options,
+--           correct_answer?, explanation? }, ...]
+-- ----------------------------------------------------------------------------
+create or replace function public.update_exam_questions_safe(
+    p_exam_code varchar,
+    p_questions jsonb
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+    v_exam_id     uuid;
+    v_owner       uuid;
+    v_submissions integer;
+    v_existing    integer;
+    v_incoming    integer;
+    v_item        jsonb;
+    v_idx         integer := 0;
+    v_exists_type text;
+    v_in_type     text;
+    i             integer;
+begin
+    -- 0. Payload must be a JSON array.
+    if p_questions is null or jsonb_typeof(p_questions) <> 'array' then
+        return jsonb_build_object('success', false, 'message', 'INVALID_PAYLOAD');
+    end if;
+    v_incoming := jsonb_array_length(p_questions);
+
+    -- 1. Exam must exist and belong to the caller.
+    select e.id, e.user_id into v_exam_id, v_owner
+      from public.exams e
+     where e.code = p_exam_code;
+    if not found then
+        return jsonb_build_object('success', false, 'message', 'EXAM_NOT_FOUND');
+    end if;
+    if auth.uid() is null or auth.uid() <> v_owner then
+        return jsonb_build_object('success', false, 'message', 'NOT_AUTHORIZED');
+    end if;
+
+    -- 2. Has this exam been submitted to?
+    select count(*) into v_submissions
+      from public.exam_results r
+     where r.exam_code = p_exam_code;
+
+    if v_submissions > 0 then
+        select count(*) into v_existing
+          from public.question_bank q
+         where q.exam_id = v_exam_id;
+
+        -- Structural guard: the question count must not change.
+        if v_existing <> v_incoming then
+            return jsonb_build_object(
+                'success', false,
+                'message', 'STRUCTURAL_CHANGE_BLOCKED',
+                'detail',  'Đề thi đã có lượt nộp bài, chỉ có thể sửa nội dung câu hỏi.'
+            );
+        end if;
+
+        -- Structural guard: every ordered position must exist with the same type.
+        -- Validate ALL positions BEFORE applying any update, so a mismatch at the
+        -- last index cannot leave earlier rows already modified (a plpgsql
+        -- `return` does not roll back the transaction).
+        for i in 0 .. v_incoming - 1 loop
+            v_item    := p_questions -> i;
+            v_in_type := upper(coalesce(v_item ->> 'question_type', ''));
+
+            select upper(q.question_type) into v_exists_type
+              from public.question_bank q
+             where q.exam_id = v_exam_id
+               and q.position = i + 1;
+            if not found or v_exists_type <> v_in_type then
+                return jsonb_build_object(
+                    'success', false,
+                    'message', 'STRUCTURAL_CHANGE_BLOCKED',
+                    'detail',  'Đề thi đã có lượt nộp bài, chỉ có thể sửa nội dung câu hỏi.'
+                );
+            end if;
+        end loop;
+
+        -- Apply pass: structure is proven intact, so only content is touched.
+        for i in 0 .. v_incoming - 1 loop
+            v_item := p_questions -> i;
+
+            update public.question_bank q
+               set question_text  = coalesce(v_item ->> 'question_text', q.question_text),
+                   options        = coalesce(v_item -> 'options', q.options),
+                   correct_answer = nullif(v_item -> 'correct_answer', 'null'::jsonb),
+                   explanation    = v_item ->> 'explanation'
+             where q.exam_id = v_exam_id
+               and q.position = i + 1;
+        end loop;
+
+        return jsonb_build_object(
+            'success',     true,
+            'message',     'CONTENT_UPDATED',
+            'updated',     v_incoming,
+            'submissions', v_submissions
+        );
+    end if;
+
+    -- 3. Zero submissions -> full rewrite with contiguous 1-based positions.
+    delete from public.question_bank q where q.exam_id = v_exam_id;
+
+    for i in 0 .. v_incoming - 1 loop
+        v_item := p_questions -> i;
+        v_idx  := v_idx + 1;
+
+        insert into public.question_bank (
+            user_id, exam_id, question_text, question_type,
+            options, correct_answer, explanation, position
+        ) values (
+            v_owner,
+            v_exam_id,
+            coalesce(v_item ->> 'question_text', ''),
+            upper(coalesce(v_item ->> 'question_type', 'MULTIPLE_CHOICE')),
+            coalesce(v_item -> 'options', '[]'::jsonb),
+            -- `->` yields JSONB 'null' for an explicit JSON null; nullif maps it
+            -- back to SQL NULL so the column matches the PostgREST saveExam path
+            -- (JS null -> SQL NULL). `#>> '{}'` on JSONB 'null' would be 'null',
+            -- which would corrupt the SHORT_ANSWER comparison in submit_exam_result.
+            nullif(v_item -> 'correct_answer', 'null'::jsonb),
+            v_item ->> 'explanation',
+            v_idx
+        );
+    end loop;
+
+    return jsonb_build_object(
+        'success',     true,
+        'message',     'REPLACED',
+        'inserted',    v_incoming,
+        'submissions', 0
+    );
+end;
+$$;
+
+
 -- ============================================================================
 -- SECTION D — EXECUTE GRANTS
 -- ----------------------------------------------------------------------------
@@ -935,6 +1113,7 @@ revoke all on function public.submit_exam_result(varchar, varchar, uuid, jsonb, 
 revoke all on function public.record_proctoring_snapshot(varchar, varchar, uuid, text)                     from public;
 revoke all on function public.get_certificate_verification(uuid)                                          from public;
 revoke all on function public.verify_student_practice(varchar, varchar)                                    from public;
+revoke all on function public.update_exam_questions_safe(varchar, jsonb)                                   from public;
 
 grant execute on function public.verify_and_acquire_session(varchar, varchar, varchar, varchar, text, uuid)   to anon, authenticated;
 grant execute on function public.record_student_heartbeat(varchar, varchar, uuid, integer, integer, integer, integer) to anon, authenticated;
@@ -943,6 +1122,8 @@ grant execute on function public.submit_exam_result(varchar, varchar, uuid, json
 grant execute on function public.record_proctoring_snapshot(varchar, varchar, uuid, text)                     to anon, authenticated;
 grant execute on function public.get_certificate_verification(uuid)                                           to anon, authenticated;
 grant execute on function public.verify_student_practice(varchar, varchar)                                     to anon, authenticated;
+-- Teacher-only: never exposed to anon (ownership is enforced inside the body).
+grant execute on function public.update_exam_questions_safe(varchar, jsonb)                                    to authenticated;
 
 
 -- ============================================================================

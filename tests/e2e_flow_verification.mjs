@@ -17,6 +17,12 @@
  *      valid, while a failing result and an unknown UUID verify as invalid.
  *  11. Self-practice authorization (Phase 5.2): verify_student_practice accepts
  *      a rostered (student_code, class_name) pair and rejects everything else.
+ *  12. Scheduling window (Phase 5.4): verify_and_acquire_session rejects before
+ *      starts_at / after ends_at / when is_active = false, and accepts inside.
+ *  13. Safe question CRUD (Phase 5.4): update_exam_questions_safe rewrites the
+ *      bank freely before any submission, then locks structure afterwards.
+ *  14. Multi-variant sub-sampling (Phase 5.4): generateExamVariants draws K of N
+ *      with contiguous 1..K positions, unique codes, and synced answer keys.
  *
  * Usage:
  *   node v2/tests/e2e_flow_verification.mjs
@@ -44,6 +50,28 @@ const { createClient } = await import(
   new URL('../web/node_modules/@supabase/supabase-js/dist/index.mjs', import.meta.url).href
 );
 
+// Phase 5.4 Step 14 exercises the web app's TypeScript shuffle module directly.
+// Node strips types natively, but not the extensionless `./utils` import inside
+// it — so register a tiny resolver that retries with a `.ts` suffix.
+const { register } = await import('node:module');
+register(
+  `data:text/javascript,${encodeURIComponent(`
+export async function resolve(specifier, context, nextResolve) {
+  try {
+    return await nextResolve(specifier, context);
+  } catch (error) {
+    if (specifier.startsWith('.') && !/\\.[cm]?[jt]s$/.test(specifier)) {
+      return nextResolve(specifier + '.ts', context);
+    }
+    throw error;
+  }
+}
+`)}`,
+);
+const { generateExamVariants } = await import(
+  new URL('../web/src/lib/shuffle.ts', import.meta.url).href
+);
+
 const TEACHER = { email: 'e2e.teacher@adqsexam.local', password: 'e2e-password-123' };
 const EXAM = {
   code: 'E2E' + String(Math.floor(100 + Math.random() * 900)), // 6 chars
@@ -59,6 +87,22 @@ const FAILING_STUDENT = {
   code: 'E2EHS02',
   fullName: 'Trần Thị E2E',
   className: '12E2E',
+};
+// Phase 5.4 — dedicated actors so the scheduling / CRUD steps stay isolated.
+const SCHED_EXAM = {
+  code: 'SCH' + String(Math.floor(100 + Math.random() * 900)),
+  title: 'E2E Scheduling Window',
+  duration: 30,
+};
+const SCHED_STUDENT = {
+  code: 'E2ESCH01',
+  fullName: 'Lê Văn Lịch',
+  className: '12SCH',
+};
+const EDIT_EXAM = {
+  code: 'EDT' + String(Math.floor(100 + Math.random() * 900)),
+  title: 'E2E Question CRUD',
+  duration: 30,
 };
 const EXPECTED_SCORE = 2.5; // MCQ 1.0 + TRUE_FALSE 3/4 = 0.5 + SHORT_ANSWER 1.0
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -528,9 +572,343 @@ async function main() {
   check('empty credentials are rejected', practiceEmpty.data?.authorized === false,
     JSON.stringify(practiceEmpty.data));
 
+  /* --- 12. Scheduling window (Phase 5.4) -------------------------------- */
+  step(12, 'Scheduling window enforced by verify_and_acquire_session');
+
+  const acquireOn = async (suffix) => {
+    // A fresh candidate per probe: `active_sessions` has a SELECT-only teacher
+    // policy, so a leftover session cannot be deleted from here and would
+    // otherwise surface SESSION_ACTIVE_ELSEWHERE instead of the window verdict.
+    const code = `E2ESCH-${suffix}`.toUpperCase();
+    await teacher.from('students').upsert(
+      {
+        student_code: code,
+        full_name: SCHED_STUDENT.fullName,
+        class_name: SCHED_STUDENT.className,
+        exam_code: SCHED_EXAM.code,
+      },
+      { onConflict: 'student_code,exam_code' },
+    );
+    const res = await student.rpc('verify_and_acquire_session', {
+      p_exam_code: SCHED_EXAM.code,
+      p_student_code: code,
+      p_full_name: SCHED_STUDENT.fullName,
+      p_class_name: SCHED_STUDENT.className,
+      p_device_info: `e2e-sched/${suffix}`,
+      p_existing_token: null,
+    });
+    return res.data;
+  };
+
+  // Re-create the scheduling exam fresh (idempotent re-runs).
+  await teacher.from('exams').delete().eq('code', SCHED_EXAM.code);
+  const schedInsert = await teacher
+    .from('exams')
+    .insert({
+      user_id: teacherId,
+      code: SCHED_EXAM.code,
+      title: SCHED_EXAM.title,
+      duration_minutes: SCHED_EXAM.duration,
+      is_active: true,
+      starts_at: null,
+      ends_at: null,
+    })
+    .select('id')
+    .single();
+  check('scheduling exam created', !schedInsert.error, schedInsert.error?.message);
+
+  // Sanity: with no window and is_active, login is allowed.
+  const schedBaseline = await acquireOn('baseline');
+  check('open exam with no window accepts login',
+    schedBaseline?.success === true, JSON.stringify(schedBaseline));
+
+  // Not started: starts_at in the future.
+  const future = new Date(Date.now() + 3_600_000).toISOString();
+  await teacher.from('exams').update({ starts_at: future }).eq('code', SCHED_EXAM.code);
+  const beforeStart = await acquireOn('before');
+  check('login before starts_at is rejected',
+    beforeStart?.success === false && beforeStart?.message === 'EXAM_NOT_STARTED',
+    JSON.stringify(beforeStart));
+
+  // Expired: ends_at in the past.
+  await teacher
+    .from('exams')
+    .update({ starts_at: null, ends_at: new Date(Date.now() - 3_600_000).toISOString() })
+    .eq('code', SCHED_EXAM.code);
+  const afterEnd = await acquireOn('after');
+  check('login after ends_at is rejected',
+    afterEnd?.success === false && afterEnd?.message === 'EXAM_EXPIRED',
+    JSON.stringify(afterEnd));
+
+  // Inside the window: past start, future end.
+  await teacher
+    .from('exams')
+    .update({
+      starts_at: new Date(Date.now() - 3_600_000).toISOString(),
+      ends_at: new Date(Date.now() + 3_600_000).toISOString(),
+    })
+    .eq('code', SCHED_EXAM.code);
+  const inWindow = await acquireOn('inside');
+  check('login inside the window is accepted',
+    inWindow?.success === true, JSON.stringify(inWindow));
+
+  // Teacher closed the exam regardless of the window.
+  await teacher.from('exams').update({ is_active: false }).eq('code', SCHED_EXAM.code);
+  const inactive = await acquireOn('inactive');
+  check('login with is_active = false is rejected as EXAM_INACTIVE',
+    inactive?.success === false && inactive?.message === 'EXAM_INACTIVE',
+    JSON.stringify(inactive));
+
+  /* --- 13. Safe question CRUD (Phase 5.4) ------------------------------- */
+  step(13, 'update_exam_questions_safe before and after a submission');
+
+  await teacher.from('exams').delete().eq('code', EDIT_EXAM.code);
+  const editInsert = await teacher
+    .from('exams')
+    .insert({
+      user_id: teacherId,
+      code: EDIT_EXAM.code,
+      title: EDIT_EXAM.title,
+      duration_minutes: EDIT_EXAM.duration,
+    })
+    .select('id')
+    .single();
+  check('edit exam created', !editInsert.error, editInsert.error?.message);
+  const editExamId = editInsert.data?.id;
+
+  const seedBank = async (count) => {
+    await teacher.from('question_bank').delete().eq('exam_id', editExamId);
+    const rows = Array.from({ length: count }, (_, i) => ({
+      user_id: teacherId,
+      exam_id: editExamId,
+      question_text: `Câu gốc ${i + 1}`,
+      question_type: 'MULTIPLE_CHOICE',
+      options: ['A', 'B', 'C', 'D'],
+      correct_answer: 0,
+      explanation: null,
+      position: i + 1,
+    }));
+    return teacher.from('question_bank').insert(rows);
+  };
+
+  await seedBank(5);
+
+  // (a) No submissions: a full rewrite is allowed — drop to 3 questions.
+  const beforeSubmit = await teacher.rpc('update_exam_questions_safe', {
+    p_exam_code: EDIT_EXAM.code,
+    p_questions: Array.from({ length: 3 }, (_, i) => ({
+      position: i + 1,
+      question_type: 'MULTIPLE_CHOICE',
+      question_text: `Câu sửa ${i + 1}`,
+      options: ['A', 'B', 'C', 'D'],
+      correct_answer: 1,
+      explanation: null,
+    })),
+  });
+  check('pre-submission rewrite of 5 -> 3 is allowed',
+    beforeSubmit.data?.success === true, JSON.stringify(beforeSubmit.data ?? beforeSubmit.error));
+  check('pre-submission rewrite reports REPLACED',
+    beforeSubmit.data?.message === 'REPLACED', String(beforeSubmit.data?.message));
+
+  const afterRewrite = await teacher
+    .from('question_bank')
+    .select('position, question_text, correct_answer')
+    .eq('exam_id', editExamId)
+    .order('position', { ascending: true });
+  check('rewrite leaves exactly 3 rows', afterRewrite.data?.length === 3,
+    String(afterRewrite.data?.length));
+  check('rewrite renumbers positions 1..3',
+    JSON.stringify(afterRewrite.data?.map((r) => r.position)) === '[1,2,3]',
+    JSON.stringify(afterRewrite.data?.map((r) => r.position)));
+  check('rewrite applied the new content',
+    afterRewrite.data?.[0]?.question_text === 'Câu sửa 1',
+    String(afterRewrite.data?.[0]?.question_text));
+
+  // A JSON null key must land as SQL NULL, not the JSONB literal 'null'
+  // (which `#>> '{}'` would render as the string "null" and corrupt scoring).
+  const nullKeyRewrite = await teacher.rpc('update_exam_questions_safe', {
+    p_exam_code: EDIT_EXAM.code,
+    p_questions: Array.from({ length: 3 }, (_, i) => ({
+      position: i + 1,
+      question_type: 'MULTIPLE_CHOICE',
+      question_text: `Câu sửa ${i + 1}`,
+      options: ['A', 'B', 'C', 'D'],
+      correct_answer: null,
+      explanation: null,
+    })),
+  });
+  check('rewrite with a null key is accepted',
+    nullKeyRewrite.data?.success === true, JSON.stringify(nullKeyRewrite.data));
+  const nullKeyRow = await teacher
+    .from('question_bank')
+    .select('correct_answer')
+    .eq('exam_id', editExamId)
+    .limit(1)
+    .maybeSingle();
+  check('JSON null key is stored as SQL NULL (not JSONB "null")',
+    nullKeyRow.data?.correct_answer === null, JSON.stringify(nullKeyRow.data?.correct_answer));
+
+  // Restore a real key for the post-submission phase.
+  await seedBank(3);
+
+  // (b) Now create a submission so the structure freezes.
+  await teacher.from('students').insert({
+    student_code: SCHED_STUDENT.code,
+    full_name: SCHED_STUDENT.fullName,
+    class_name: SCHED_STUDENT.className,
+    exam_code: EDIT_EXAM.code,
+  });
+  const editAcquire = await student.rpc('verify_and_acquire_session', {
+    p_exam_code: EDIT_EXAM.code,
+    p_student_code: SCHED_STUDENT.code,
+    p_full_name: SCHED_STUDENT.fullName,
+    p_class_name: SCHED_STUDENT.className,
+    p_device_info: 'e2e-edit/1.0',
+    p_existing_token: null,
+  });
+  check('edit-exam candidate acquired a session',
+    editAcquire.data?.success === true, JSON.stringify(editAcquire.data ?? editAcquire.error));
+  const editSubmit = await student.rpc('submit_exam_result', {
+    p_exam_code: EDIT_EXAM.code,
+    p_student_code: SCHED_STUDENT.code,
+    p_session_token: editAcquire.data?.session_token,
+    p_answers: [
+      { questionIndex: 0, selectedIndex: 1 },
+      { questionIndex: 1, selectedIndex: 1 },
+      { questionIndex: 2, selectedIndex: 1 },
+    ],
+    p_metrics: {},
+  });
+  check('edit-exam submission accepted', editSubmit.data?.success === true,
+    JSON.stringify(editSubmit.data ?? editSubmit.error));
+
+  const questionPayload = (count) =>
+    Array.from({ length: count }, (_, i) => ({
+      position: i + 1,
+      question_type: 'MULTIPLE_CHOICE',
+      question_text: `Câu sau nộp ${i + 1}`,
+      options: ['A', 'B', 'C', 'D'],
+      correct_answer: 2,
+      explanation: 'giải thích mới',
+    }));
+
+  // (c) Deletion (a count change) must be rejected.
+  const deleteBlocked = await teacher.rpc('update_exam_questions_safe', {
+    p_exam_code: EDIT_EXAM.code,
+    p_questions: questionPayload(2),
+  });
+  check('deletion after submission is blocked',
+    deleteBlocked.data?.success === false
+      && deleteBlocked.data?.message === 'STRUCTURAL_CHANGE_BLOCKED',
+    JSON.stringify(deleteBlocked.data));
+  check('block carries a Vietnamese detail message',
+    typeof deleteBlocked.data?.detail === 'string' && deleteBlocked.data.detail.length > 0,
+    String(deleteBlocked.data?.detail));
+
+  // (d) Addition (count change) must also be rejected.
+  const addBlocked = await teacher.rpc('update_exam_questions_safe', {
+    p_exam_code: EDIT_EXAM.code,
+    p_questions: questionPayload(4),
+  });
+  check('addition after submission is blocked',
+    addBlocked.data?.success === false
+      && addBlocked.data?.message === 'STRUCTURAL_CHANGE_BLOCKED',
+    JSON.stringify(addBlocked.data));
+
+  // (e) In-place content edit of the same count/type is allowed.
+  const contentEdit = await teacher.rpc('update_exam_questions_safe', {
+    p_exam_code: EDIT_EXAM.code,
+    p_questions: questionPayload(3),
+  });
+  check('in-place content edit after submission is allowed',
+    contentEdit.data?.success === true, JSON.stringify(contentEdit.data ?? contentEdit.error));
+  check('content edit reports CONTENT_UPDATED',
+    contentEdit.data?.message === 'CONTENT_UPDATED', String(contentEdit.data?.message));
+
+  const afterEdit = await teacher
+    .from('question_bank')
+    .select('position, question_text, correct_answer')
+    .eq('exam_id', editExamId)
+    .order('position', { ascending: true });
+  check('content edit applied without changing the count',
+    afterEdit.data?.length === 3, String(afterEdit.data?.length));
+  check('content edit updated the text',
+    afterEdit.data?.[0]?.question_text === 'Câu sau nộp 1',
+    String(afterEdit.data?.[0]?.question_text));
+
+  // (f) A type change at the same count is structural.
+  const typeChanged = questionPayload(3);
+  typeChanged[1].question_type = 'SHORT_ANSWER';
+  const typeBlocked = await teacher.rpc('update_exam_questions_safe', {
+    p_exam_code: EDIT_EXAM.code,
+    p_questions: typeChanged,
+  });
+  check('type change after submission is blocked',
+    typeBlocked.data?.success === false
+      && typeBlocked.data?.message === 'STRUCTURAL_CHANGE_BLOCKED',
+    JSON.stringify(typeBlocked.data));
+
+  // (g) Ownership: an anonymous caller must never be able to edit.
+  const anonEdit = await student.rpc('update_exam_questions_safe', {
+    p_exam_code: EDIT_EXAM.code,
+    p_questions: questionPayload(3),
+  });
+  check('anon cannot call update_exam_questions_safe',
+    !!anonEdit.error || anonEdit.data?.success === false,
+    JSON.stringify(anonEdit.error ?? anonEdit.data));
+
+  /* --- 14. Multi-variant sub-sampling (Phase 5.4) ----------------------- */
+  step(14, 'generateExamVariants subsamples K of N with contiguous positions');
+
+  const pool = Array.from({ length: 5 }, (_, i) => ({
+    position: i + 1,
+    question_type: 'MULTIPLE_CHOICE',
+    question_text: `Pool ${i + 1}`,
+    options: ['A', 'B', 'C', 'D'],
+    correct_answer: 0,
+    explanation: null,
+  }));
+
+  const variants = generateExamVariants(pool, {
+    variantCount: 4,
+    questionCountPerExam: 3,
+    shuffleDistractors: true,
+  });
+
+  check('generates the requested number of variants', variants.length === 4, String(variants.length));
+  check('every variant draws exactly K questions',
+    variants.every((v) => v.questions.length === 3),
+    JSON.stringify(variants.map((v) => v.questions.length)));
+  check('positions are strictly contiguous 1..K',
+    variants.every((v) => JSON.stringify(v.questions.map((q) => q.position)) === '[1,2,3]'),
+    JSON.stringify(variants.map((v) => v.questions.map((q) => q.position))));
+  check('questions within a variant are unique',
+    variants.every((v) => new Set(v.questions.map((q) => q.question_text)).size === 3),
+    JSON.stringify(variants.map((v) => v.questions.map((q) => q.question_text))));
+  check('every variant has a 6-char code',
+    variants.every((v) => typeof v.code === 'string' && v.code.length === 6),
+    JSON.stringify(variants.map((v) => v.code)));
+  check('variant codes are unique',
+    new Set(variants.map((v) => v.code)).size === variants.length,
+    JSON.stringify(variants.map((v) => v.code)));
+
+  // Distractor shuffle must keep correct_answer pointing at the marked content.
+  // Every pool question marks 'A' (index 0), so after a shuffle the key must
+  // still resolve to the option whose text is 'A'.
+  check('distractor shuffle keeps the answer key in sync',
+    variants.every((v) => v.questions.every((q) => q.options[q.correct_answer] === 'A')),
+    JSON.stringify(variants[0]?.questions.map((q) => ({ opts: q.options, key: q.correct_answer }))));
+
+  // The same pool can be sampled without replacement, so K <= N is enforced.
+  const capped = generateExamVariants(pool, { variantCount: 1, questionCountPerExam: 99 });
+  check('K is capped at the pool size N', capped[0]?.questions.length === 5,
+    String(capped[0]?.questions.length));
+
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);
   await teacher.from('exams').delete().eq('code', EXAM.code); // cascades
+  await teacher.from('exams').delete().eq('code', SCHED_EXAM.code);
+  await teacher.from('exams').delete().eq('code', EDIT_EXAM.code);
 
   console.log(`\n${'='.repeat(74)}`);
   console.log(`RESULT: ${passed} passed, ${failed} failed`);

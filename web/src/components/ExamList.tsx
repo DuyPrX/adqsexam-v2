@@ -3,9 +3,10 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
-import { FileText, LogOut, Plus, Users } from 'lucide-react';
+import { FileText, LogOut, Pencil, Plus, Users } from 'lucide-react';
 import { signOut } from '@/lib/supabase/auth';
 import type { ExamRow } from '@/lib/types';
+import { ExamActiveToggle } from './ExamActiveToggle';
 
 interface ExamListProps {
   exams: ExamRow[];
@@ -106,26 +107,27 @@ export function ExamList({ exams, counts, teacherEmail }: ExamListProps) {
                       </span>
                     </td>
                     <td className="px-3 py-2.5">
-                      <span
-                        className={
-                          exam.is_active
-                            ? 'rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-700'
-                            : 'rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-500'
-                        }
-                      >
-                        {exam.is_active ? 'Đang mở' : 'Đã đóng'}
-                      </span>
+                      <ExamActiveToggle examCode={exam.code} initialActive={exam.is_active} />
                     </td>
                     <td className="px-3 py-2.5 text-xs text-slate-500">
                       {new Date(exam.created_at).toLocaleDateString('vi-VN')}
                     </td>
                     <td className="px-3 py-2.5 text-right">
-                      <Link
-                        href={`/exams/${exam.code}/results`}
-                        className="text-xs font-semibold text-slate-700 underline-offset-2 transition hover:text-slate-900 hover:underline"
-                      >
-                        Xem kết quả
-                      </Link>
+                      <div className="flex items-center justify-end gap-3">
+                        <Link
+                          href={`/exams/${exam.code}/edit`}
+                          className="inline-flex items-center gap-1 text-xs font-semibold text-slate-700 underline-offset-2 transition hover:text-slate-900 hover:underline"
+                        >
+                          <Pencil size={12} />
+                          Sửa
+                        </Link>
+                        <Link
+                          href={`/exams/${exam.code}/results`}
+                          className="text-xs font-semibold text-slate-700 underline-offset-2 transition hover:text-slate-900 hover:underline"
+                        >
+                          Xem kết quả
+                        </Link>
+                      </div>
                     </td>
                   </tr>
                 ))}

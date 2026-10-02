@@ -1,4 +1,5 @@
 import type { ExtractedQuestion } from './types';
+import { generateExamCode } from './utils';
 
 /**
  * Client-side Fisher-Yates shuffle (D3: shuffle *logic* is retained in v2, only
@@ -60,4 +61,82 @@ export function shuffleExam(
   questions: readonly ExtractedQuestion[],
 ): ExtractedQuestion[] {
   return shuffleQuestions(questions.map(shuffleOptions));
+}
+
+/* -------------------------------------------------------------------------- */
+/* Multi-variant generation with sub-sampling                                 */
+/* -------------------------------------------------------------------------- */
+
+/** Deep-enough clone: the nested `options` and `correct_answer` arrays are copied. */
+function cloneQuestion(question: ExtractedQuestion): ExtractedQuestion {
+  return {
+    ...question,
+    options: [...question.options],
+    correct_answer: Array.isArray(question.correct_answer)
+      ? [...question.correct_answer]
+      : question.correct_answer,
+  };
+}
+
+export interface ExamVariant {
+  /** Unique 6-digit code reserved for this variant. */
+  code: string;
+  /** 1-based ordinal of the variant within the batch. */
+  index: number;
+  questions: ExtractedQuestion[];
+}
+
+export interface GenerateVariantsOptions {
+  /** Number of exams to produce (default 1). */
+  variantCount?: number;
+  /** K questions drawn from the N-question pool (default N). 1 <= K <= N. */
+  questionCountPerExam?: number;
+  /** Shuffle MCQ options (A/B/C/D) and re-sync `correct_answer`. */
+  shuffleDistractors?: boolean;
+}
+
+/**
+ * Produces `variantCount` independent exams, each drawing K of the N pool
+ * questions (Phase 5.4). Every variant gets:
+ *   - a different random sample of the pool and a different question order,
+ *   - contiguous 1-based `position` values 1..K,
+ *   - a unique 6-digit exam code.
+ *
+ * When `shuffleDistractors` is set, MCQ options are permuted with the answer key
+ * remapped so the marked option keeps pointing at the same content.
+ */
+export function generateExamVariants(
+  questions: readonly ExtractedQuestion[],
+  options: GenerateVariantsOptions = {},
+): ExamVariant[] {
+  const poolSize = questions.length;
+  if (poolSize === 0) return [];
+
+  const variantCount = Math.max(1, Math.floor(options.variantCount ?? 1));
+  const requested = Math.floor(options.questionCountPerExam ?? poolSize);
+  const k = Math.min(poolSize, Math.max(1, requested));
+  const shuffleDistractors = options.shuffleDistractors ?? false;
+
+  const usedCodes = new Set<string>();
+  const nextCode = (): string => {
+    let code = generateExamCode();
+    while (usedCodes.has(code)) code = generateExamCode();
+    usedCodes.add(code);
+    return code;
+  };
+
+  const variants: ExamVariant[] = [];
+  for (let variantIndex = 0; variantIndex < variantCount; variantIndex++) {
+    const sampled = shuffleArray(questions).slice(0, k);
+
+    const prepared = sampled.map((question, index) => {
+      const cloned = cloneQuestion(question);
+      const positioned: ExtractedQuestion = { ...cloned, position: index + 1 };
+      return shuffleDistractors ? shuffleOptions(positioned) : positioned;
+    });
+
+    variants.push({ code: nextCode(), index: variantIndex + 1, questions: prepared });
+  }
+
+  return variants;
 }

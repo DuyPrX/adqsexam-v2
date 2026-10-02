@@ -63,6 +63,9 @@ export interface ExamRow {
   title: string;
   duration_minutes: number;
   is_active: boolean;
+  /** Scheduling window (Phase 5.4). ISO timestamp, or null when unbounded. */
+  starts_at: string | null;
+  ends_at: string | null;
   created_at: string;
 }
 

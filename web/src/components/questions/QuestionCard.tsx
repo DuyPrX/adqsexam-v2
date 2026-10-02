@@ -12,6 +12,8 @@ interface QuestionCardProps {
   onToggle: () => void;
   onChange: (patch: Partial<ExtractedQuestion>) => void;
   onDelete: () => void;
+  /** Set when the exam already has submissions — structure is immutable. */
+  deleteDisabled?: boolean;
 }
 
 /** Max options per question type (TRUE_FALSE is fixed at the 4 sub-items a-d). */
@@ -29,6 +31,7 @@ export function QuestionCard({
   onToggle,
   onChange,
   onDelete,
+  deleteDisabled = false,
 }: QuestionCardProps) {
   const meta = QUESTION_TYPE_META[question.question_type];
   const resolved = hasResolvedAnswer(question);
@@ -91,8 +94,9 @@ export function QuestionCard({
           <button
             type="button"
             onClick={onDelete}
-            title="Xoá câu hỏi"
-            className="rounded-md p-1.5 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600"
+            disabled={deleteDisabled}
+            title={deleteDisabled ? 'Không thể xoá câu hỏi sau khi đã có bài nộp.' : 'Xoá câu hỏi'}
+            className="rounded-md p-1.5 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-slate-400"
           >
             <Trash2 size={15} />
           </button>

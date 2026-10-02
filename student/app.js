@@ -32,7 +32,9 @@ const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingm
 /** Server RPC result codes -> Vietnamese copy shown to the student. */
 const RPC_MESSAGES = {
   EXAM_NOT_FOUND: 'Không tìm thấy mã đề thi này. Vui lòng kiểm tra lại.',
-  EXAM_CLOSED: 'Đề thi này đã đóng. Vui lòng liên hệ giáo viên.',
+  EXAM_INACTIVE: 'Đề thi này đang đóng. Vui lòng liên hệ giáo viên.',
+  EXAM_NOT_STARTED: 'Đề thi chưa đến giờ mở. Vui lòng chờ đến thời gian bắt đầu.',
+  EXAM_EXPIRED: 'Đề thi đã hết thời gian mở. Vui lòng liên hệ giáo viên.',
   STUDENT_NOT_WHITELISTED: 'Mã học sinh không có trong danh sách dự thi của đề này.',
   IDENTITY_MISMATCH: 'Họ tên hoặc lớp không khớp với danh sách dự thi.',
   ALREADY_SUBMITTED: 'Bạn đã nộp bài cho đề thi này rồi.',

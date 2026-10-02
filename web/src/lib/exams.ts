@@ -1,6 +1,6 @@
 import { cache } from 'react';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import type { ExamRow, ExtractedQuestion, RosterEntry } from './types';
+import type { ExamRow, ExtractedQuestion, QuestionBankRow, RosterEntry } from './types';
 import { generateExamCode } from './utils';
 
 /**
@@ -53,7 +53,7 @@ async function insertExamWithFreshCode(
         title,
         duration_minutes: durationMinutes,
       })
-      .select('id, user_id, code, title, duration_minutes, is_active, created_at')
+      .select('id, user_id, code, title, duration_minutes, is_active, starts_at, ends_at, created_at')
       .single<ExamRow>();
 
     if (!error && data) return data;
@@ -118,6 +118,97 @@ export async function saveExam(
   return { exam, savedQuestions: rows.length };
 }
 
+export interface ExamVariantInput {
+  /** Pre-reserved 6-digit code for this variant. */
+  code: string;
+  title: string;
+  questions: ExtractedQuestion[];
+}
+
+export interface SaveExamVariantsInput {
+  durationMinutes: number;
+  variants: ExamVariantInput[];
+}
+
+export interface SaveExamVariantsResult {
+  codes: string[];
+  exams: ExamRow[];
+  savedQuestions: number;
+}
+
+/**
+ * Batch-saves several generated variants (Phase 5.4).
+ *
+ * Each variant carries its own pre-generated code, so unlike `saveExam` there is
+ * no code-collision retry loop — a collision surfaces as an error and the whole
+ * batch is rolled back by deleting whatever was inserted, so a partially
+ * successful multi-variant save can never be left behind.
+ */
+export async function saveExamVariants(
+  supabase: SupabaseClient,
+  input: SaveExamVariantsInput,
+): Promise<SaveExamVariantsResult> {
+  const { durationMinutes, variants } = input;
+
+  if (variants.length === 0) throw new PersistenceError('Chưa có mã đề nào để lưu.');
+  for (const variant of variants) {
+    if (!variant.title.trim()) throw new PersistenceError('Vui lòng nhập tên đề thi.');
+    if (variant.questions.length === 0) {
+      throw new PersistenceError(`Mã đề ${variant.code} chưa có câu hỏi nào.`);
+    }
+  }
+
+  const userId = await requireUserId(supabase);
+
+  const examRows = variants.map((variant) => ({
+    user_id: userId,
+    code: variant.code,
+    title: variant.title.trim(),
+    duration_minutes: durationMinutes,
+  }));
+
+  const examsInsert = await supabase
+    .from('exams')
+    .insert(examRows)
+    .select('id, user_id, code, title, duration_minutes, is_active, starts_at, ends_at, created_at');
+
+  if (examsInsert.error || !examsInsert.data) {
+    throw new PersistenceError(
+      `Không tạo được các mã đề: ${examsInsert.error?.message ?? 'lỗi không xác định'}`,
+    );
+  }
+
+  const exams = examsInsert.data as ExamRow[];
+  const examIdByCode = new Map(exams.map((exam) => [exam.code, exam.id]));
+
+  const questionRows = variants.flatMap((variant) =>
+    variant.questions.map((question, index) => ({
+      user_id: userId,
+      exam_id: examIdByCode.get(variant.code) ?? null,
+      question_text: question.question_text,
+      question_type: question.question_type,
+      options: question.options,
+      correct_answer: question.correct_answer,
+      explanation: question.explanation,
+      position: index + 1,
+    })),
+  );
+
+  const { error } = await supabase.from('question_bank').insert(questionRows);
+
+  if (error) {
+    // Roll the batch back so no orphan exam rows survive a failed question insert.
+    await supabase.from('exams').delete().in('code', variants.map((variant) => variant.code));
+    throw new PersistenceError(`Không lưu được câu hỏi: ${error.message}`);
+  }
+
+  return {
+    codes: variants.map((variant) => variant.code),
+    exams,
+    savedQuestions: questionRows.length,
+  };
+}
+
 /* -------------------------------------------------------------------------- */
 /* Roster                                                                     */
 /* -------------------------------------------------------------------------- */
@@ -168,12 +259,140 @@ export async function saveRoster(
 export const listExams = cache(async (supabase: SupabaseClient): Promise<ExamRow[]> => {
   const { data, error } = await supabase
     .from('exams')
-    .select('id, user_id, code, title, duration_minutes, is_active, created_at')
+    .select('id, user_id, code, title, duration_minutes, is_active, starts_at, ends_at, created_at')
     .order('created_at', { ascending: false });
 
   if (error) throw new PersistenceError(`Không tải được danh sách đề: ${error.message}`);
   return data ?? [];
 });
+
+/** Loads a single owned exam by code (RLS scopes the row to its owner). */
+export const loadExamByCode = cache(
+  async (supabase: SupabaseClient, code: string): Promise<ExamRow | null> => {
+    const { data, error } = await supabase
+      .from('exams')
+      .select('id, user_id, code, title, duration_minutes, is_active, starts_at, ends_at, created_at')
+      .eq('code', code)
+      .maybeSingle<ExamRow>();
+
+    if (error) throw new PersistenceError(`Không tải được đề thi: ${error.message}`);
+    return data;
+  },
+);
+
+/** Loads one exam's question bank, ordered by `position`. */
+export const loadExamQuestions = cache(
+  async (supabase: SupabaseClient, examId: string): Promise<QuestionBankRow[]> => {
+    const { data, error } = await supabase
+      .from('question_bank')
+      .select('*')
+      .eq('exam_id', examId)
+      .order('position', { ascending: true });
+
+    if (error) throw new PersistenceError(`Không tải được câu hỏi: ${error.message}`);
+    return (data ?? []) as QuestionBankRow[];
+  },
+);
+
+export interface ExamMetadataPatch {
+  title?: string;
+  durationMinutes?: number;
+  isActive?: boolean;
+  /** ISO string, or null to clear the bound. */
+  startsAt?: string | null;
+  endsAt?: string | null;
+}
+
+/** Updates exam metadata (Phase 5.4 edit route general-info form). */
+export async function updateExamMetadata(
+  supabase: SupabaseClient,
+  examCode: string,
+  patch: ExamMetadataPatch,
+): Promise<void> {
+  const row: Record<string, unknown> = {};
+  if (patch.title !== undefined) {
+    if (!patch.title.trim()) throw new PersistenceError('Vui lòng nhập tên đề thi.');
+    row.title = patch.title.trim();
+  }
+  if (patch.durationMinutes !== undefined) {
+    if (!Number.isFinite(patch.durationMinutes) || patch.durationMinutes < 1) {
+      throw new PersistenceError('Thời gian làm bài phải lớn hơn 0 phút.');
+    }
+    row.duration_minutes = Math.floor(patch.durationMinutes);
+  }
+  if (patch.isActive !== undefined) row.is_active = patch.isActive;
+  if (patch.startsAt !== undefined) row.starts_at = patch.startsAt;
+  if (patch.endsAt !== undefined) row.ends_at = patch.endsAt;
+
+  if (Object.keys(row).length === 0) return;
+
+  const { data, error } = await supabase
+    .from('exams')
+    .update(row)
+    .eq('code', examCode)
+    .select('code')
+    .maybeSingle<{ code: string }>();
+
+  if (error) throw new PersistenceError(`Không lưu được thông tin đề thi: ${error.message}`);
+  if (!data) throw new PersistenceError('Không tìm thấy đề thi để cập nhật.');
+}
+
+export interface UpdateQuestionsResult {
+  message: string;
+  updated?: number;
+  inserted?: number;
+}
+
+/**
+ * Rewrites an exam's question bank through `update_exam_questions_safe`
+ * (Phase 5.4). The RPC enforces the submissions guard server-side, so a
+ * structural change on an exam that already has submissions is rejected here
+ * with `STRUCTURAL_CHANGE_BLOCKED` rather than silently applied.
+ */
+export async function updateExamQuestionsSafe(
+  supabase: SupabaseClient,
+  examCode: string,
+  questions: ExtractedQuestion[],
+): Promise<UpdateQuestionsResult> {
+  const { data, error } = await supabase.rpc('update_exam_questions_safe', {
+    p_exam_code: examCode,
+    p_questions: questions,
+  });
+
+  if (error) throw new PersistenceError(`Không lưu được câu hỏi: ${error.message}`);
+
+  const result = data as { success: boolean; message: string; detail?: string; updated?: number; inserted?: number };
+  if (!result?.success) {
+    throw new PersistenceError(result?.detail ?? `Không lưu được câu hỏi (${result?.message ?? 'UNKNOWN'}).`);
+  }
+
+  return { message: result.message, updated: result.updated, inserted: result.inserted };
+}
+
+/**
+ * Flips `exams.is_active` for one owned exam (Phase 5.4 quick toggle).
+ *
+ * Deliberately a thin update: RLS already scopes the row to its owner, and the
+ * caller drives the optimistic UI, so no RPC round-trip is needed.
+ * `.select('is_active')` confirms a row actually matched (a zero-row update is
+ * not an error from PostgREST).
+ */
+export async function setExamActive(
+  supabase: SupabaseClient,
+  examCode: string,
+  isActive: boolean,
+): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('exams')
+    .update({ is_active: isActive })
+    .eq('code', examCode)
+    .select('is_active')
+    .maybeSingle<{ is_active: boolean }>();
+
+  if (error) throw new PersistenceError(`Không cập nhật được trạng thái: ${error.message}`);
+  if (!data) throw new PersistenceError('Không tìm thấy đề thi để cập nhật.');
+  return data.is_active;
+}
 
 /** Submission counts per exam code, used by the dashboard table. */
 export const countResultsByExam = cache(

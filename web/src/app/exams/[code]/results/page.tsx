@@ -6,6 +6,7 @@ import { PersistenceError } from '@/lib/exams';
 import type { ExamResultRow, ExamRow, QuestionBankRow, StudentRow } from '@/lib/types';
 import { ResultsDashboard } from '@/components/ResultsDashboard';
 import { LiveProctorPanel } from '@/components/LiveProctorPanel';
+import { ExamActiveToggle } from '@/components/ExamActiveToggle';
 
 export const dynamic = 'force-dynamic';
 
@@ -18,7 +19,7 @@ async function loadExam(code: string): Promise<ExamRow | null> {
   const supabase = await createClient();
   const { data, error } = await supabase
     .from('exams')
-    .select('id, user_id, code, title, duration_minutes, is_active, created_at')
+    .select('id, user_id, code, title, duration_minutes, is_active, starts_at, ends_at, created_at')
     .eq('code', code)
     .maybeSingle<ExamRow>();
 
@@ -85,6 +86,13 @@ export default async function ExamResultsPage({ params }: PageProps) {
             {exam.duration_minutes} phút
           </p>
         </div>
+        <ExamActiveToggle examCode={exam.code} initialActive={exam.is_active} className="ml-auto" />
+        <Link
+          href={`/exams/${exam.code}/edit`}
+          className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+        >
+          Chỉnh sửa
+        </Link>
       </div>
 
       <LiveProctorPanel examCode={exam.code} roster={(rosterResponse.data ?? []) as StudentRow[]} />
