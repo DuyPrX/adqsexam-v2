@@ -27,6 +27,7 @@ const RING_CIRCUMFERENCE = 540;          // 2 * PI * r(86)
 const MAX_TEXT_LENGTH = 20_000;
 const MAX_DEVICE_INFO = 200;
 const CERT_PASS_PERCENT = 80;            // must match schema: score/total >= 0.8
+const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 
 /** Server RPC result codes -> Vietnamese copy shown to the student. */
 const RPC_MESSAGES = {
@@ -66,7 +67,7 @@ function hide(node) { node.classList.add('hidden'); }
 
 const state = {
   supabase: null,
-  mode: 'login',            // login | quiz | result | evicted
+  mode: 'login',            // login | quiz | result | evicted | practice
   // identity
   examCode: '',
   studentCode: '',
@@ -93,6 +94,9 @@ const state = {
   lastBlurAt: 0,
   // certificate (set only for a passing submission)
   certificate: null,
+  // practice mode: questions carry their own correct_answer + explanation
+  practiceQuestions: [],
+  practiceStartedAt: null,
 };
 
 /* =====================================================================
@@ -837,6 +841,9 @@ function onSelectStart(event) {
 }
 
 function bindAntiCheat() {
+  // Zero anti-cheat in self-practice (Phase 5.2 §Business rules 2): no
+  // fullscreen lock, no blur tracking, no context-menu/selection blocking.
+  if (state.mode === 'practice') return;
   if (state.antiCheatBound) return;
   state.antiCheatBound = true;
 
@@ -892,7 +899,8 @@ function isTypingTarget(event) {
 }
 
 function onKeyDown(event) {
-  if (state.mode !== 'quiz') return;
+  // Practice mode reuses the same shortcuts but never the guards.
+  if (state.mode !== 'quiz' && state.mode !== 'practice') return;
   if (!$('confirmOverlay').classList.contains('hidden')) return;
 
   const type = normalizeType(state.questions[state.currentIndex].type);
@@ -959,11 +967,14 @@ function buildAnswersPayload() {
 }
 
 function openSubmitConfirm() {
-  if (state.submitting || state.mode !== 'quiz') return;
+  if (state.submitting) return;
+  const practice = state.mode === 'practice';
+  if (state.mode !== 'quiz' && !practice) return;
   const answered = countAnswered();
   const total = state.questions.length;
-  $('submitBody').textContent =
-    `Bạn đã trả lời ${answered}/${total} câu. Sau khi nộp, bạn không thể sửa lại bài làm.`;
+  $('submitBody').textContent = practice
+    ? `Bạn đã trả lời ${answered}/${total} câu. Hệ thống sẽ chấm điểm và hiện đáp án ngay.`
+    : `Bạn đã trả lời ${answered}/${total} câu. Sau khi nộp, bạn không thể sửa lại bài làm.`;
   show($('confirmOverlay'));
 }
 
@@ -1077,6 +1088,7 @@ function renderResult(outcome) {
   show($('resultScreen'));
   const notice = $('resultNotice');
   hide($('achievementBanner'));
+  hide($('practiceReview'));
   state.certificate = null;
 
   if (outcome.failed) {
@@ -1120,17 +1132,23 @@ function renderResult(outcome) {
   const total = Math.max(1, outcome.total || 1);
   const percent = Math.round((outcome.score / total) * 100);
   const grade = gradeFor(percent);
+  const practice = outcome.practice === true;
 
   hide(notice);
   $('resultPercent').textContent = `${percent}%`;
   $('resultHeading').textContent = grade.message;
-  $('resultScore').textContent = `Điểm tự động: ${formatScore(outcome.score)}/${total}`;
+  $('resultScore').textContent = practice
+    ? `Kết quả ôn luyện: ${formatScore(outcome.score)}/${total}`
+    : `Điểm tự động: ${formatScore(outcome.score)}/${total}`;
   $('resultSub').textContent = grade.sub;
-  $('resultElapsed').textContent = formatElapsed(elapsedSeconds());
+  $('resultElapsed').textContent = practice
+    ? `Thời gian ôn luyện: ${formatDuration(practiceElapsedSeconds())}`
+    : formatElapsed(elapsedSeconds());
 
   if (outcome.needsGrading) {
-    $('resultPending').textContent =
-      'Bài có câu tự luận — điểm hiển thị là điểm tự động tạm thời, giáo viên sẽ chấm phần tự luận.';
+    $('resultPending').textContent = practice
+      ? 'Bài có câu tự luận — phần này không chấm tự động, hãy đối chiếu đáp án bên dưới.'
+      : 'Bài có câu tự luận — điểm hiển thị là điểm tự động tạm thời, giáo viên sẽ chấm phần tự luận.';
     show($('resultPending'));
   } else {
     hide($('resultPending'));
@@ -1144,8 +1162,14 @@ function renderResult(outcome) {
     ring.style.strokeDashoffset = String(RING_CIRCUMFERENCE * (1 - percent / 100));
   });
 
-  $('restartBtn').textContent = 'Làm bài khác';
+  $('restartBtn').textContent = practice ? 'Ôn bài khác' : 'Làm bài khác';
   $('restartBtn').onclick = restart;
+
+  // Practice: reveal the answer key. No certificate — nothing was persisted (3).
+  if (practice) {
+    renderPracticeReview(outcome.review || []);
+    return;
+  }
 
   // Passing result (>= 80%) unlocks the certificate. The server enforces the
   // same threshold in get_certificate_verification, so this is presentation
@@ -1159,6 +1183,11 @@ function renderResult(outcome) {
     };
     show($('achievementBanner'));
   }
+}
+
+function formatDuration(seconds) {
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes} phút ${seconds % 60} giây`;
 }
 
 /* =====================================================================
@@ -1225,6 +1254,363 @@ function restart() {
 }
 
 /* =====================================================================
+   Self-practice mode (Phase 5.2)
+   =====================================================================
+   Business rules enforced here:
+     1. Authorization   — verify_student_practice() against ANY roster.
+     2. Zero anti-cheat — no fullscreen, no blur/telemetry, no input blocking.
+     3. Zero DB clutter — nothing is written to Supabase; no session row, no
+                          result row. Answers live in RAM only.
+     4. Zero AI cost    — the Worker endpoint is hard-wired to the rule engine.
+   ===================================================================== */
+
+/** Maps the Worker's question shape onto the renderer's shape. */
+function normalizePracticeQuestions(rawList) {
+  return (Array.isArray(rawList) ? rawList : []).map((raw) => {
+    const type = normalizeType(raw.question_type);
+    const options = Array.isArray(raw.options) ? raw.options.slice() : [];
+    const question = {
+      type,
+      content: String(raw.question_text || ''),
+      options,
+      subQuestions: [],
+      // Practice keeps the key locally: grading is client-side by design.
+      correctAnswer: raw.correct_answer === undefined ? null : raw.correct_answer,
+      explanation: raw.explanation || null,
+    };
+    if (type === 'TRUE_FALSE') {
+      question.subQuestions = options.map((content) => ({ content }));
+    }
+    return question;
+  });
+}
+
+function practiceError(message) {
+  const node = $('practiceError');
+  if (!message) { hide(node); node.textContent = ''; return; }
+  node.textContent = message;
+  show(node);
+}
+
+/** Switches the landing card between the official exam and practice forms. */
+function selectModeTab(mode) {
+  const official = mode === 'official';
+  $('tabOfficial').classList.toggle('is-active', official);
+  $('tabPractice').classList.toggle('is-active', !official);
+  $('tabOfficial').setAttribute('aria-selected', String(official));
+  $('tabPractice').setAttribute('aria-selected', String(!official));
+
+  if (official) {
+    show($('officialPanel'));
+    hide($('practicePanel'));
+    loginError('');
+  } else {
+    hide($('officialPanel'));
+    show($('practicePanel'));
+    practiceError('');
+  }
+}
+
+async function handlePracticeSubmit(event) {
+  event.preventDefault();
+  practiceError('');
+
+  const studentCode = $('practiceStudentCode').value.trim();
+  const className = $('practiceClassName').value.trim();
+  const fileInput = $('practiceFile');
+  const file = fileInput.files && fileInput.files[0];
+
+  if (!studentCode || !className) {
+    practiceError('Vui lòng nhập Mã học sinh và Lớp.');
+    return;
+  }
+  if (!file) {
+    practiceError('Vui lòng chọn file đề ôn tập (.docx).');
+    return;
+  }
+  if (!/\.docx$/i.test(file.name) && file.type !== DOCX_MIME) {
+    practiceError('Chỉ hỗ trợ file .docx (Word).');
+    return;
+  }
+
+  $('practiceStartBtn').disabled = true;
+  busy(true, 'Đang kiểm tra thông tin…');
+
+  try {
+    // --- 1. Authorization -------------------------------------------------
+    const auth = await callRpc('verify_student_practice', {
+      p_student_code: studentCode,
+      p_class_name: className,
+    });
+    if (!auth.ok) {
+      practiceError('Không kết nối được máy chủ. Vui lòng kiểm tra mạng và thử lại.');
+      return;
+    }
+    if (auth.data?.authorized !== true) {
+      practiceError(auth.data?.message
+        || 'Thông tin học sinh không có trong danh sách được phép ôn luyện.');
+      return;
+    }
+
+    // --- 2. Extract (rule engine only, no secret) -------------------------
+    busy(true, 'Đang đọc đề ôn tập…');
+    const payload = await extractPracticeDocx(file);
+    if (!payload.ok) {
+      practiceError(payload.message);
+      return;
+    }
+    if (payload.questions.length === 0) {
+      practiceError('Không tìm thấy câu hỏi nào trong file. Vui lòng kiểm tra lại đề.');
+      return;
+    }
+
+    // --- 3. Enter practice -------------------------------------------------
+    state.studentCode = studentCode;
+    state.className = className;
+    state.fullName = auth.data?.student_name || '';
+    state.practiceQuestions = payload.questions;
+
+    enterPractice(file.name);
+  } finally {
+    busy(false);
+    $('practiceStartBtn').disabled = false;
+  }
+}
+
+/** POSTs the .docx to the public practice endpoint (forced mode=rule). */
+async function extractPracticeDocx(file) {
+  const endpoint = (window.APP_CONFIG || {}).practiceApiUrl;
+  if (!endpoint) {
+    return { ok: false, message: 'Chưa cấu hình địa chỉ máy chủ ôn luyện.' };
+  }
+
+  const body = new FormData();
+  body.append('file', file);
+
+  let response;
+  try {
+    response = await fetch(endpoint, { method: 'POST', body });
+  } catch (error) {
+    console.error('Practice extraction failed', error);
+    return { ok: false, message: 'Không kết nối được máy chủ ôn luyện. Vui lòng thử lại.' };
+  }
+
+  let json = null;
+  try { json = await response.json(); } catch { /* non-JSON body */ }
+
+  if (!response.ok || !json) {
+    return {
+      ok: false,
+      message: json?.error?.message || `Máy chủ trả về lỗi (${response.status}).`,
+    };
+  }
+
+  return { ok: true, questions: normalizePracticeQuestions(json.data) };
+}
+
+function enterPractice(filename) {
+  state.mode = 'practice';
+  state.questions = state.practiceQuestions.slice();
+  state.answers = state.questions.map(makeEmptyAnswer);
+  state.currentIndex = 0;
+  state.flags = new Set();
+  state.blurCount = 0;
+  state.fullscreenExitCount = 0;
+  state.practiceStartedAt = Date.now();
+  // No exam record exists; the title is derived from the uploaded file.
+  state.exam = { title: filename.replace(/\.docx$/i, '') };
+
+  renderQuizShell();
+  renderQuestion();
+
+  // No timer and no heartbeat: practice is untimed and has no live session (2,3).
+  $('timerDisplay').textContent = '∞';
+  $('timerDisplay').classList.remove('is-critical');
+
+  // bindAntiCheat() is a no-op while mode === 'practice' (rule 2).
+  bindAntiCheat();
+
+  hide($('loginScreen'));
+  show($('examHeader'));
+  show($('progressWrap'));
+  hide($('resultScreen'));
+  show($('quizScreen'));
+}
+
+function practiceElapsedSeconds() {
+  if (!state.practiceStartedAt) return 0;
+  return Math.max(0, Math.floor((Date.now() - state.practiceStartedAt) / 1000));
+}
+
+/* ---------------------------------------------------- practice grading */
+
+function letterFor(index) {
+  return index >= 0 && index < 26 ? String.fromCharCode(65 + index) : '?';
+}
+
+function normalizeShort(text) {
+  return String(text ?? '').trim().toLowerCase().replace(/,/g, '.');
+}
+
+/** Grades one answer against the locally-held key (mirrors the server scale). */
+function gradePracticeQuestion(question, answer) {
+  const type = question.type;
+
+  if (type === 'MCQ') {
+    const raw = question.correctAnswer;
+    const correct = Number.isInteger(raw) ? raw
+      : (typeof raw === 'string' && /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : null);
+    const chosen = answer.draft;
+    const options = question.options;
+    return {
+      points: chosen !== null && correct !== null && chosen === correct ? 1 : 0,
+      verdict: chosen === null ? 'neutral' : (chosen === correct ? 'correct' : 'wrong'),
+      userText: chosen === null ? 'Chưa trả lời'
+        : `${letterFor(chosen)}. ${options[chosen] ?? ''}`,
+      correctText: correct === null ? 'Không có đáp án'
+        : `${letterFor(correct)}. ${options[correct] ?? ''}`,
+    };
+  }
+
+  if (type === 'TRUE_FALSE') {
+    const correctArr = Array.isArray(question.correctAnswer) ? question.correctAnswer : [];
+    const userArr = Array.isArray(answer.draft) ? answer.draft : [];
+    let hits = 0;
+    let answered = 0;
+    const correctLines = [];
+    const userLines = [];
+
+    question.subQuestions.forEach((sub, i) => {
+      const expected = correctArr[i];
+      const given = userArr[i] || '';
+      if (given) answered += 1;
+      if (expected !== undefined && given && given === expected) hits += 1;
+      correctLines.push(`${letterFor(i).toLowerCase()}) ${expected ?? '—'}`);
+      userLines.push(`${letterFor(i).toLowerCase()}) ${given || '—'}`);
+    });
+
+    // Server scale: 4→1.0, 3→0.5, 2→0.25, 1→0.1
+    const points = hits === 4 ? 1 : hits === 3 ? 0.5 : hits === 2 ? 0.25 : hits === 1 ? 0.1 : 0;
+    return {
+      points,
+      verdict: hits === 4 ? 'correct' : (answered > 0 ? 'wrong' : 'neutral'),
+      userText: answered > 0 ? userLines.join(' · ') : 'Chưa trả lời',
+      correctText: correctLines.join(' · '),
+      subResults: question.subQuestions.map((sub, i) => ({
+        index: i,
+        expected: correctArr[i],
+        given: userArr[i] || '',
+        isCorrect: correctArr[i] !== undefined && userArr[i] === correctArr[i],
+      })),
+    };
+  }
+
+  if (type === 'ESSAY') {
+    const text = String(answer.draft || '').trim();
+    return {
+      points: 0,
+      verdict: text ? 'neutral' : 'wrong',
+      userText: text || 'Chưa trả lời',
+      correctText: question.correctAnswer != null ? String(question.correctAnswer) : null,
+      autoGraded: false,
+    };
+  }
+
+  // SHORT_ANSWER
+  const text = String(answer.draft || '').trim();
+  const expected = question.correctAnswer == null ? null : String(question.correctAnswer);
+  const isCorrect = expected !== null && normalizeShort(text) === normalizeShort(expected);
+  return {
+    points: isCorrect ? 1 : 0,
+    verdict: !text ? 'neutral' : (isCorrect ? 'correct' : 'wrong'),
+    userText: text || 'Chưa trả lời',
+    correctText: expected ?? 'Không có đáp án',
+  };
+}
+
+/** Grades every answer on the client and returns the review rows. */
+function gradePractice() {
+  const review = [];
+  let score = 0;
+  let needsManual = false;
+
+  state.questions.forEach((question, index) => {
+    const result = gradePracticeQuestion(question, state.answers[index]);
+    if (result.autoGraded === false) needsManual = true;
+    score += result.points;
+    review.push({ index, question, ...result });
+  });
+
+  return {
+    score: Math.round(score * 100) / 100,
+    total: state.questions.length,
+    needsManual,
+    review,
+  };
+}
+
+function submitPractice() {
+  if (state.mode !== 'practice') return;
+  closeSubmitConfirm();
+
+  const graded = gradePractice();
+  finishExam();
+  renderResult({
+    practice: true,
+    score: graded.score,
+    total: graded.total,
+    needsGrading: graded.needsManual,
+    review: graded.review,
+  });
+}
+
+/** Renders the answer-key review list shown after a practice submission. */
+function renderPracticeReview(review) {
+  const host = $('practiceReview');
+  clear(host);
+
+  review.forEach((row) => {
+    const card = el('div', { className: `review-card is-${row.verdict}` });
+    const head = el('div', { className: 'review-card__head' });
+    head.appendChild(el('span', {
+      className: `review-card__verdict is-${row.verdict}`,
+      text: row.verdict === 'correct' ? 'Đúng' : row.verdict === 'wrong' ? 'Sai' : 'Chưa chấm',
+    }));
+    head.appendChild(el('span', {
+      className: 'q-badge__index',
+      text: `Câu ${row.index + 1} · ${TYPE_LABEL[row.question.type]}`,
+    }));
+    card.appendChild(head);
+
+    card.appendChild(el('p', { className: 'review-card__text', text: row.question.content }));
+
+    const userRow = el('div', { className: 'review-answer' });
+    userRow.appendChild(el('span', { className: 'review-answer__label', text: 'Bạn chọn' }));
+    userRow.appendChild(el('span', {
+      className: `review-answer__value${row.verdict === 'correct' ? ' is-correct'
+        : row.verdict === 'wrong' ? ' is-wrong' : ''}`,
+      text: row.userText,
+    }));
+    card.appendChild(userRow);
+
+    if (row.correctText) {
+      const keyRow = el('div', { className: 'review-answer' });
+      keyRow.appendChild(el('span', { className: 'review-answer__label', text: 'Đáp án đúng' }));
+      keyRow.appendChild(el('span', { className: 'review-answer__value is-correct', text: row.correctText }));
+      card.appendChild(keyRow);
+    }
+
+    if (row.question.explanation) {
+      card.appendChild(el('p', { className: 'review-explanation', text: row.question.explanation }));
+    }
+
+    host.appendChild(card);
+  });
+
+  show(host);
+}
+
+/* =====================================================================
    Boot
    ===================================================================== */
 
@@ -1286,6 +1672,9 @@ async function boot() {
   }
 
   $('loginForm').addEventListener('submit', handleLoginSubmit);
+  $('practiceForm').addEventListener('submit', handlePracticeSubmit);
+  $('tabOfficial').addEventListener('click', () => selectModeTab('official'));
+  $('tabPractice').addEventListener('click', () => selectModeTab('practice'));
   $('navToggleBtn').addEventListener('click', openNavPanel);
   $('navCloseBtn').addEventListener('click', closeNavPanel);
   $('navBackdrop').addEventListener('click', closeNavPanel);
@@ -1296,7 +1685,10 @@ async function boot() {
   $('fsResumeBtn').addEventListener('click', () => { requestFullscreen(); hide($('fullscreenOverlay')); });
   $('evictedBtn').addEventListener('click', () => window.location.reload());
   $('submitCancelBtn').addEventListener('click', closeSubmitConfirm);
-  $('submitConfirmBtn').addEventListener('click', () => submitExam(false));
+  $('submitConfirmBtn').addEventListener('click', () => {
+    if (state.mode === 'practice') submitPractice();
+    else submitExam(false);
+  });
   $('certBtn').addEventListener('click', openCertificate);
   $('certCloseBtn').addEventListener('click', closeCertificate);
   $('certPrintBtn').addEventListener('click', () => window.print());

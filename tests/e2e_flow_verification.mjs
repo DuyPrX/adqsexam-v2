@@ -15,6 +15,8 @@
  *   9. Post-submit guards (re-login blocked, tables unreadable)
  *  10. Certificate verification (Phase 5.1): a passing result verifies as
  *      valid, while a failing result and an unknown UUID verify as invalid.
+ *  11. Self-practice authorization (Phase 5.2): verify_student_practice accepts
+ *      a rostered (student_code, class_name) pair and rejects everything else.
  *
  * Usage:
  *   node v2/tests/e2e_flow_verification.mjs
@@ -477,6 +479,54 @@ async function main() {
     JSON.stringify(failingVerify.data));
   check('failing result reports NOT_PASSED',
     failingVerify.data?.message === 'NOT_PASSED', String(failingVerify.data?.message));
+
+  /* --- 11. Authorized self-practice gate (Phase 5.2) -------------------- */
+  step(11, 'Self-practice authorization via verify_student_practice');
+
+  const practiceOk = await student.rpc('verify_student_practice', {
+    p_student_code: STUDENT.code,
+    p_class_name: STUDENT.className,
+  });
+  check('practice RPC reachable by anon', !practiceOk.error, JSON.stringify(practiceOk.error));
+  check('whitelisted student is authorized', practiceOk.data?.authorized === true,
+    JSON.stringify(practiceOk.data));
+  check('authorized response returns the canonical name',
+    practiceOk.data?.student_name === STUDENT.fullName, String(practiceOk.data?.student_name));
+
+  // Case- and whitespace-insensitive, mirroring verify_and_acquire_session().
+  const practiceLoose = await student.rpc('verify_student_practice', {
+    p_student_code: `  ${STUDENT.code.toLowerCase()} `,
+    p_class_name: ` ${STUDENT.className.toLowerCase()}  `,
+  });
+  check('match is case/whitespace-insensitive', practiceLoose.data?.authorized === true,
+    JSON.stringify(practiceLoose.data));
+
+  // Not on any roster.
+  const practiceBad = await student.rpc('verify_student_practice', {
+    p_student_code: 'KHONG-CO',
+    p_class_name: '99ZZ',
+  });
+  check('unknown student is rejected', practiceBad.data?.authorized === false,
+    JSON.stringify(practiceBad.data));
+  check('rejection carries a Vietnamese message',
+    typeof practiceBad.data?.message === 'string' && practiceBad.data.message.length > 0,
+    String(practiceBad.data?.message));
+
+  // Right student code, wrong class -> still rejected (both fields must match).
+  const practiceWrongClass = await student.rpc('verify_student_practice', {
+    p_student_code: STUDENT.code,
+    p_class_name: '99ZZ',
+  });
+  check('mismatched class is rejected', practiceWrongClass.data?.authorized === false,
+    JSON.stringify(practiceWrongClass.data));
+
+  // Empty input is rejected without touching the table.
+  const practiceEmpty = await student.rpc('verify_student_practice', {
+    p_student_code: '',
+    p_class_name: '',
+  });
+  check('empty credentials are rejected', practiceEmpty.data?.authorized === false,
+    JSON.stringify(practiceEmpty.data));
 
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);

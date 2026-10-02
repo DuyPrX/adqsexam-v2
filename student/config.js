@@ -6,11 +6,16 @@
  * a SECURITY DEFINER function (Section B of the schema grants students zero
  * table privileges). There is therefore no secret in this file.
  *
+ * `practiceApiUrl` points at the public Cloudflare Worker practice endpoint
+ * (`POST /api/v1/extract-practice`), which is intentionally secret-free and
+ * forced to the rule engine (Phase 5.2).
+ *
  * Local development override, mirroring the v1 `?api=` convention:
- *   index.html?sb=http://127.0.0.1:54321&sbkey=<publishable-key>
+ *   index.html?sb=http://127.0.0.1:54321&sbkey=<publishable-key>&api=http://127.0.0.1:8787/api/v1/extract-practice
  * or persist it once:
  *   localStorage.setItem('adqs_sb_url', 'http://127.0.0.1:54321')
  *   localStorage.setItem('adqs_sb_key', '<publishable-key>')
+ *   localStorage.setItem('adqs_practice_api', 'http://127.0.0.1:8787/api/v1/extract-practice')
  */
 (function () {
   var params = new URLSearchParams(window.location.search);
@@ -22,5 +27,6 @@
   window.APP_CONFIG = {
     supabaseUrl: pick('sb', 'adqs_sb_url') || 'https://gmjzhgultqqvsfrdeymj.supabase.co',
     supabaseKey: pick('sbkey', 'adqs_sb_key') || 'sb_publishable_imRPFwvw3Ynz6wVEpZ9TNA_v1S6ym0W',
+    practiceApiUrl: pick('api', 'adqs_practice_api') || '/api/v1/extract-practice',
   };
 })();

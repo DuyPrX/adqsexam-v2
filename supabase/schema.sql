@@ -860,6 +860,69 @@ end;
 $$;
 
 
+-- ----------------------------------------------------------------------------
+-- C.7  verify_student_practice  (PUBLIC — anon, Phase 5.2)
+--      Gate for AUTHORIZED SELF-PRACTICE. A candidate may practise with any
+--      .docx of their own choosing as long as their (student_code, class_name)
+--      pair appears in the whitelist of ANY exam roster ever imported — the
+--      exam_code is deliberately NOT part of the match, because practice is
+--      not tied to a published exam.
+--
+--      Matching is case- and whitespace-insensitive on both fields, mirroring
+--      the tolerance of verify_and_acquire_session().
+--
+--      This is an authorization probe only: it writes nothing, reveals no
+--      exam content, and returns the canonical full_name so the client can
+--      greet the student. Practice exams are never persisted (no `exams`,
+--      `question_bank`, `active_sessions` or `exam_results` rows are touched).
+-- ----------------------------------------------------------------------------
+create or replace function public.verify_student_practice(
+    p_student_code varchar,
+    p_class_name   varchar
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+    v_exists       boolean;
+    v_student_name varchar;
+begin
+    if p_student_code is null or trim(p_student_code) = ''
+       or p_class_name is null or trim(p_class_name) = '' then
+        return jsonb_build_object(
+            'authorized', false,
+            'message',    'Vui lòng nhập đầy đủ Mã học sinh và Lớp.'
+        );
+    end if;
+
+    select exists (
+               select 1
+                 from public.students s
+                where lower(trim(s.student_code)) = lower(trim(p_student_code))
+                  and lower(trim(s.class_name))   = lower(trim(p_class_name))
+           ),
+           max(s.full_name)
+      into v_exists, v_student_name
+      from public.students s
+     where lower(trim(s.student_code)) = lower(trim(p_student_code))
+       and lower(trim(s.class_name))   = lower(trim(p_class_name));
+
+    if not v_exists then
+        return jsonb_build_object(
+            'authorized', false,
+            'message',    'Thông tin học sinh không có trong danh sách được phép ôn luyện.'
+        );
+    end if;
+
+    return jsonb_build_object(
+        'authorized',   true,
+        'student_name', v_student_name
+    );
+end;
+$$;
+
+
 -- ============================================================================
 -- SECTION D — EXECUTE GRANTS
 -- ----------------------------------------------------------------------------
@@ -871,6 +934,7 @@ revoke all on function public.get_student_exam_payload(varchar, uuid)           
 revoke all on function public.submit_exam_result(varchar, varchar, uuid, jsonb, jsonb)                     from public;
 revoke all on function public.record_proctoring_snapshot(varchar, varchar, uuid, text)                     from public;
 revoke all on function public.get_certificate_verification(uuid)                                          from public;
+revoke all on function public.verify_student_practice(varchar, varchar)                                    from public;
 
 grant execute on function public.verify_and_acquire_session(varchar, varchar, varchar, varchar, text, uuid)   to anon, authenticated;
 grant execute on function public.record_student_heartbeat(varchar, varchar, uuid, integer, integer, integer, integer) to anon, authenticated;
@@ -878,6 +942,7 @@ grant execute on function public.get_student_exam_payload(varchar, uuid)        
 grant execute on function public.submit_exam_result(varchar, varchar, uuid, jsonb, jsonb)                     to anon, authenticated;
 grant execute on function public.record_proctoring_snapshot(varchar, varchar, uuid, text)                     to anon, authenticated;
 grant execute on function public.get_certificate_verification(uuid)                                           to anon, authenticated;
+grant execute on function public.verify_student_practice(varchar, varchar)                                     to anon, authenticated;
 
 
 -- ============================================================================

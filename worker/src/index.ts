@@ -4,6 +4,9 @@
  * Route: POST /api/v1/extract?mode=rule|ai|auto
  * Header: X-Internal-Secret (validated against env.INTERNAL_SECRET)
  *
+ * Route: POST /api/v1/extract-practice
+ * No secret, no `mode` parameter — ALWAYS the rule engine (Phase 5.2, rule).
+ *
  * Engine dispatch (Phase 2 decision, ARCHITECTURE_FREEZE.md §3.5):
  *   rule -> Engine 1 only
  *   ai   -> Engine 2 only
@@ -36,7 +39,10 @@ app.use('*', cors());
 app.get('/', (c) =>
   c.json({
     service: 'docx-extractor-v2',
-    endpoint: 'POST /api/v1/extract?mode=rule|ai|auto',
+    endpoints: [
+      'POST /api/v1/extract?mode=rule|ai|auto',
+      'POST /api/v1/extract-practice',
+    ],
     engines: ['rule', 'ai'],
   }),
 );
@@ -51,6 +57,59 @@ function parseMode(raw: string | undefined): ExtractionMode {
 
 function errorResponse(message: string, status: number, code: string) {
   return { success: false, engine_used: null, count: 0, data: [], error: { code, message } };
+}
+
+/** Reads and validates the `file` field of a multipart body. */
+async function readUpload(
+  file: unknown,
+): Promise<
+  { ok: true; archive: Uint8Array; filename: string }
+  | { ok: false; status: 400 | 413; body: ReturnType<typeof errorResponse> }
+> {
+  if (!(file instanceof File)) {
+    return {
+      ok: false,
+      status: 400,
+      body: errorResponse('Request must be multipart/form-data with a "file" field.', 400, 'NO_FILE'),
+    };
+  }
+  if (file.size === 0) {
+    return { ok: false, status: 400, body: errorResponse('Uploaded file is empty.', 400, 'EMPTY_FILE') };
+  }
+  if (file.size > MAX_UPLOAD_BYTES) {
+    return {
+      ok: false,
+      status: 413,
+      body: errorResponse(
+        `File is ${file.size} bytes, exceeding the ${MAX_UPLOAD_BYTES} byte limit.`,
+        413,
+        'TOO_LARGE',
+      ),
+    };
+  }
+  return { ok: true, archive: new Uint8Array(await file.arrayBuffer()), filename: file.name };
+}
+
+/** Runs the shared DOCX preprocessor, mapping DocxError onto the wire format. */
+function runPreprocess(
+  archive: Uint8Array,
+):
+  | { ok: true; text: string; correctSpanCount: number }
+  | { ok: false; status: 400 | 413 | 500; body: ReturnType<typeof errorResponse> } {
+  try {
+    const pre = preprocessDocx(archive);
+    return { ok: true, text: pre.text, correctSpanCount: pre.correctSpanCount };
+  } catch (error) {
+    if (error instanceof DocxError) {
+      const status = error.code === 'TOO_LARGE' || error.code === 'INFLATED_TOO_LARGE' ? 413 : 400;
+      return { ok: false, status, body: errorResponse(error.message, status, error.code) };
+    }
+    return {
+      ok: false,
+      status: 500,
+      body: errorResponse(`Unexpected preprocessing failure: ${(error as Error).message}`, 500, 'INTERNAL'),
+    };
+  }
 }
 
 app.post('/api/v1/extract', async (c) => {
@@ -71,28 +130,10 @@ app.post('/api/v1/extract', async (c) => {
   let filename = '';
   try {
     const body = await c.req.parseBody();
-    const file = body['file'];
-    if (!(file instanceof File)) {
-      return c.json(
-        errorResponse('Request must be multipart/form-data with a "file" field.', 400, 'NO_FILE'),
-        400,
-      );
-    }
-    if (file.size === 0) {
-      return c.json(errorResponse('Uploaded file is empty.', 400, 'EMPTY_FILE'), 400);
-    }
-    if (file.size > MAX_UPLOAD_BYTES) {
-      return c.json(
-        errorResponse(
-          `File is ${file.size} bytes, exceeding the ${MAX_UPLOAD_BYTES} byte limit.`,
-          413,
-          'TOO_LARGE',
-        ),
-        413,
-      );
-    }
-    filename = file.name;
-    archive = new Uint8Array(await file.arrayBuffer());
+    const upload = await readUpload(body['file']);
+    if (!upload.ok) return c.json(upload.body, upload.status);
+    archive = upload.archive;
+    filename = upload.filename;
   } catch (error) {
     return c.json(
       errorResponse(`Failed to read upload: ${(error as Error).message}`, 400, 'BAD_UPLOAD'),
@@ -101,22 +142,9 @@ app.post('/api/v1/extract', async (c) => {
   }
 
   // --- 3. Preprocess (shared by both engines) ------------------------------
-  let text: string;
-  let correctSpanCount: number;
-  try {
-    const pre = preprocessDocx(archive);
-    text = pre.text;
-    correctSpanCount = pre.correctSpanCount;
-  } catch (error) {
-    if (error instanceof DocxError) {
-      const status = error.code === 'TOO_LARGE' || error.code === 'INFLATED_TOO_LARGE' ? 413 : 400;
-      return c.json(errorResponse(error.message, status, error.code), status as 400 | 413);
-    }
-    return c.json(
-      errorResponse(`Unexpected preprocessing failure: ${(error as Error).message}`, 500, 'INTERNAL'),
-      500,
-    );
-  }
+  const pre = runPreprocess(archive);
+  if (!pre.ok) return c.json(pre.body, pre.status);
+  const { text, correctSpanCount } = pre;
 
   if (text.trim() === '') {
     return c.json(
@@ -198,6 +226,73 @@ app.post('/api/v1/extract', async (c) => {
       correct_spans_detected: correctSpanCount,
       has_answers: data.some((question) => question.correct_answer !== null),
       fallback_reason: fallbackReason,
+    },
+  });
+});
+
+/**
+ * POST /api/v1/extract-practice  (Phase 5.2)
+ *
+ * Public, unauthenticated practice extraction for the student SPA.
+ *
+ *   - NO X-Internal-Secret: students cannot hold the teacher-side secret, and
+ *     the student bundle is public. The endpoint is deliberately secret-free.
+ *   - mode is FORCED to 'rule' and the `mode` query parameter is ignored, so
+ *     the zero-AI-cost rule (Phase 5.2 §Business rules 4) cannot be bypassed
+ *     by the caller. AiEngine is never imported into this code path.
+ *   - The response intentionally INCLUDES `correct_answer` and `explanation`:
+ *     practice grading is client-side, and the document is the student's own.
+ *     Nothing is persisted server-side (no Supabase writes here).
+ */
+app.post('/api/v1/extract-practice', async (c) => {
+  // --- 1. Read multipart body ---------------------------------------------
+  let archive: Uint8Array;
+  let filename = '';
+  try {
+    const body = await c.req.parseBody();
+    const upload = await readUpload(body['file']);
+    if (!upload.ok) return c.json(upload.body, upload.status);
+    archive = upload.archive;
+    filename = upload.filename;
+  } catch (error) {
+    return c.json(
+      errorResponse(`Failed to read upload: ${(error as Error).message}`, 400, 'BAD_UPLOAD'),
+      400,
+    );
+  }
+
+  // --- 2. Preprocess ------------------------------------------------------
+  const pre = runPreprocess(archive);
+  if (!pre.ok) return c.json(pre.body, pre.status);
+  const { text, correctSpanCount } = pre;
+
+  if (text.trim() === '') {
+    return c.json(
+      {
+        success: false,
+        engine_used: null,
+        count: 0,
+        data: [],
+        error: { code: 'NO_TEXT', message: 'Document contains no extractable text.' },
+      },
+      200,
+    );
+  }
+
+  // --- 3. Rule engine ONLY -------------------------------------------------
+  const result = extractWithRules(text);
+
+  return c.json({
+    success: result.data.length > 0,
+    engine_used: 'rule',
+    count: result.data.length,
+    data: result.data,
+    meta: {
+      filename,
+      mode: 'rule',
+      correct_spans_detected: correctSpanCount,
+      has_answers: result.data.some((question) => question.correct_answer !== null),
+      fallback_reason: null,
     },
   });
 });
