@@ -560,7 +560,8 @@ $$;
 --      Server-authoritative grading (F3). The client's claimed score is never
 --      accepted; only raw answers are. Duplicate submission is rejected by the
 --      UNIQUE(exam_code, student_code) constraint plus an explicit guard.
---      Returns: { success, message, score, total_questions, needs_grading }
+--      Returns: { success, message, result_id, score, total_questions, needs_grading }
+--      `result_id` is the public certificate handle consumed by verify.html.
 -- ----------------------------------------------------------------------------
 create or replace function public.submit_exam_result(
     p_exam_code     varchar,
@@ -593,6 +594,7 @@ declare
     v_selected_arr  jsonb;
     v_correct_count integer;
     v_q_score       numeric;
+    v_result_id     uuid;
     i               integer;
 begin
     -- 1. Exam.
@@ -744,7 +746,8 @@ begin
         coalesce(nullif(regexp_replace(p_metrics ->> 'fullscreenExitCount', '\D', '', 'g'), '')::int, 0),
         coalesce(nullif(regexp_replace(p_metrics ->> 'elapsedSeconds', '\D', '', 'g'), '')::int, 0),
         v_needs_grading
-    );
+    )
+    returning id into v_result_id;
 
     -- 6. Retire the session so the token can never be reused.
     delete from public.active_sessions
@@ -753,6 +756,7 @@ begin
     return jsonb_build_object(
         'success',         true,
         'message',         'SUBMITTED',
+        'result_id',       v_result_id,
         'score',           v_score,
         'total_questions', v_total,
         'needs_grading',   v_needs_grading
@@ -796,6 +800,66 @@ end;
 $$;
 
 
+-- ----------------------------------------------------------------------------
+-- C.6  get_certificate_verification  (PUBLIC — anon)
+--      Backs the standalone /verify.html page reached by scanning the QR code
+--      printed on a certificate. It is deliberately read-only and discloses
+--      only non-sensitive metadata (no answers, no answer keys, no token).
+--
+--      `valid` is true ONLY when the candidate actually passed:
+--          total_questions > 0  AND  score / total_questions >= 0.8
+--      Any unknown id — or an id whose result failed the threshold — returns
+--      valid = false so the public page can render an "Invalid" badge without
+--      leaking whether the UUID merely does not exist.
+-- ----------------------------------------------------------------------------
+create or replace function public.get_certificate_verification(
+    p_result_id uuid
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+    v_result      public.exam_results%rowtype;
+    v_exam_title  varchar(200);
+    v_passed      boolean;
+begin
+    select * into v_result
+      from public.exam_results
+     where id = p_result_id;
+
+    if not found then
+        return jsonb_build_object('valid', false, 'message', 'NOT_FOUND');
+    end if;
+
+    v_passed := v_result.total_questions > 0
+            and (v_result.score / v_result.total_questions::numeric) >= 0.8;
+
+    select e.title into v_exam_title
+      from public.exams e
+     where e.code = v_result.exam_code;
+
+    if not v_passed then
+        return jsonb_build_object('valid', false, 'message', 'NOT_PASSED');
+    end if;
+
+    return jsonb_build_object(
+        'valid',           true,
+        'message',         'VALID',
+        'result_id',       v_result.id,
+        'exam_code',       v_result.exam_code,
+        'exam_title',      coalesce(v_exam_title, v_result.exam_code),
+        'student_name',    v_result.student_name,
+        'student_code',    v_result.student_code,
+        'class_name',      v_result.class_name,
+        'score',           v_result.score,
+        'total_questions', v_result.total_questions,
+        'submitted_at',    v_result.submitted_at
+    );
+end;
+$$;
+
+
 -- ============================================================================
 -- SECTION D — EXECUTE GRANTS
 -- ----------------------------------------------------------------------------
@@ -806,12 +870,14 @@ revoke all on function public.record_student_heartbeat(varchar, varchar, uuid, i
 revoke all on function public.get_student_exam_payload(varchar, uuid)                                      from public;
 revoke all on function public.submit_exam_result(varchar, varchar, uuid, jsonb, jsonb)                     from public;
 revoke all on function public.record_proctoring_snapshot(varchar, varchar, uuid, text)                     from public;
+revoke all on function public.get_certificate_verification(uuid)                                          from public;
 
 grant execute on function public.verify_and_acquire_session(varchar, varchar, varchar, varchar, text, uuid)   to anon, authenticated;
 grant execute on function public.record_student_heartbeat(varchar, varchar, uuid, integer, integer, integer, integer) to anon, authenticated;
 grant execute on function public.get_student_exam_payload(varchar, uuid)                                      to anon, authenticated;
 grant execute on function public.submit_exam_result(varchar, varchar, uuid, jsonb, jsonb)                     to anon, authenticated;
 grant execute on function public.record_proctoring_snapshot(varchar, varchar, uuid, text)                     to anon, authenticated;
+grant execute on function public.get_certificate_verification(uuid)                                           to anon, authenticated;
 
 
 -- ============================================================================

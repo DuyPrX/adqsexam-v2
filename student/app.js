@@ -26,6 +26,7 @@ const HEARTBEAT_MS = 20_000;
 const RING_CIRCUMFERENCE = 540;          // 2 * PI * r(86)
 const MAX_TEXT_LENGTH = 20_000;
 const MAX_DEVICE_INFO = 200;
+const CERT_PASS_PERCENT = 80;            // must match schema: score/total >= 0.8
 
 /** Server RPC result codes -> Vietnamese copy shown to the student. */
 const RPC_MESSAGES = {
@@ -90,6 +91,8 @@ const state = {
   submitting: false,
   antiCheatBound: false,
   lastBlurAt: 0,
+  // certificate (set only for a passing submission)
+  certificate: null,
 };
 
 /* =====================================================================
@@ -1022,6 +1025,7 @@ async function submitExam(auto) {
     score: Number(payload.score) || 0,
     total: Number(payload.total_questions) || state.questions.length,
     needsGrading: payload.needs_grading === true,
+    resultId: isUuid(payload.result_id) ? payload.result_id : null,
   });
 }
 
@@ -1072,6 +1076,8 @@ function gradeFor(percent) {
 function renderResult(outcome) {
   show($('resultScreen'));
   const notice = $('resultNotice');
+  hide($('achievementBanner'));
+  state.certificate = null;
 
   if (outcome.failed) {
     $('resultPercent').textContent = '—';
@@ -1140,6 +1146,68 @@ function renderResult(outcome) {
 
   $('restartBtn').textContent = 'Làm bài khác';
   $('restartBtn').onclick = restart;
+
+  // Passing result (>= 80%) unlocks the certificate. The server enforces the
+  // same threshold in get_certificate_verification, so this is presentation
+  // only — a forged banner cannot mint a verifiable certificate.
+  if (percent >= CERT_PASS_PERCENT && outcome.resultId) {
+    state.certificate = {
+      resultId: outcome.resultId,
+      score: outcome.score,
+      total,
+      percent,
+    };
+    show($('achievementBanner'));
+  }
+}
+
+/* =====================================================================
+   Certificate modal
+   ===================================================================== */
+
+function openCertificate() {
+  const cert = state.certificate;
+  if (!cert) return;
+
+  $('certName').textContent = state.fullName || '—';
+  $('certStudentCode').textContent = state.studentCode || '—';
+  $('certClass').textContent = state.className || '—';
+  $('certExam').textContent = state.exam?.title || state.examCode || '—';
+  $('certScore').textContent = `${formatScore(cert.score)}/${cert.total} (${cert.percent}%)`;
+  $('certDate').textContent = formatDate(new Date());
+
+  renderQrCode(`${window.location.origin}/verify.html?id=${cert.resultId}`);
+  show($('certOverlay'));
+}
+
+function closeCertificate() { hide($('certOverlay')); }
+
+/** Renders the verification QR via qrcodejs (loaded by index.html). */
+function renderQrCode(url) {
+  const host = $('certQr');
+  clear(host);
+
+  if (typeof window.QRCode !== 'function') {
+    host.appendChild(el('p', { className: 'cert-sheet__qr-caption', text: 'Không tải được mã QR.' }));
+    console.warn('qrcodejs unavailable; certificate rendered without QR.');
+    return;
+  }
+
+  // eslint-disable-next-line no-new
+  new window.QRCode(host, {
+    text: url,
+    width: 150,
+    height: 150,
+    colorDark: '#1a1a2e',
+    colorLight: '#ffffff',
+    correctLevel: window.QRCode.CorrectLevel.M,
+  });
+}
+
+function formatDate(date) {
+  const day = String(date.getDate()).padStart(2, '0');
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  return `${day}/${month}/${date.getFullYear()}`;
 }
 
 function formatScore(value) {
@@ -1229,6 +1297,9 @@ async function boot() {
   $('evictedBtn').addEventListener('click', () => window.location.reload());
   $('submitCancelBtn').addEventListener('click', closeSubmitConfirm);
   $('submitConfirmBtn').addEventListener('click', () => submitExam(false));
+  $('certBtn').addEventListener('click', openCertificate);
+  $('certCloseBtn').addEventListener('click', closeCertificate);
+  $('certPrintBtn').addEventListener('click', () => window.print());
   document.addEventListener('keydown', onKeyDown);
 
   const resumed = await tryResumeSession();

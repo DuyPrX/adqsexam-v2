@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="robots" content="noindex, nofollow" />
+  <meta name="color-scheme" content="light dark" />
+  <title>Xác thực Giấy Chứng Nhận — ADQS Exam</title>
+  <style>
+    :root {
+      --bg: #f1f5f9;
+      --surface: #ffffff;
+      --surface-2: #f8fafc;
+      --border: #e2e8f0;
+      --text: #0f172a;
+      --text-muted: #64748b;
+      --text-faint: #94a3b8;
+      --accent: #4f46e5;
+      --ok: #059669;
+      --ok-weak: #ecfdf5;
+      --danger: #dc2626;
+      --danger-weak: #fef2f2;
+      --warn: #d97706;
+      --warn-weak: #fffbeb;
+      --radius: 14px;
+      --shadow: 0 1px 2px rgba(15, 23, 42, .06), 0 8px 28px rgba(15, 23, 42, .10);
+    }
+    :root[data-theme="dark"] {
+      --bg: #070b14;
+      --surface: #0f172a;
+      --surface-2: #131c31;
+      --border: #1e293b;
+      --text: #f1f5f9;
+      --text-muted: #94a3b8;
+      --text-faint: #64748b;
+      --accent: #818cf8;
+      --ok: #34d399;
+      --ok-weak: #064e3b;
+      --danger: #f87171;
+      --danger-weak: #7f1d1d;
+      --warn: #fbbf24;
+      --warn-weak: #78350f;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 12px 48px rgba(0, 0, 0, .5);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --bg: #070b14;
+        --surface: #0f172a;
+        --surface-2: #131c31;
+        --border: #1e293b;
+        --text: #f1f5f9;
+        --text-muted: #94a3b8;
+        --text-faint: #64748b;
+        --accent: #818cf8;
+        --ok: #34d399;
+        --ok-weak: #064e3b;
+        --danger: #f87171;
+        --danger-weak: #7f1d1d;
+        --warn: #fbbf24;
+        --warn-weak: #78350f;
+        --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 12px 48px rgba(0, 0, 0, .5);
+      }
+    }
+
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      padding: 24px 16px;
+      background: var(--bg); color: var(--text);
+      font-family: "Be Vietnam Pro", system-ui, -apple-system, "Segoe UI", Roboto,
+                   "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .brand {
+      display: flex; align-items: center; gap: 10px;
+      margin-bottom: 18px; font-weight: 800; letter-spacing: .1em;
+      font-size: 13px; color: var(--text-muted); text-transform: uppercase;
+    }
+    .brand__mark {
+      width: 34px; height: 34px; display: grid; place-items: center;
+      background: var(--accent); color: #fff; border-radius: 9px;
+      font-size: 11px; letter-spacing: .04em;
+    }
+
+    .card {
+      width: 100%; max-width: 620px;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); box-shadow: var(--shadow);
+      padding: 32px 28px; text-align: center;
+      animation: fadeIn .3s ease-out;
+    }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+    .badge {
+      display: inline-flex; align-items: center; gap: 9px;
+      padding: 9px 18px; border-radius: 999px;
+      font-weight: 800; font-size: 14px; letter-spacing: .02em;
+      margin-bottom: 20px;
+    }
+    .badge--valid   { background: var(--ok-weak);     color: var(--ok);     border: 1px solid var(--ok); }
+    .badge--invalid { background: var(--danger-weak); color: var(--danger); border: 1px solid var(--danger); }
+    .badge--pending { background: var(--warn-weak);   color: var(--warn);   border: 1px solid var(--warn); }
+    .badge__dot { width: 9px; height: 9px; border-radius: 50%; background: currentColor; }
+
+    h1 { margin: 0 0 8px; font-size: 22px; font-weight: 800; line-height: 1.35; }
+    .subtitle { margin: 0 0 22px; font-size: 14px; color: var(--text-muted); line-height: 1.65; }
+
+    .details { text-align: left; border-top: 1px solid var(--border); margin-top: 22px; }
+    .detail {
+      display: flex; align-items: baseline; justify-content: space-between; gap: 16px;
+      padding: 13px 2px; border-bottom: 1px solid var(--border);
+    }
+    .detail__label { font-size: 12.5px; font-weight: 700; color: var(--text-muted);
+      text-transform: uppercase; letter-spacing: .05em; flex: 0 0 auto; }
+    .detail__value { font-size: 15px; font-weight: 700; text-align: right; word-break: break-word; }
+    .detail__value--score { color: var(--accent); font-size: 17px; }
+
+    .notice {
+      margin: 22px 0 0; padding: 14px 16px; border-radius: 10px;
+      font-size: 13.5px; line-height: 1.6; text-align: left;
+      background: var(--surface-2); color: var(--text-muted); border: 1px solid var(--border);
+    }
+    .notice--danger { background: var(--danger-weak); color: var(--danger); border-color: var(--danger); }
+
+    .spinner {
+      width: 38px; height: 38px; margin: 4px auto 18px;
+      border: 4px solid var(--border); border-top-color: var(--accent); border-radius: 50%;
+      animation: spin .8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .hash {
+      margin-top: 18px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11.5px; color: var(--text-faint); word-break: break-all;
+    }
+    .hidden { display: none !important; }
+    @media (max-width: 480px) {
+      .card { padding: 26px 20px; }
+      .detail { flex-direction: column; gap: 3px; }
+      .detail__value { text-align: left; }
+    }
+  </style>
+</head>
+<body>
+  <div class="brand">
+    <span class="brand__mark" aria-hidden="true">ADQS</span>
+    <span>Xác thực chứng nhận</span>
+  </div>
+
+  <main class="card" role="main">
+    <!-- Loading -->
+    <div id="loadingView">
+      <div class="spinner" aria-hidden="true"></div>
+      <h1>Đang xác thực…</h1>
+      <p class="subtitle">Vui lòng chờ trong giây lát.</p>
+    </div>
+
+    <!-- Result -->
+    <div id="resultView" class="hidden">
+      <span id="statusBadge" class="badge badge--pending">
+        <span class="badge__dot" aria-hidden="true"></span>
+        <span id="statusText">Không xác định</span>
+      </span>
+
+      <h1 id="resultTitle"></h1>
+      <p id="resultSubtitle" class="subtitle"></p>
+
+      <div id="details" class="details hidden">
+        <div class="detail">
+          <span class="detail__label">Học sinh</span>
+          <span id="dName" class="detail__value"></span>
+        </div>
+        <div class="detail">
+          <span class="detail__label">Mã học sinh</span>
+          <span id="dCode" class="detail__value"></span>
+        </div>
+        <div class="detail">
+          <span class="detail__label">Lớp</span>
+          <span id="dClass" class="detail__value"></span>
+        </div>
+        <div class="detail">
+          <span class="detail__label">Bài thi</span>
+          <span id="dExam" class="detail__value"></span>
+        </div>
+        <div class="detail">
+          <span class="detail__label">Mã đề</span>
+          <span id="dExamCode" class="detail__value"></span>
+        </div>
+        <div class="detail">
+          <span class="detail__label">Kết quả</span>
+          <span id="dScore" class="detail__value detail__value--score"></span>
+        </div>
+        <div class="detail">
+          <span class="detail__label">Thời điểm hoàn thành</span>
+          <span id="dTime" class="detail__value"></span>
+        </div>
+      </div>
+
+      <p id="notice" class="notice hidden"></p>
+      <p id="hash" class="hash"></p>
+    </div>
+  </main>
+
+  <script src="./config.js"></script>
+  <script type="module">
+    import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const PASS_PERCENT = 80;
+
+    const $ = (id) => document.getElementById(id);
+
+    function applyTheme() {
+      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+      document.documentElement.setAttribute('data-theme', prefersDark ? 'dark' : 'light');
+    }
+
+    function formatDateTime(value) {
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return '—';
+      const pad = (n) => String(n).padStart(2, '0');
+      return `${pad(date.getDate())}/${pad(date.getMonth() + 1)}/${date.getFullYear()} `
+        + `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    }
+
+    function showResult({ valid, badgeClass, status, title, subtitle, notice, data, id }) {
+      $('loadingView').classList.add('hidden');
+      $('resultView').classList.remove('hidden');
+
+      const badge = $('statusBadge');
+      badge.className = `badge ${badgeClass}`;
+      $('statusText').textContent = status;
+      $('resultTitle').textContent = title;
+      $('resultSubtitle').textContent = subtitle;
+
+      if (data) {
+        $('dName').textContent = data.student_name || '—';
+        $('dCode').textContent = data.student_code || '—';
+        $('dClass').textContent = data.class_name || '—';
+        $('dExam').textContent = data.exam_title || '—';
+        $('dExamCode').textContent = data.exam_code || '—';
+        const total = Number(data.total_questions) || 0;
+        const score = Number(data.score) || 0;
+        const percent = total > 0 ? Math.round((score / total) * 100) : 0;
+        $('dScore').textContent = `${score}/${total} (${percent}%)`;
+        $('dTime').textContent = formatDateTime(data.submitted_at);
+        $('details').classList.remove('hidden');
+      } else {
+        $('details').classList.add('hidden');
+      }
+
+      if (notice) {
+        $('notice').textContent = notice;
+        $('notice').classList.remove('hidden');
+      } else {
+        $('notice').classList.add('hidden');
+      }
+
+      $('hash').textContent = id ? `Mã xác thực: ${id}` : '';
+      document.title = `${status} — Xác thực Giấy Chứng Nhận`;
+    }
+
+    async function main() {
+      applyTheme();
+
+      const id = (new URLSearchParams(window.location.search).get('id') || '').trim();
+
+      if (!UUID_RE.test(id)) {
+        showResult({
+          valid: false,
+          badgeClass: 'badge--invalid',
+          status: 'Không hợp lệ',
+          title: 'Mã xác thực không đúng định dạng',
+          subtitle: 'Liên kết bạn truy cập thiếu hoặc chứa mã xác thực không hợp lệ.',
+          notice: 'Hãy quét lại mã QR in trên giấy chứng nhận để có liên kết chính xác.',
+        });
+        return;
+      }
+
+      const { supabaseUrl, supabaseKey } = window.APP_CONFIG || {};
+      if (!supabaseUrl || !supabaseKey) {
+        showResult({
+          valid: false,
+          badgeClass: 'badge--pending',
+          status: 'Chưa cấu hình',
+          title: 'Không kết nối được hệ thống xác thực',
+          subtitle: 'Vui lòng liên hệ giáo viên hoặc quản trị viên.',
+        });
+        return;
+      }
+
+      let payload = null;
+      try {
+        const supabase = createClient(supabaseUrl, supabaseKey, {
+          auth: { persistSession: false, autoRefreshToken: false },
+        });
+        const { data, error } = await supabase.rpc('get_certificate_verification', {
+          p_result_id: id,
+        });
+        if (error) throw error;
+        payload = data || {};
+      } catch (error) {
+        console.error('Verification failed', error);
+        showResult({
+          valid: false,
+          badgeClass: 'badge--pending',
+          status: 'Lỗi kết nối',
+          title: 'Không kiểm tra được chứng nhận',
+          subtitle: 'Vui lòng kiểm tra kết nối mạng và thử tải lại trang.',
+          notice: 'Nếu tình trạng kéo dài, hãy liên hệ giáo viên phụ trách.',
+          id,
+        });
+        return;
+      }
+
+      if (payload.valid === true) {
+        showResult({
+          valid: true,
+          badgeClass: 'badge--valid',
+          status: 'Hợp lệ',
+          title: 'Giấy chứng nhận hợp lệ',
+          subtitle: `Học sinh đã đạt từ ${PASS_PERCENT}% trở lên trong kỳ thi này.`,
+          data: payload,
+          id,
+        });
+        return;
+      }
+
+      const notPassed = payload.message === 'NOT_PASSED';
+      showResult({
+        valid: false,
+        badgeClass: 'badge--invalid',
+        status: 'Không hợp lệ',
+        title: 'Không tìm thấy chứng nhận hợp lệ',
+        subtitle: notPassed
+          ? 'Kết quả của học sinh không đạt ngưỡng cấp chứng nhận.'
+          : 'Mã xác thực không tồn tại trong hệ thống.',
+        notice: 'Giấy chứng nhận chỉ được cấp cho bài thi đạt từ '
+          + `${PASS_PERCENT}% trở lên. Hãy kiểm tra lại mã QR hoặc liên hệ giáo viên.`,
+        id,
+      });
+    }
+
+    main();
+  </script>
+</body>
+</html>

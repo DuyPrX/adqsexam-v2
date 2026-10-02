@@ -12,6 +12,9 @@
  *   6. Student calls submit_exam_result
  *   7. Teacher client detects the submission and the score matches expected
  *   8. Student receives the teacher-facing Realtime event (D2)
+ *   9. Post-submit guards (re-login blocked, tables unreadable)
+ *  10. Certificate verification (Phase 5.1): a passing result verifies as
+ *      valid, while a failing result and an unknown UUID verify as invalid.
  *
  * Usage:
  *   node v2/tests/e2e_flow_verification.mjs
@@ -50,7 +53,13 @@ const STUDENT = {
   fullName: 'Nguyễn Văn E2E',
   className: '12E2E',
 };
+const FAILING_STUDENT = {
+  code: 'E2EHS02',
+  fullName: 'Trần Thị E2E',
+  className: '12E2E',
+};
 const EXPECTED_SCORE = 2.5; // MCQ 1.0 + TRUE_FALSE 3/4 = 0.5 + SHORT_ANSWER 1.0
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /* ---------------------------------------------------------------- harness */
 
@@ -327,6 +336,9 @@ async function main() {
   );
   check('total_questions = 3', Number(submit.data?.total_questions) === 3, String(submit.data?.total_questions));
 
+  const passingResultId = submit.data?.result_id;
+  check('submission returns result_id (UUID)', UUID_RE.test(String(passingResultId)), String(passingResultId));
+
   step(8, 'Teacher side detects the submission (query + Realtime)');
 
   const resultRow = await teacher
@@ -382,6 +394,89 @@ async function main() {
   check('student cannot read question_bank directly',
     anonTable.status === 401 || anonTable.status === 403 || anonTable.status === 404,
     `status=${anonTable.status}`);
+
+  /* --- 10. Certificate verification (Phase 5.1) ------------------------ */
+  step(10, 'Public certificate verification via get_certificate_verification');
+
+  // The anon client is the same one a visitor scanning the QR code would use.
+  const passingVerify = await student.rpc('get_certificate_verification', {
+    p_result_id: passingResultId,
+  });
+  check('RPC reachable by anon', !passingVerify.error,
+    JSON.stringify(passingVerify.error));
+  check('passing result verifies as valid', passingVerify.data?.valid === true,
+    JSON.stringify(passingVerify.data));
+  check('verification exposes student name',
+    passingVerify.data?.student_name === STUDENT.fullName,
+    String(passingVerify.data?.student_name));
+  check('verification exposes class name',
+    passingVerify.data?.class_name === STUDENT.className,
+    String(passingVerify.data?.class_name));
+  check('verification exposes exam title',
+    passingVerify.data?.exam_title === EXAM.title,
+    String(passingVerify.data?.exam_title));
+  check('verification exposes the score',
+    Number(passingVerify.data?.score) === EXPECTED_SCORE,
+    String(passingVerify.data?.score));
+  check('verification exposes a completion timestamp',
+    typeof passingVerify.data?.submitted_at === 'string',
+    String(passingVerify.data?.submitted_at));
+
+  const rawVerify = JSON.stringify(passingVerify.data ?? {});
+  for (const leak of ['correct_answer', 'correctAnswer', 'explanation', 'session_token']) {
+    check(`verification does not leak "${leak}"`, !rawVerify.includes(leak));
+  }
+
+  // A UUID that does not exist must never verify.
+  const missingVerify = await student.rpc('get_certificate_verification', {
+    p_result_id: '00000000-0000-0000-0000-000000000000',
+  });
+  check('unknown UUID verifies as invalid', missingVerify.data?.valid === false,
+    JSON.stringify(missingVerify.data));
+
+  // A real-but-failing result must not verify either.
+  await teacher.from('students').insert({
+    student_code: FAILING_STUDENT.code,
+    full_name: FAILING_STUDENT.fullName,
+    class_name: FAILING_STUDENT.className,
+    exam_code: EXAM.code,
+  });
+
+  const failingAcquire = await student.rpc('verify_and_acquire_session', {
+    p_exam_code: EXAM.code,
+    p_student_code: FAILING_STUDENT.code,
+    p_full_name: FAILING_STUDENT.fullName,
+    p_class_name: FAILING_STUDENT.className,
+    p_device_info: 'e2e-script/1.0',
+    p_existing_token: null,
+  });
+  check('failing candidate acquired a session',
+    failingAcquire.data?.success === true, JSON.stringify(failingAcquire.data ?? failingAcquire.error));
+
+  const failingSubmit = await student.rpc('submit_exam_result', {
+    p_exam_code: EXAM.code,
+    p_student_code: FAILING_STUDENT.code,
+    p_session_token: failingAcquire.data?.session_token,
+    p_answers: [
+      { questionIndex: 0, selectedIndex: 1 },                          // MCQ wrong
+      { questionIndex: 1, selectedAnswers: ['S', 'S', 'S', 'S'] },      // T/F 1/4 -> 0.10
+      { questionIndex: 2, selectedAnswerText: 'sai' },                 // SHORT wrong
+    ],
+    p_metrics: {},
+  });
+  check('failing submission accepted', failingSubmit.data?.success === true,
+    JSON.stringify(failingSubmit.data ?? failingSubmit.error));
+  check('failing score is below 80%',
+    Number(failingSubmit.data?.score) / Number(failingSubmit.data?.total_questions) < 0.8,
+    `${failingSubmit.data?.score}/${failingSubmit.data?.total_questions}`);
+
+  const failingVerify = await student.rpc('get_certificate_verification', {
+    p_result_id: failingSubmit.data?.result_id,
+  });
+  check('failing result verifies as invalid', failingVerify.data?.valid === false,
+    JSON.stringify(failingVerify.data));
+  check('failing result reports NOT_PASSED',
+    failingVerify.data?.message === 'NOT_PASSED', String(failingVerify.data?.message));
 
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);

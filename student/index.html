@@ -7,6 +7,7 @@
   <meta name="color-scheme" content="light dark" />
   <title>Phòng làm bài</title>
   <link rel="stylesheet" href="./styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#questionHost">Bỏ qua tới nội dung câu hỏi</a>
@@ -105,6 +106,13 @@
       <p id="resultElapsed" class="result__elapsed"></p>
 
       <div id="resultNotice" class="alert hidden"></div>
+
+      <div id="achievementBanner" class="achievement hidden">
+        <span class="achievement__icon" aria-hidden="true">🏆</span>
+        <p class="achievement__text">Chúc mừng! Bạn đã đạt kết quả xuất sắc.</p>
+        <button id="certBtn" type="button" class="btn btn--primary">Nhận Giấy Chứng Nhận</button>
+      </div>
+
       <button id="restartBtn" type="button" class="btn btn--primary btn--block">Làm bài khác</button>
     </section>
   </main>
@@ -178,6 +186,57 @@
 
   <!-- Non-blocking toast -->
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <!-- ================= CERTIFICATE MODAL ================= -->
+  <!-- A4 landscape (297 x 210 mm). The print stylesheet isolates #certSheet so
+       Ctrl+P / "Lưu thành PDF" produces only the certificate. -->
+  <div id="certOverlay" class="overlay cert-overlay hidden" role="dialog" aria-modal="true"
+       aria-labelledby="certDialogTitle">
+    <div class="cert-dialog">
+      <div class="cert-dialog__bar no-print">
+        <h2 id="certDialogTitle" class="cert-dialog__title">Giấy Chứng Nhận</h2>
+        <div class="cert-dialog__actions">
+          <button id="certPrintBtn" type="button" class="btn btn--primary">In / Lưu PDF</button>
+          <button id="certCloseBtn" type="button" class="btn btn--ghost">Đóng</button>
+        </div>
+      </div>
+
+      <div id="certSheet" class="cert-sheet">
+        <div class="cert-sheet__frame">
+          <p class="cert-sheet__org">ADQS EXAM</p>
+          <h3 class="cert-sheet__title">GIẤY CHỨNG NHẬN</h3>
+          <p class="cert-sheet__lead">Chứng nhận học sinh</p>
+          <p id="certName" class="cert-sheet__name"></p>
+          <p class="cert-sheet__lead">đã hoàn thành xuất sắc kỳ thi</p>
+          <p id="certExam" class="cert-sheet__exam"></p>
+
+          <div class="cert-sheet__meta">
+            <div class="cert-sheet__meta-item">
+              <span class="cert-sheet__meta-label">Mã học sinh</span>
+              <span id="certStudentCode" class="cert-sheet__meta-value"></span>
+            </div>
+            <div class="cert-sheet__meta-item">
+              <span class="cert-sheet__meta-label">Lớp</span>
+              <span id="certClass" class="cert-sheet__meta-value"></span>
+            </div>
+            <div class="cert-sheet__meta-item">
+              <span class="cert-sheet__meta-label">Kết quả</span>
+              <span id="certScore" class="cert-sheet__meta-value"></span>
+            </div>
+            <div class="cert-sheet__meta-item">
+              <span class="cert-sheet__meta-label">Ngày cấp</span>
+              <span id="certDate" class="cert-sheet__meta-value"></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="cert-sheet__qr">
+          <div id="certQr" class="cert-qr"></div>
+          <p class="cert-sheet__qr-caption">Quét mã để xác thực</p>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <script src="./config.js"></script>
   <script type="module" src="./app.js"></script>
