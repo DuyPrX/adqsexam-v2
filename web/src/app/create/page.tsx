@@ -35,6 +35,7 @@ export default function CreateExamPage() {
           sourceFilename={extraction.meta?.filename ?? 'de-thi.docx'}
           correctSpansDetected={extraction.meta?.correct_spans_detected ?? 0}
           fallbackReason={extraction.meta?.fallback_reason ?? null}
+          missedTrueFalse={extraction.meta?.missed_true_false ?? false}
           onReset={() => setExtraction(null)}
         />
       ) : (

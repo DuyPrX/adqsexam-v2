@@ -21,19 +21,34 @@ import {
   type SaveExamVariantsResult,
 } from '@/lib/exams';
 import { generateExamVariants, shuffleExam } from '@/lib/shuffle';
-import type { ExtractedQuestion, ExtractionMode, QuestionType } from '@/lib/types';
+import type {
+  EngineUsed,
+  ExtractedQuestion,
+  ExtractionMode,
+  QuestionType,
+} from '@/lib/types';
 import { QUESTION_TYPE_META, cn, hasResolvedAnswer } from '@/lib/utils';
 import { QuestionCard } from './QuestionCard';
 
 interface ExamPreviewEditorProps {
   questions: ExtractedQuestion[];
-  engineUsed: 'rule' | 'ai';
+  engineUsed: EngineUsed;
   mode: ExtractionMode;
   sourceFilename: string;
   correctSpansDetected: number;
   fallbackReason: string | null;
+  /** Phase 5.6: the document declares a True/False section but none was parsed. */
+  missedTrueFalse: boolean;
   onReset: () => void;
 }
+
+/** Human-readable explanation of a Phase 5.6 linter trigger. */
+const FALLBACK_REASON_LABELS: Record<string, string> = {
+  NO_QUESTIONS_FOUND: 'không tìm thấy câu hỏi',
+  LOW_ANSWER_RATIO: 'quá ít đáp án được nhận diện',
+  MISSED_TRUE_FALSE_SECTION: 'bỏ sót phần Đúng/Sai',
+  ANSWER_TEXT_LEAK: 'lộ nội dung đáp án',
+};
 
 /** Selectable variant counts (Phase 5.4). */
 const VARIANT_COUNT_OPTIONS = [1, 2, 4, 8] as const;
@@ -53,6 +68,7 @@ export function ExamPreviewEditor({
   sourceFilename,
   correctSpansDetected,
   fallbackReason,
+  missedTrueFalse,
   onReset,
 }: ExamPreviewEditorProps) {
   const router = useRouter();
@@ -224,9 +240,23 @@ export function ExamPreviewEditor({
       {/* Extraction report */}
       <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-white p-3 text-xs">
         <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 font-semibold text-slate-700">
-          {engineUsed === 'ai' ? <Sparkles size={12} /> : <Zap size={12} />}
-          {engineUsed === 'ai' ? 'Engine 2 — AI' : 'Engine 1 — Rule-based'}
+          {engineUsed === 'rule' ? <Zap size={12} /> : <Sparkles size={12} />}
+          {engineUsed === 'rule'
+            ? 'Engine 1 — Rule-based'
+            : engineUsed === 'ai_fallback'
+              ? 'Engine 2 — AI (tự động)'
+              : 'Engine 2 — AI'}
         </span>
+        {/* Phase 5.6 §3 — explain why the slow path ran on an `auto` upload. */}
+        {engineUsed === 'ai_fallback' && (
+          <span className="inline-flex items-center gap-1 rounded-full bg-purple-100 px-2.5 py-1 font-semibold text-purple-700">
+            <Sparkles size={12} />
+            Đã tự động tối ưu hóa qua AI
+            {fallbackReason
+              ? ` (Lý do: ${FALLBACK_REASON_LABELS[fallbackReason] ?? fallbackReason})`
+              : ''}
+          </span>
+        )}
         <span className="rounded-full bg-slate-100 px-2.5 py-1 font-semibold text-slate-600">
           Chế độ: {mode}
         </span>
@@ -247,13 +277,31 @@ export function ExamPreviewEditor({
             {QUESTION_TYPE_META[type].short}: {count}
           </span>
         ))}
-        {fallbackReason && (
+        {/* The friendly ai_fallback badge already renders this reason; only show
+            the raw code when the fallback was attempted but did NOT take over
+            (e.g. the AI call failed and Engine 1's result was kept). */}
+        {fallbackReason && engineUsed !== 'ai_fallback' && (
           <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2.5 py-1 font-semibold text-amber-700">
             <AlertTriangle size={12} />
             {fallbackReason}
           </span>
         )}
       </div>
+
+      {/* Phase 5.6 §3 — actionable alert when a declared Đúng/Sai section was
+          not recovered. Shown in every mode, since mode=rule never retries. */}
+      {missedTrueFalse && (
+        <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3">
+          <AlertTriangle size={16} className="mt-0.5 shrink-0 text-amber-600" />
+          <div className="text-sm text-amber-800">
+            <p className="font-semibold">Không tìm thấy câu hỏi Đúng/Sai nào.</p>
+            <p className="mt-0.5">
+              Nếu đề có Phần II, hãy thử quét lại bằng chế độ{' '}
+              <strong>&lsquo;AI nâng cao&rsquo;</strong>.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Exam metadata + action bar */}
       <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">

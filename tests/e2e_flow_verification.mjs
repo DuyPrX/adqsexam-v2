@@ -31,6 +31,11 @@
  *      becomes unreachable to students, and can be restored.
  *  18. Re-grading (Phase 5.5): editing an answer key + recalculate_exam_scores
  *      updates the stored score to match.
+ *  19. Rule-engine DOCX parsing (Phase 5.6): sample/test4.docx yields 22 MCQ +
+ *      2 TRUE_FALSE with uppercase A-D Part II sub-items and trailing ĐÁP ÁN
+ *      keys, no answer-block leakage, in well under the CPU budget.
+ *  20. Smart AI fallback (Phase 5.6): a structurally mismatched document in
+ *      `auto` mode trips the anomaly linter and hands over to Engine 2.
  *
  * Usage:
  *   node v2/tests/e2e_flow_verification.mjs
@@ -58,21 +63,50 @@ const { createClient } = await import(
   new URL('../web/node_modules/@supabase/supabase-js/dist/index.mjs', import.meta.url).href
 );
 
-// Phase 5.4 Step 14 exercises the web app's TypeScript shuffle module directly.
-// Node strips types natively, but not the extensionless `./utils` import inside
-// it — so register a tiny resolver that retries with a `.ts` suffix.
+// Phase 5.4 Step 14 exercises the web app's TypeScript shuffle module directly,
+// and Phase 5.6 Steps 19-20 load the Worker's parser + Hono app. Node strips
+// types natively but cannot handle every TS construct the sources use
+// (parameter properties, decorators, enums), nor does it resolve the
+// extensionless `./utils` imports or the Worker's own node_modules. A single
+// module hook covers all three: it retries bare specifiers against the Worker
+// package, appends `.ts` for extensionless relatives, and transpiles any `.ts`
+// file with the Worker's own esbuild.
 const { register } = await import('node:module');
+const WORKER_NODE_MODULES = new URL('../worker/node_modules/', import.meta.url).href;
+const WORKER_PACKAGE = new URL('../worker/package.json', import.meta.url).href;
 register(
   `data:text/javascript,${encodeURIComponent(`
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+const WORKER_NODE_MODULES = ${JSON.stringify(WORKER_NODE_MODULES)};
+const WORKER_PACKAGE = ${JSON.stringify(WORKER_PACKAGE)};
+const { transform } = await import(new URL('esbuild/lib/main.js', WORKER_NODE_MODULES).href);
+
+function isBare(specifier) {
+  return !specifier.startsWith('.') && !specifier.startsWith('/') && !specifier.includes(':');
+}
+
 export async function resolve(specifier, context, nextResolve) {
   try {
     return await nextResolve(specifier, context);
   } catch (error) {
+    if (isBare(specifier)) {
+      return nextResolve(specifier, { ...context, parentURL: WORKER_PACKAGE });
+    }
     if (specifier.startsWith('.') && !/\\.[cm]?[jt]s$/.test(specifier)) {
       return nextResolve(specifier + '.ts', context);
     }
     throw error;
   }
+}
+
+export async function load(url, context, nextLoad) {
+  if (url.endsWith('.ts')) {
+    const source = readFileSync(fileURLToPath(url), 'utf8');
+    const { code } = await transform(source, { loader: 'ts', format: 'esm', target: 'es2022' });
+    return { format: 'module', source: code, shortCircuit: true };
+  }
+  return nextLoad(url, context);
 }
 `)}`,
 );
@@ -85,6 +119,24 @@ const { generateExamVariants } = await import(
 const { toLocalDatetimeString, toUtcIsoString, daysUntil } = await import(
   new URL('../web/src/lib/date.ts', import.meta.url).href
 );
+
+// Phase 5.6 Steps 19-20 — the Worker parser and the full Hono app.
+const { preprocessDocx } = await import(
+  new URL('../worker/src/parser/xml-preprocessor.ts', import.meta.url).href
+);
+const { extractWithRules } = await import(
+  new URL('../worker/src/parser/rule-engine.ts', import.meta.url).href
+);
+const { detectParsingAnomalies } = await import(
+  new URL('../worker/src/parser/anomaly-linter.ts', import.meta.url).href
+);
+const { zipSync, strToU8 } = await import(
+  new URL('../worker/node_modules/fflate/esm/index.mjs', import.meta.url).href
+);
+const { default: workerApp } = await import(
+  new URL('../worker/src/index.ts', import.meta.url).href
+);
+const { readFileSync } = await import('node:fs');
 
 const TEACHER = { email: 'e2e.teacher@adqsexam.local', password: 'e2e-password-123' };
 const EXAM = {
@@ -1289,6 +1341,234 @@ async function main() {
   check('anon cannot call recalculate_exam_scores',
     !!anonRegrade.error || anonRegrade.data?.success === false,
     JSON.stringify(anonRegrade.error ?? anonRegrade.data));
+
+  /* --- 19. Rule-engine DOCX parsing (Phase 5.6) ------------------------- */
+  step(19, 'Rule engine parses the Ministry-format test4.docx in < 15ms');
+
+  const test4Bytes = new Uint8Array(
+    readFileSync(new URL('../../sample/test4.docx', import.meta.url)),
+  );
+  const test4Pre = preprocessDocx(test4Bytes);
+  const parseStarted = performance.now();
+  const test4 = extractWithRules(test4Pre.text);
+  const parseElapsed = performance.now() - parseStarted;
+
+  check('test4 extracts exactly 24 questions', test4.question_count === 24,
+    String(test4.question_count));
+
+  const test4Mcq = test4.data.filter((q) => q.question_type === 'MULTIPLE_CHOICE');
+  const test4Tf = test4.data.filter((q) => q.question_type === 'TRUE_FALSE');
+  check('test4 yields 22 MCQ (Part I)', test4Mcq.length === 22, String(test4Mcq.length));
+  check('test4 yields 2 TRUE_FALSE (Part II)', test4Tf.length === 2, String(test4Tf.length));
+
+  // Part II questions are the last two positions (23, 24) — Part I is 1..22.
+  check('Part II questions occupy positions 23 and 24',
+    test4Tf.length === 2
+      && test4Tf[0]?.position === 23
+      && test4Tf[1]?.position === 24,
+    JSON.stringify(test4Tf.map((q) => q.position)));
+
+  check('Part II Câu 1 carries 4 statement options',
+    test4Tf[0]?.options.length === 4, String(test4Tf[0]?.options.length));
+  check('Part II Câu 2 carries 4 statement options',
+    test4Tf[1]?.options.length === 4, String(test4Tf[1]?.options.length));
+
+  // Keys come from the trailing "ĐÁP ÁN: A. Đúng B. Sai C. Đúng D. Đúng" block.
+  check('Part II Câu 1 key is ["Đ","S","Đ","Đ"]',
+    JSON.stringify(test4Tf[0]?.correct_answer) === JSON.stringify(['Đ', 'S', 'Đ', 'Đ']),
+    JSON.stringify(test4Tf[0]?.correct_answer));
+  check('Part II Câu 2 key is ["Đ","S","S","Đ"]',
+    JSON.stringify(test4Tf[1]?.correct_answer) === JSON.stringify(['Đ', 'S', 'S', 'Đ']),
+    JSON.stringify(test4Tf[1]?.correct_answer));
+
+  // The key block must never reach the student-visible strings.
+  const leaked = test4.data.some(
+    (q) =>
+      q.question_text.includes('ĐÁP ÁN') ||
+      q.options.some((option) => option.includes('ĐÁP ÁN')),
+  );
+  check('no question text or option contains "ĐÁP ÁN"', leaked === false, String(leaked));
+  check('Part II stems do not retain the answer-block marker',
+    test4Tf.every((q) => !/đáp\s*án/i.test(q.question_text)),
+    JSON.stringify(test4Tf.map((q) => q.question_text.slice(-40))));
+
+  check('rule-engine parsing stays under the 15ms bar',
+    parseElapsed < 15, `${parseElapsed.toFixed(2)}ms`);
+  console.log(`  · parse time: ${parseElapsed.toFixed(2)} ms`);
+
+  // The clean document must NOT trip the linter — otherwise every auto upload
+  // would burn an AI call.
+  check('clean test4 triggers no anomaly',
+    detectParsingAnomalies(test4Pre.text, { questions: test4.data }).shouldFallback === false,
+    JSON.stringify(detectParsingAnomalies(test4Pre.text, { questions: test4.data })));
+
+  /* --- 20. Smart AI fallback (Phase 5.6) -------------------------------- */
+  step(20, 'Anomaly linter hands a mismatched document to Engine 2 in auto mode');
+
+  // Build a DOCX with the Ministry shells but a Part II whose four statements
+  // all sit on ONE line. No line-anchored a-d/A-D delimiter exists there, so the
+  // rule engine silently swallows Part II as MCQ: precisely the corruption the
+  // old `question_count === 0 || !has_answers` check never noticed.
+  const buildDocx = (paragraphs) => {
+    const escape = (value) =>
+      value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const body = paragraphs
+      .map((entry) => {
+        const [text, bold] = Array.isArray(entry) ? entry : [entry, false];
+        const rpr = bold ? '<w:rPr><w:b/></w:rPr>' : '';
+        return `<w:p><w:r>${rpr}<w:t xml:space="preserve">${escape(text)}</w:t></w:r></w:p>`;
+      })
+      .join('');
+    const xml =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+      + '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+      + `<w:body>${body}</w:body></w:document>`;
+    return new Uint8Array(zipSync({ 'word/document.xml': strToU8(xml) }));
+  };
+
+  const mismatched = buildDocx([
+    'PHẦN I. Câu hỏi trắc nghiệm nhiều phương án lựa chọn.',
+    'Câu 1. Thủ đô của Việt Nam là gì?',
+    ['A. Hà Nội', true],
+    'B. Huế',
+    'C. Đà Nẵng',
+    'D. TP.HCM',
+    'Câu 2. Quốc gia nào có diện tích lớn nhất?',
+    'A. Việt Nam',
+    ['B. Nga', true],
+    'C. Pháp',
+    'D. Nhật Bản',
+    'Câu 3. 2 + 2 bằng mấy?',
+    'A. 3',
+    'B. 5',
+    ['C. 4', true],
+    'D. 6',
+    'PHẦN II. Câu trắc nghiệm đúng sai.',
+    'Câu 4. Xét các mệnh đề: A. 2 + 2 = 4 B. 3 > 5 C. Trái Đất hình cầu D. 1 = 2',
+  ]);
+
+  const mismatchedPre = preprocessDocx(mismatched);
+  const mismatchedRule = extractWithRules(mismatchedPre.text);
+  check('the mismatched document parses as 0 TRUE_FALSE under the rule engine',
+    mismatchedRule.data.every((q) => q.question_type !== 'TRUE_FALSE'),
+    JSON.stringify(mismatchedRule.data.map((q) => q.question_type)));
+
+  const verdict = detectParsingAnomalies(mismatchedPre.text, { questions: mismatchedRule.data });
+  check('the linter flags MISSED_TRUE_FALSE_SECTION',
+    verdict.shouldFallback === true && verdict.reason === 'MISSED_TRUE_FALSE_SECTION',
+    JSON.stringify(verdict));
+
+  // Drive the real Worker route in-process, stubbing the Gemini HTTP call so the
+  // test stays offline. Engine 2 is made to return a correct 4-question set.
+  const aiPayload = {
+    questions: [
+      {
+        position: 1,
+        question_type: 'MULTIPLE_CHOICE',
+        question_text: 'Thủ đô của Việt Nam là gì?',
+        options: ['Hà Nội', 'Huế', 'Đà Nẵng', 'TP.HCM'],
+        correct_answer: '"0"',
+        explanation: '',
+      },
+      {
+        position: 2,
+        question_type: 'MULTIPLE_CHOICE',
+        question_text: 'Quốc gia nào có diện tích lớn nhất?',
+        options: ['Việt Nam', 'Nga', 'Pháp', 'Nhật Bản'],
+        correct_answer: '"1"',
+        explanation: '',
+      },
+      {
+        position: 3,
+        question_type: 'MULTIPLE_CHOICE',
+        question_text: '2 + 2 bằng mấy?',
+        options: ['3', '5', '4', '6'],
+        correct_answer: '"2"',
+        explanation: '',
+      },
+      {
+        position: 4,
+        question_type: 'TRUE_FALSE',
+        question_text: 'Xét các mệnh đề:',
+        options: ['2 + 2 = 4', '3 > 5', 'Trái Đất hình cầu', '1 = 2'],
+        correct_answer: '["Đ","S","Đ","S"]',
+        explanation: '',
+      },
+    ],
+  };
+
+  const realFetch = globalThis.fetch;
+  let geminiCalls = 0;
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.includes('generativelanguage.googleapis.com')) {
+      geminiCalls += 1;
+      return new Response(
+        JSON.stringify({
+          candidates: [
+            { content: { parts: [{ text: JSON.stringify(aiPayload) }], role: 'model' } },
+          ],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+    return realFetch(input, init);
+  };
+
+  /** POSTs a DOCX to a Worker route with the given mode. */
+  const callExtract = async (bytes, filename, mode) => {
+    const form = new FormData();
+    form.append('file', new Blob([bytes]), filename);
+    const response = await workerApp.request(
+      `http://localhost/api/v1/extract?mode=${mode}`,
+      { method: 'POST', body: form },
+      { GEMINI_API_KEY: 'e2e-stub-key' },
+    );
+    return response.json();
+  };
+
+  try {
+    const autoCorrupt = await callExtract(mismatched, 'mismatched.docx', 'auto');
+    check('auto mode reports engine_used = ai_fallback',
+      autoCorrupt.engine_used === 'ai_fallback', String(autoCorrupt.engine_used));
+    check('auto mode reports the anomaly as fallback_reason',
+      autoCorrupt.meta?.fallback_reason === 'MISSED_TRUE_FALSE_SECTION',
+      String(autoCorrupt.meta?.fallback_reason));
+    check('auto mode returns the AI payload, not the corrupt rule payload',
+      autoCorrupt.count === 4
+        && autoCorrupt.data.some((q) => q.question_type === 'TRUE_FALSE'),
+      JSON.stringify(autoCorrupt.data.map((q) => q.question_type)));
+    check('exactly one Engine 2 call was made', geminiCalls === 1, String(geminiCalls));
+
+    // mode=rule must NOT call the AI, and must flag the miss instead.
+    const ruleCorrupt = await callExtract(mismatched, 'mismatched.docx', 'rule');
+    check('rule mode never triggers the AI fallback',
+      ruleCorrupt.engine_used === 'rule' && geminiCalls === 1, String(geminiCalls));
+    check('rule mode still reports missed_true_false to the UI',
+      ruleCorrupt.meta?.missed_true_false === true,
+      JSON.stringify(ruleCorrupt.meta?.missed_true_false));
+
+    // The clean document must stay on Engine 1 in auto mode (zero AI cost).
+    const autoClean = await callExtract(test4Bytes, 'test4.docx', 'auto');
+    check('a clean document stays on the rule engine in auto mode',
+      autoClean.engine_used === 'rule' && autoClean.count === 24,
+      `${autoClean.engine_used}/${autoClean.count}`);
+    check('a clean document performs no Engine 2 call', geminiCalls === 1, String(geminiCalls));
+
+    // Regression: test2.docx must still parse with full answer coverage.
+    const test2Bytes = new Uint8Array(
+      readFileSync(new URL('../../sample/test2.docx', import.meta.url)),
+    );
+    const test2 = extractWithRules(preprocessDocx(test2Bytes).text);
+    check('test2.docx regression: still 98 questions', test2.question_count === 98,
+      String(test2.question_count));
+    check('test2.docx regression: every question is MCQ with a resolved key',
+      test2.data.every((q) => q.question_type === 'MULTIPLE_CHOICE')
+        && test2.data.filter((q) => q.correct_answer !== null).length >= 96,
+      `${test2.data.filter((q) => q.correct_answer !== null).length}/${test2.question_count}`);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);

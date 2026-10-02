@@ -12,7 +12,7 @@ export type QuestionType = 'MULTIPLE_CHOICE' | 'TRUE_FALSE' | 'SHORT_ANSWER' | '
 export type ExtractionMode = 'rule' | 'ai' | 'auto';
 
 /** Engine that actually produced the payload. */
-export type EngineUsed = 'rule' | 'ai';
+export type EngineUsed = 'rule' | 'ai' | 'ai_fallback';
 
 /**
  * A question returned by the Worker and persisted into `public.question_bank`.
@@ -48,6 +48,12 @@ export interface ExtractionResponse {
     fallback_reason: string | null;
     /** Effective AI model, or null when the rule engine produced the payload. */
     model_used?: string | null;
+    /**
+     * Phase 5.6: the document declares a True/False section but none was parsed.
+     * Set even in `mode=rule`, where no AI fallback runs, so the UI can prompt
+     * the teacher to retry with the AI engine.
+     */
+    missed_true_false?: boolean;
   };
   error?: { code: string; message: string };
 }

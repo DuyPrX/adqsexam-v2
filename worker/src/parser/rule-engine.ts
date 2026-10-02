@@ -36,6 +36,21 @@ const QUESTION_START = /^(?:câu\s*\d+|question\s*\d+|q\s*\d+|\d+)\s*[.):\-\/]\s
 const SECTION_HEADER = /^PHẦN\s+(I{1,3}|IV|V|VI{0,3}|[A-C])\b\s*[.:)\-]?\s*(.*)$/i;
 
 /**
+ * Phase 5.6 — keyword-based section boundaries.
+ *
+ * SECTION_HEADER only recognises the roman-numeral `PHẦN I` spelling. Ministry
+ * (Bộ GD&ĐT) papers — and `PART 2`-style imports — also label sections by their
+ * *subject matter*. These are anchored at a line start so prose that merely
+ * mentions "phần 2" mid-sentence cannot open a section.
+ */
+const SECTION_TRUE_FALSE_KEYWORD =
+  /^(?:phần|part)\s*(?:ii|2)[\s.:]+.*?(?:đúng\s*[-/]?\s*sai|true\s*[-/]?\s*false)/i;
+const SECTION_SHORT_ANSWER_KEYWORD =
+  /^(?:phần|part)\s*(?:iii|3)[\s.:]+.*?(?:ngắn|điền\s*khuyết|tự\s*luận)/i;
+const SECTION_MULTIPLE_CHOICE_KEYWORD =
+  /^(?:phần|part)\s*(?:i|1)[\s.:]+.*?(?:trắc\s*nghiệm|nhiều\s*phương\s*án)/i;
+
+/**
  * v1 ANSWER_PATTERN — option delimiter, A-D.
  *
  * Two delimiter forms are needed, because real papers use both layouts:
@@ -52,13 +67,55 @@ const OPTION_LINE_ANCHORED = /(?:^|\n)[ \t]*([A-D])\s*[.):\-\/]\s*/g;
 const OPTION_INLINE = /(?:^|\s)([A-D])\s*[.):\-\/]\s+/g;
 
 /**
- * v1 SUB_QUESTION_PATTERN — true/false sub-item delimiter, a-d.
+ * v1 SUB_QUESTION_PATTERN — true/false sub-item delimiter, lowercase a-d.
  *
  * Kept line-anchored exactly as v1 had it: unlike A-D, the letters a-d occur
  * constantly inside ordinary prose, so allowing inline matches here would
  * generate false True/False blocks.
  */
 const SUB_ITEM_AT_LINE_START = /(?:^|\n)[ \t]*([a-d])\s*[).\/]\s*/g;
+
+/**
+ * Phase 5.6 §2 — the same delimiter, additionally accepting uppercase A-D.
+ *
+ * Ministry (Bộ GD&ĐT) True/False sections label the four statements `A.`–`D.`.
+ * This variant is used ONLY while a True/False section is active: outside one,
+ * an uppercase A-D run is far more likely to be truncated MCQ options, which
+ * must not be relabelled as sub-items.
+ */
+const SUB_ITEM_ANY_CASE_AT_LINE_START = /(?:^|\n)[ \t]*([a-dA-D])\s*[).\/]\s*/g;
+
+/**
+ * Phase 5.6 §3 — trailing True/False answer block.
+ *
+ * Ministry papers frequently omit inline Đ/S marks and instead print a single
+ * key line such as "ĐÁP ÁN: A. Đúng B. Sai C. Đúng D. Đúng". Captured groups
+ * 1-4 are the four verdicts in A→D order.
+ */
+const TF_ANSWER_KEY_BLOCK =
+  /(?:đáp\s*án|đáp\s*án\s*tham\s*khảo)[\s:]*\n?\s*A[\s.:]+(đúng|sai|đ|s)[\s\t,;]+B[\s.:]+(đúng|sai|đ|s)[\s\t,;]+C[\s.:]+(đúng|sai|đ|s)[\s\t,;]+D[\s.:]+(đúng|sai|đ|s)/i;
+
+/** Canonicalise a captured verdict token to the frozen "Đ" | "S" vocabulary. */
+function toTrueFalseKey(value: string): 'Đ' | 'S' {
+  return value.trim().toLowerCase().startsWith('đ') ? 'Đ' : 'S';
+}
+
+/**
+ * Remove a trailing answer block from display text (Phase 5.6 §3).
+ *
+ * The key must never reach `question_text` or `options`: those strings are sent
+ * to the student SPA, and leaking "ĐÁP ÁN: A. Đúng …" would hand over the entire
+ * answer key. Only the marker and its key line are dropped — an inline
+ * "đáp án:" belonging to a *different* construct is left untouched.
+ */
+function stripAnswerKeyBlock(value: string): string {
+  if (!/đáp\s*án/i.test(value)) return value;
+  return value
+    .replace(TF_ANSWER_KEY_BLOCK, ' ')
+    .replace(/đáp\s*án\s*(?:tham\s*khảo)?\s*[:;]/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
 /** v1 explanation marker (QuestionTypeParser.extractMCQ). */
 const EXPLANATION_PATTERN =
@@ -177,6 +234,26 @@ function resolveSection(roman: string, title: string): SectionKind {
 }
 
 /**
+ * Phase 5.6 §1 — resolve a section from a section-opening *line*.
+ *
+ * Returns null when the line does not open a section. The roman-numeral
+ * `PHẦN II` spelling is tried first (it carries a title on the same line), then
+ * the keyword forms (`PHẦN II. Câu trắc nghiệm đúng sai`) that Ministry papers
+ * use. Both are needed: `PHẦN II. Tự luận` resolves to ESSAY via the title,
+ * whereas a bare keyword line has no roman numeral at all.
+ */
+function detectSectionStart(clean: string): SectionKind | null {
+  const roman = SECTION_HEADER.exec(clean);
+  if (roman) return resolveSection(roman[1] ?? '', roman[2] ?? '');
+
+  if (SECTION_TRUE_FALSE_KEYWORD.test(clean)) return 'TRUE_FALSE';
+  if (SECTION_SHORT_ANSWER_KEYWORD.test(clean)) return 'SHORT_ANSWER';
+  if (SECTION_MULTIPLE_CHOICE_KEYWORD.test(clean)) return 'MCQ';
+
+  return null;
+}
+
+/**
  * Split the document into question blocks, tracking the active section.
  * Mirrors v1 QuestionBlockExtractor.extract().
  */
@@ -206,10 +283,10 @@ function segmentBlocks(marked: string): Block[] {
     // Test structure on marker-free text.
     const clean = tokenize(line).text.trim();
 
-    const sectionMatch = SECTION_HEADER.exec(clean);
-    if (sectionMatch) {
+    const sectionKind = detectSectionStart(clean);
+    if (sectionKind !== null) {
       flush();
-      section = resolveSection(sectionMatch[1] ?? '', sectionMatch[2] ?? '');
+      section = sectionKind;
       continue;
     }
 
@@ -412,28 +489,62 @@ function buildMcq(block: Block, position: number): ExtractedQuestion | null {
 }
 
 /**
- * True/False builder.
+ * Collect the first four a/b/c/d (or A/B/C/D) sub-item delimiters, skipping any
+ * that fall inside a trailing answer block.
  *
- * Supported shape: sub-items a)–d) whose correct Đ/S token is marked inline,
- * e.g. "a) [CORRECT]Đ[/CORRECT] 2 + 2 = 4". When no inline key exists the array
- * stays null, which is what drives the mode=auto AI fallback.
+ * @param anyCase also accept uppercase A-D (Phase 5.6 §2, True/False sections).
  */
-function buildTrueFalse(block: Block, position: number): ExtractedQuestion | null {
-  const body: MarkedText = { text: block.text, mask: block.mask };
+function collectSubItemStarts(
+  body: MarkedText,
+  anyCase = false,
+): Array<{ start: number; end: number }> {
+  const pattern = anyCase ? SUB_ITEM_ANY_CASE_AT_LINE_START : SUB_ITEM_AT_LINE_START;
+  const keyMatch = TF_ANSWER_KEY_BLOCK.exec(body.text);
+  const keyStart = keyMatch ? keyMatch.index : -1;
+  const keyEnd = keyMatch ? keyMatch.index + keyMatch[0].length : -1;
+
   const starts: Array<{ start: number; end: number }> = [];
 
-  SUB_ITEM_AT_LINE_START.lastIndex = 0;
+  pattern.lastIndex = 0;
   let match: RegExpExecArray | null;
-  while ((match = SUB_ITEM_AT_LINE_START.exec(body.text)) !== null) {
+  while ((match = pattern.exec(body.text)) !== null) {
     const delimStart = match.index + (match[0].startsWith('\n') ? 1 : 0);
+    // Never treat the answer-block line as a statement.
+    if (keyStart >= 0 && delimStart >= keyStart && delimStart < keyEnd) continue;
     starts.push({ start: delimStart, end: match.index + match[0].length });
     if (starts.length === 4) break;
   }
 
+  return starts;
+}
+
+/**
+ * True/False builder.
+ *
+ * Two key layouts are supported (Phase 5.6):
+ *   (a) inline marks — "a) [CORRECT]Đ[/CORRECT] 2 + 2 = 4";
+ *   (b) a trailing answer block — "ĐÁP ÁN: A. Đúng B. Sai C. Đúng D. Đúng".
+ * Layout (b) is what the Ministry papers ship when the sub-items carry no
+ * formatting at all, and the block must be stripped from the output so the key
+ * never leaks into the student's view.
+ *
+ * Sub-items may be lowercase `a)` or uppercase `A.` (Phase 5.6 §2).
+ * When neither key form is present the array stays null, which drives the
+ * mode=auto AI fallback.
+ */
+function buildTrueFalse(block: Block, position: number): ExtractedQuestion | null {
+  const body: MarkedText = { text: block.text, mask: block.mask };
+
+  const keyMatch = TF_ANSWER_KEY_BLOCK.exec(body.text);
+  // Inside a declared True/False section the statements may be labelled A-D.
+  const starts = collectSubItemStarts(body, block.section === 'TRUE_FALSE');
+
   if (starts.length < 2) return null;
 
   const first = starts[0] as { start: number; end: number };
-  const stemText = squash(stripQuestionNumber(sliceMarked(body, 0, first.start).text));
+  const stemText = stripAnswerKeyBlock(
+    squash(stripQuestionNumber(sliceMarked(body, 0, first.start).text)),
+  );
 
   const statements: string[] = [];
   const answers: Array<'Đ' | 'S' | ''> = [];
@@ -462,13 +573,26 @@ function buildTrueFalse(block: Block, position: number): ExtractedQuestion | nul
       statement = squash(statement.replace(/^(?:đúng|sai|đ|s)\b[.:)\-]?\s*/i, ''));
     }
 
-    statements.push(statement);
+    statements.push(stripAnswerKeyBlock(statement));
     answers.push(answer);
   }
 
   if (statements.length < 2) return null;
 
-  const resolved = answers.every((answer) => answer !== '');
+  // Prefer inline marks; fall back to the trailing block (Phase 5.6 §3).
+  const inlineResolved = answers.every((answer) => answer !== '');
+  const trailingKeys = keyMatch
+    ? ([
+        toTrueFalseKey(keyMatch[1] ?? ''),
+        toTrueFalseKey(keyMatch[2] ?? ''),
+        toTrueFalseKey(keyMatch[3] ?? ''),
+        toTrueFalseKey(keyMatch[4] ?? ''),
+      ] as Array<'Đ' | 'S'>)
+    : null;
+
+  let correctAnswer: Array<'Đ' | 'S'> | null = null;
+  if (inlineResolved) correctAnswer = answers as Array<'Đ' | 'S'>;
+  else if (trailingKeys !== null) correctAnswer = trailingKeys;
 
   return {
     position,
@@ -476,7 +600,7 @@ function buildTrueFalse(block: Block, position: number): ExtractedQuestion | nul
     question_text: stemText,
     options: statements,
     // Array of Đ/S keys, one per sub-item — Phase 1 contract (schema A.2).
-    correct_answer: resolved ? answers : null,
+    correct_answer: correctAnswer,
     explanation: null,
   };
 }
@@ -557,12 +681,25 @@ function buildEssay(block: Block, position: number): ExtractedQuestion {
 
 /**
  * Decide the type of one block (F4).
- * Order: options imply MCQ; a/b/c/d sub-items imply True/False; then the section
- * declaration; then the essay keyword heuristic; otherwise Short Answer (the v1
- * parseUnknownBlock() fallthrough).
+ *
+ * Order (Phase 5.6):
+ *   1. A declared True/False section wins outright. Ministry Part II blocks
+ *      carry `a. …`–`d. …` statements, but a formatting accident can also make
+ *      them look like MCQ options — the section header is the stronger signal,
+ *      so it is checked before `findOptions()`.
+ *   2. Options imply MCQ.
+ *   3. a/b/c/d sub-items imply True/False.
+ *   4. Then the section declaration (essay / short answer).
+ *   5. Then the essay keyword heuristic.
+ *   6. Otherwise Short Answer (the v1 parseUnknownBlock() fallthrough).
  */
 function classifyBlock(block: Block): QuestionType {
   const body: MarkedText = { text: block.text, mask: block.mask };
+
+  if (block.section === 'TRUE_FALSE' && collectSubItemStarts(body, true).length >= 2) {
+    return 'TRUE_FALSE';
+  }
+
   if (findOptions(body) !== null) return 'MULTIPLE_CHOICE';
 
   SUB_ITEM_AT_LINE_START.lastIndex = 0;

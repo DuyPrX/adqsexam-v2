@@ -85,7 +85,23 @@ curl.exe -s -X POST "http://127.0.0.1:8787/api/v1/extract?mode=rule" `
 |---|---|
 | `rule` | Engine 1 only — zero API cost |
 | `ai` | Engine 2 only; `503` when `GEMINI_API_KEY` is unset |
-| `auto` | Engine 1, falling back to Engine 2 when it finds **no questions** or **no resolved answer keys**. If the AI call fails, Engine 1's result is returned with the reason in `meta.fallback_reason` |
+| `auto` | Engine 1, then the Phase 5.6 anomaly linter decides whether to hand over to Engine 2 (reported as `engine_used: 'ai_fallback'`). If the AI call fails, Engine 1's result is returned with the reason in `meta.fallback_reason` |
+
+### Anomaly linter (Phase 5.6)
+
+`auto` no longer falls back on a bare `question_count === 0 || !has_answers`
+check. `parser/anomaly-linter.ts` inspects the rule output together with the raw
+document and escalates when:
+
+| `fallback_reason` | Trigger |
+|---|---|
+| `NO_QUESTIONS_FOUND` | Engine 1 produced nothing |
+| `LOW_ANSWER_RATIO` | fewer than 65% of questions carry a key |
+| `MISSED_TRUE_FALSE_SECTION` | the document declares a Đúng/Sai section but 0 `TRUE_FALSE` questions were parsed |
+| `ANSWER_TEXT_LEAK` | a raw `đáp án:` marker survived into `question_text` or `options` |
+
+`meta.missed_true_false` is reported in **every** mode (including `mode=rule`,
+where no fallback runs) so the teacher UI can suggest re-scanning with AI.
 
 ### Model selection
 
@@ -131,6 +147,7 @@ src/
   types.ts                    Persistence contract (mirrors supabase/schema.sql)
   parser/xml-preprocessor.ts  fflate unzip + zip-bomb guards + F5 [CORRECT] tagging
   parser/rule-engine.ts       Engine 1: block segmentation + MCQ/TF/Short/Essay
+  parser/anomaly-linter.ts    Engine 1 -> Engine 2 escalation heuristic (Phase 5.6)
   ai/ai-engine.ts             Engine 2: @google/genai structured output
 scripts/
   verify-sample.ts            Verification harness
@@ -168,9 +185,12 @@ the ROADMAP prescribes ("Fast regex + XML *stream* parsing").
 
 - **Zip-bomb guards**: ≤50 MB compressed, ≤128 MB inflated for `word/document.xml`,
   `PK\x03\x04` magic-byte validation, and only that one entry is ever inflated.
-- **Answer-key tables are not parsed.** Truth of the sub-item answers can only come
-  from inline marked `Đ`/`S` tokens. Exams whose keys live in a separate answer-key
-  table yield `correct_answer: null` and are routed to Engine 2 by `mode=auto`.
+- **Answer keys come from inline marks or a trailing block.** Inline marked `Đ`/`S`
+  tokens are read first; failing that, a Phase 5.6 trailing block
+  (`ĐÁP ÁN: A. Đúng B. Sai C. Đúng D. Đúng`) supplies the four verdicts and is
+  stripped from the output so it cannot leak to students. Rows whose keys live
+  only in a separate answer-key *table* still yield `correct_answer: null` and are
+  routed to Engine 2 by `mode=auto`.
 - **Font colour `auto`/`none` and theme colours are never treated as correctness
   signals**, so default black text cannot be mistaken for a marked answer.
 - Word sometimes marks only the option delimiter (`[CORRECT]C.[/CORRECT] Lý Bí.`);

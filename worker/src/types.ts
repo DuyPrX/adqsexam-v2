@@ -50,4 +50,14 @@ export interface ExtractionResult extends ExtractionMeta {
 
 /** Engine selection. */
 export type ExtractionMode = 'rule' | 'ai' | 'auto';
-export type EngineUsed = 'rule' | 'ai';
+
+/**
+ * Which engine produced the payload.
+ *
+ *   rule        — Engine 1 answered in `mode=rule`, or cleanly in `mode=auto`.
+ *   ai          — Engine 2 answered an explicit `mode=ai` request.
+ *   ai_fallback — `mode=auto`: Engine 1's output tripped the anomaly linter and
+ *                 Engine 2 took over (Phase 5.6 §2). Distinguished from `ai` so
+ *                 the teacher UI can explain *why* the slow path ran.
+ */
+export type EngineUsed = 'rule' | 'ai' | 'ai_fallback';

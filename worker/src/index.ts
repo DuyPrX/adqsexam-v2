@@ -10,8 +10,8 @@
  * Engine dispatch (Phase 2 decision, ARCHITECTURE_FREEZE.md §3.5):
  *   rule -> Engine 1 only
  *   ai   -> Engine 2 only
- *   auto -> Engine 1, falling back to Engine 2 when it yields no questions or
- *           no resolved answer keys.
+ *   auto -> Engine 1, then the Phase 5.6 anomaly linter decides whether to hand
+ *           over to Engine 2 (reported as `engine_used: 'ai_fallback'`).
  */
 
 import { Hono } from 'hono';
@@ -19,6 +19,7 @@ import { cors } from 'hono/cors';
 import { AiEngineError, extractWithAi, resolveModelName } from './ai/ai-engine';
 import { DocxError, preprocessDocx } from './parser/xml-preprocessor';
 import { extractWithRules } from './parser/rule-engine';
+import { detectParsingAnomalies, documentDeclaresTrueFalse } from './parser/anomaly-linter';
 import type { EngineUsed, ExtractionMode, ExtractedQuestion } from './types';
 
 export interface Env {
@@ -258,16 +259,19 @@ app.post('/api/v1/extract', async (c) => {
     }
   } else {
     // mode === 'auto'
+    //
+    // Phase 5.6 §2: Engine 1 runs first (free, <10ms). Its output is then
+    // inspected by the anomaly linter rather than the old
+    // `question_count === 0 || !has_answers` check, which silently accepted
+    // subtly-corrupted parses (e.g. a True/False section read as MCQ).
     const ruleResult = extractWithRules(text);
+    const ruleParse = { questions: ruleResult.data };
     data = ruleResult.data;
     engineUsed = 'rule';
 
-    const needsFallback = ruleResult.question_count === 0 || !ruleResult.has_answers;
-    if (needsFallback) {
-      fallbackReason =
-        ruleResult.question_count === 0
-          ? 'rule_engine_found_no_questions'
-          : 'rule_engine_unresolved_answers';
+    const anomaly = detectParsingAnomalies(text, ruleParse);
+    if (anomaly.shouldFallback) {
+      fallbackReason = anomaly.reason ?? 'ANOMALY_DETECTED';
       try {
         const aiResult = await extractWithAi({
           apiKey: c.env.GEMINI_API_KEY,
@@ -278,7 +282,7 @@ app.post('/api/v1/extract', async (c) => {
         // Prefer the AI result only when it actually improves on Engine 1.
         if (aiResult.question_count > 0) {
           data = aiResult.data;
-          engineUsed = 'ai';
+          engineUsed = 'ai_fallback';
         }
       } catch (error) {
         // Auto mode degrades gracefully: keep Engine 1 output and report why.
@@ -300,9 +304,15 @@ app.post('/api/v1/extract', async (c) => {
       has_answers: data.some((question) => question.correct_answer !== null),
       fallback_reason: fallbackReason,
       // Reported so the teacher UI can confirm which model actually ran.
-      model_used: engineUsed === 'ai'
-        ? resolveModelName(requestedModel, envDefaultModel(c.env))
-        : null,
+      model_used: engineUsed === 'rule'
+        ? null
+        : resolveModelName(requestedModel, envDefaultModel(c.env)),
+      // Phase 5.6: the document declares a True/False section but none was
+      // parsed. Surfaced to the teacher even in mode=rule, where the linter
+      // cannot act, so the UI can suggest re-running with AI.
+      missed_true_false:
+        documentDeclaresTrueFalse(text)
+        && !data.some((question) => question.question_type === 'TRUE_FALSE'),
     },
   });
 });
@@ -390,6 +400,9 @@ app.post('/api/v1/extract-practice', async (c) => {
       correct_spans_detected: correctSpanCount,
       has_answers: result.data.some((question) => question.correct_answer !== null),
       fallback_reason: null,
+      missed_true_false:
+        documentDeclaresTrueFalse(text)
+        && !result.data.some((question) => question.question_type === 'TRUE_FALSE'),
     },
   });
 });
