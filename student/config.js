@@ -20,7 +20,7 @@
   }
 
   window.APP_CONFIG = {
-    supabaseUrl: pick('sb', 'adqs_sb_url') || 'YOUR_SUPABASE_PROJECT_URL',
-    supabaseKey: pick('sbkey', 'adqs_sb_key') || 'YOUR_SUPABASE_PUBLISHABLE_KEY',
+    supabaseUrl: pick('sb', 'adqs_sb_url') || 'https://gmjzhgultqqvsfrdeymj.supabase.co',
+    supabaseKey: pick('sbkey', 'adqs_sb_key') || 'sb_publishable_imRPFwvw3Ynz6wVEpZ9TNA_v1S6ym0W',
   };
 })();
