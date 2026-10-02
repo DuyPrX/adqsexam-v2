@@ -23,6 +23,22 @@ function fail(message: string, code: string, status: number) {
   );
 }
 
+/**
+ * Accepts only plausible model identifiers.
+ *
+ * The value is interpolated into an outbound URL, so a permissive allow-list is
+ * the right shape: reject anything that is not a simple `<vendor>/<model>` or
+ * `<model>` slug. This blocks path traversal, query injection and header abuse
+ * while still permitting arbitrary custom model IDs (Phase 5.3 §2).
+ */
+function sanitizeModel(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (trimmed === '') return null;
+  if (trimmed.length > 100) return null;
+  return /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(trimmed) ? trimmed : null;
+}
+
 export async function POST(request: Request) {
   // 1. Require a teacher session.
   const supabase = await createClient();
@@ -56,20 +72,29 @@ export async function POST(request: Request) {
     return fail('Tệp vượt giới hạn 50MB.', 'TOO_LARGE', 413);
   }
 
-  const modeParam = new URL(request.url).searchParams.get('mode');
+  const search = new URL(request.url).searchParams;
+  const modeParam = search.get('mode');
   const mode = modeParam === 'rule' || modeParam === 'ai' ? modeParam : 'auto';
+
+  // Model selection (Phase 5.3): accept it from the query string or the
+  // multipart field, validate the shape, then forward to the Worker.
+  const model = sanitizeModel(search.get('model') ?? form.get('model'));
 
   // 4. Call the Worker with the secret attached.
   const upstream = new FormData();
   upstream.append('file', file, file.name);
+  if (model) upstream.append('model', model);
 
   const headers: Record<string, string> = {};
   const secret = process.env.EXTRACTOR_INTERNAL_SECRET;
   if (secret) headers['X-Internal-Secret'] = secret;
 
+  const upstreamQuery = new URLSearchParams({ mode });
+  if (model) upstreamQuery.set('model', model);
+
   let workerResponse: Response;
   try {
-    workerResponse = await fetch(`${endpoint}?mode=${mode}`, {
+    workerResponse = await fetch(`${endpoint}?${upstreamQuery.toString()}`, {
       method: 'POST',
       headers,
       body: upstream,

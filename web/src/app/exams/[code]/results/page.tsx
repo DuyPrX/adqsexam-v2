@@ -28,33 +28,45 @@ async function loadExam(code: string): Promise<ExamRow | null> {
 
 export default async function ExamResultsPage({ params }: PageProps) {
   const { code } = await params;
-  const exam = await loadExam(code);
-  if (!exam) notFound();
 
+  // Phase 5.3 §3: no waterfall. The three child queries key off `code` (not on
+  // the exam row), so they can run concurrently with `loadExam` instead of
+  // waiting for it. `question_bank` is the only one that needs `exam.id`, so it
+  // resolves the id itself rather than forcing a second round-trip.
   const supabase = await createClient();
 
-  const [resultsResponse, questionsResponse, rosterResponse] = await Promise.all([
+  const [exam, resultsResponse, questionsResponse, rosterResponse] = await Promise.all([
+    loadExam(code),
     supabase
       .from('exam_results')
       .select('*')
-      .eq('exam_code', exam.code)
+      .eq('exam_code', code)
       .order('submitted_at', { ascending: false }),
     supabase
       .from('question_bank')
-      .select('*')
-      .eq('exam_id', exam.id)
+      .select('*, exam:exams!inner(code)')
+      .eq('exam.code', code)
       .order('position', { ascending: true }),
     // Roster: active_sessions carries no names, so the live monitor resolves
     // identity from `students` in memory.
     supabase
       .from('students')
       .select('student_code, exam_code, full_name, class_name')
-      .eq('exam_code', exam.code),
+      .eq('exam_code', code),
   ]);
+
+  if (!exam) notFound();
 
   if (resultsResponse.error) throw new PersistenceError(resultsResponse.error.message);
   if (questionsResponse.error) throw new PersistenceError(questionsResponse.error.message);
   if (rosterResponse.error) throw new PersistenceError(rosterResponse.error.message);
+
+  // The embedded `exam` join is only there to filter; strip it back off so the
+  // component keeps receiving plain QuestionBankRow objects.
+  const questions = (questionsResponse.data ?? []).map((row) => {
+    const { exam: _exam, ...question } = row as QuestionBankRow & { exam: { code: string } };
+    return question as QuestionBankRow;
+  });
 
   return (
     <main className="mx-auto max-w-6xl space-y-4 p-6">
@@ -80,7 +92,7 @@ export default async function ExamResultsPage({ params }: PageProps) {
       <ResultsDashboard
         exam={exam}
         initialResults={(resultsResponse.data ?? []) as ExamResultRow[]}
-        questions={(questionsResponse.data ?? []) as QuestionBankRow[]}
+        questions={questions}
       />
     </main>
   );

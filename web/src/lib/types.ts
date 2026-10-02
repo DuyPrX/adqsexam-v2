@@ -46,6 +46,8 @@ export interface ExtractionResponse {
     correct_spans_detected: number;
     has_answers: boolean;
     fallback_reason: string | null;
+    /** Effective AI model, or null when the rule engine produced the payload. */
+    model_used?: string | null;
   };
   error?: { code: string; message: string };
 }

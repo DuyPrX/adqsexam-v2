@@ -14,8 +14,27 @@ import { GoogleGenAI, Type } from '@google/genai';
 import type { ExtractedQuestion, QuestionType } from '../types';
 import { stripMarkers } from '../parser/xml-preprocessor';
 
-/** Default model; overridable with the GEMINI_MODEL var in wrangler.toml. */
+/**
+ * Hard-coded last-resort model.
+ *
+ * Resolution order (Phase 5.3): explicit `modelName` option -> the
+ * `DEFAULT_AI_MODEL` Worker binding -> this constant.
+ */
 export const DEFAULT_MODEL = 'gemini-2.5-flash';
+
+/**
+ * Resolves which model to call, applying the documented fallback priority.
+ * Exported so the Worker can report the effective model in its response meta.
+ */
+export function resolveModelName(
+  requested: string | undefined,
+  envDefault: string | undefined,
+): string {
+  for (const candidate of [requested, envDefault]) {
+    if (typeof candidate === 'string' && candidate.trim() !== '') return candidate.trim();
+  }
+  return DEFAULT_MODEL;
+}
 
 /** Hard cap on the text handed to the model, to bound token cost and latency. */
 const MAX_INPUT_CHARS = 120_000;
@@ -282,7 +301,10 @@ function extractJsonPayload(text: string): unknown {
 
 export interface AiEngineOptions {
   apiKey: string | undefined;
+  /** Explicit model id. Highest priority in the resolution chain. */
   model?: string;
+  /** Worker binding fallback (`DEFAULT_AI_MODEL`). Lower priority than `model`. */
+  envModel?: string;
   /** Marked-up text (markers are stripped before sending). */
   text: string;
 }
@@ -300,7 +322,8 @@ export interface AiEngineResult {
  */
 export async function extractWithAi(options: AiEngineOptions): Promise<AiEngineResult> {
   const { apiKey, text } = options;
-  const model = options.model && options.model.trim() !== '' ? options.model.trim() : DEFAULT_MODEL;
+  // Priority: explicit caller model -> Worker default binding -> built-in.
+  const model = resolveModelName(options.model, options.envModel);
 
   if (!apiKey || apiKey.trim() === '') {
     throw new AiEngineError(

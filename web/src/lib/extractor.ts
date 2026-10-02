@@ -26,6 +26,11 @@ export class ExtractionError extends Error {
 export interface ExtractOptions {
   /** `auto` (default) falls back to AI when the rule engine is inconclusive. */
   mode?: ExtractionMode;
+  /**
+   * Explicit AI model id (Phase 5.3). Only meaningful when the AI engine runs;
+   * the Worker falls back to its DEFAULT_AI_MODEL binding when omitted.
+   */
+  model?: string;
   signal?: AbortSignal;
 }
 
@@ -33,7 +38,7 @@ export async function extractDocx(
   file: File,
   options: ExtractOptions = {},
 ): Promise<ExtractionResponse> {
-  const { mode = 'auto', signal } = options;
+  const { mode = 'auto', model, signal } = options;
 
   if (!file.name.toLowerCase().endsWith('.docx')) {
     throw new ExtractionError('Chỉ hỗ trợ tệp .docx', 'BAD_EXTENSION', 400);
@@ -48,6 +53,12 @@ export async function extractDocx(
 
   const form = new FormData();
   form.append('file', file);
+  // The model rides in the multipart body so the proxy route can forward it
+  // without having to re-serialize the request.
+  if (model && model.trim() !== '') form.append('model', model.trim());
+
+  const url = new URLSearchParams({ mode });
+  if (model && model.trim() !== '') url.set('model', model.trim());
 
   // AI extraction can take well over a minute on a long document.
   const timeoutMs = mode === 'rule' ? 60_000 : 180_000;
@@ -56,7 +67,7 @@ export async function extractDocx(
 
   let response: Response;
   try {
-    response = await fetch(`/api/extract?mode=${mode}`, {
+    response = await fetch(`/api/extract?${url.toString()}`, {
       method: 'POST',
       body: form,
       signal: combined,

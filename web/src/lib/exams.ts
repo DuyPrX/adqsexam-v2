@@ -1,3 +1,4 @@
+import { cache } from 'react';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { ExamRow, ExtractedQuestion, RosterEntry } from './types';
 import { generateExamCode } from './utils';
@@ -157,8 +158,14 @@ export async function saveRoster(
   return { inserted: rows.length, skipped: entries.length - rows.length };
 }
 
-/** Fetches every exam owned by the current teacher, newest first. */
-export async function listExams(supabase: SupabaseClient): Promise<ExamRow[]> {
+/**
+ * Fetches every exam owned by the current teacher, newest first.
+ *
+ * Wrapped in React `cache` (Phase 5.3 §3): the dashboard renders in one request
+ * pass, and server components may legitimately ask for the same list more than
+ * once. Without this, each call is a fresh Supabase round-trip.
+ */
+export const listExams = cache(async (supabase: SupabaseClient): Promise<ExamRow[]> => {
   const { data, error } = await supabase
     .from('exams')
     .select('id, user_id, code, title, duration_minutes, is_active, created_at')
@@ -166,19 +173,19 @@ export async function listExams(supabase: SupabaseClient): Promise<ExamRow[]> {
 
   if (error) throw new PersistenceError(`Không tải được danh sách đề: ${error.message}`);
   return data ?? [];
-}
+});
 
 /** Submission counts per exam code, used by the dashboard table. */
-export async function countResultsByExam(
-  supabase: SupabaseClient,
-): Promise<Map<string, number>> {
-  const { data, error } = await supabase.from('exam_results').select('exam_code');
-  if (error) throw new PersistenceError(`Không tải được số bài nộp: ${error.message}`);
+export const countResultsByExam = cache(
+  async (supabase: SupabaseClient): Promise<Map<string, number>> => {
+    const { data, error } = await supabase.from('exam_results').select('exam_code');
+    if (error) throw new PersistenceError(`Không tải được số bài nộp: ${error.message}`);
 
-  const counts = new Map<string, number>();
-  for (const row of data ?? []) {
-    const code = (row as { exam_code: string }).exam_code;
-    counts.set(code, (counts.get(code) ?? 0) + 1);
-  }
-  return counts;
-}
+    const counts = new Map<string, number>();
+    for (const row of data ?? []) {
+      const code = (row as { exam_code: string }).exam_code;
+      counts.set(code, (counts.get(code) ?? 0) + 1);
+    }
+    return counts;
+  },
+);

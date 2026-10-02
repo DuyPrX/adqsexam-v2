@@ -41,7 +41,7 @@ Secrets are read from the Worker environment and are **never** committed.
 |---|---|---|
 | `GEMINI_API_KEY` | only for `mode=ai` / `auto` fallback | Google AI Studio key |
 | `INTERNAL_SECRET` | production | Must match the `X-Internal-Secret` header. Unset ⇒ check bypassed (local dev) |
-| `GEMINI_MODEL` | no | Overrides the default `gemini-2.5-flash` |
+| `DEFAULT_AI_MODEL` | no | Worker-level default AI model. Overridden per-request by `?model=` (or the `model` form field) |
 
 Local development — create `worker/.dev.vars` (git-ignored):
 
@@ -86,6 +86,28 @@ curl.exe -s -X POST "http://127.0.0.1:8787/api/v1/extract?mode=rule" `
 | `rule` | Engine 1 only — zero API cost |
 | `ai` | Engine 2 only; `503` when `GEMINI_API_KEY` is unset |
 | `auto` | Engine 1, falling back to Engine 2 when it finds **no questions** or **no resolved answer keys**. If the AI call fails, Engine 1's result is returned with the reason in `meta.fallback_reason` |
+
+### Model selection
+
+`?model=<model-id>` (or the `model` multipart field) chooses the Engine 2 model.
+Fallback priority: `model` parameter → `DEFAULT_AI_MODEL` binding →
+`gemini-2.5-flash`. The effective model is echoed back as `meta.model_used`
+(`null` when the rule engine produced the payload).
+
+```powershell
+curl.exe -X POST "http://127.0.0.1:8787/api/v1/extract?mode=ai&model=gemini-2.5-pro" `
+  -H "X-Internal-Secret: local-dev-secret" `
+  -F "file=@..\..\sample\test2.docx"
+```
+
+### Practice endpoint
+
+`POST /api/v1/extract-practice` is the unauthenticated, student-facing route
+(no `X-Internal-Secret`). It is **hard-wired to the rule engine** — the `mode`
+parameter is ignored, so it can never incur AI cost — and it returns
+`correct_answer` / `explanation` because practice grading happens client-side.
+It is rate limited in-process to **5 uploads per 60s per IP** (HTTP `429` with
+`error.code = "RATE_LIMITED"` on excess).
 
 ## 4. Verify
 

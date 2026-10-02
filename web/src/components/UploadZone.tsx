@@ -39,21 +39,53 @@ const ENGINE_OPTIONS: Array<{
   },
 ];
 
+/**
+ * AI model choices offered when AI mode is active (Phase 5.3 §2).
+ *
+ * An empty `value` means "let the Worker decide" (its DEFAULT_AI_MODEL).
+ */
+const MODEL_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: '', label: 'Mặc định hệ thống' },
+  { value: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash' },
+  { value: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite' },
+  { value: 'gemma-4-31b-it', label: 'Gemma 4 (31B IT)' },
+];
+
+/** Sentinel that swaps the dropdown for a free-text model id input. */
+const CUSTOM_MODEL = '__custom__';
+
 export function UploadZone({ onExtracted, onError, disabled = false }: UploadZoneProps) {
   const [mode, setMode] = useState<ExtractionMode>('auto');
+  const [modelChoice, setModelChoice] = useState<string>('');
+  const [customModel, setCustomModel] = useState<string>('');
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [fileName, setFileName] = useState<string | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  const isCustomModel = modelChoice === CUSTOM_MODEL;
+  /** The model id actually sent to the Worker; undefined = use the default. */
+  const selectedModel = isCustomModel ? customModel.trim() : modelChoice.trim();
+
   const handleFile = useCallback(
     async (file: File) => {
+      // Guard before spending an upload: a custom row with a blank id would
+      // silently fall back to the default model instead of what was asked for.
+      if (isCustomModel && customModel.trim() === '') {
+        const message = 'Vui lòng nhập ID mô hình tùy chỉnh.';
+        setLocalError(message);
+        onError?.(message);
+        return;
+      }
       setLocalError(null);
       setFileName(file.name);
       setIsProcessing(true);
       try {
-        const result = await extractDocx(file, { mode });
+        const result = await extractDocx(file, {
+          mode,
+          model: selectedModel || undefined,
+        });
         onExtracted(result, file);
       } catch (error) {
         const message =
@@ -67,7 +99,7 @@ export function UploadZone({ onExtracted, onError, disabled = false }: UploadZon
         setIsProcessing(false);
       }
     },
-    [mode, onExtracted, onError],
+    [mode, selectedModel, isCustomModel, customModel, onExtracted, onError],
   );
 
   const onDrop = useCallback(
@@ -127,6 +159,50 @@ export function UploadZone({ onExtracted, onError, disabled = false }: UploadZon
           })}
         </div>
       </div>
+
+      {/* AI model selector — only meaningful when the AI engine may run. */}
+      {(mode === 'ai' || mode === 'auto') && (
+        <div className="space-y-2 rounded-lg border border-purple-200 bg-purple-50/50 p-3">
+          <label
+            htmlFor="model-select"
+            className="flex items-center gap-1.5 text-sm font-semibold text-slate-700"
+          >
+            <Sparkles size={14} className="text-purple-600" />
+            Mô hình AI
+          </label>
+          <select
+            id="model-select"
+            value={modelChoice}
+            disabled={isProcessing || disabled}
+            onChange={(event) => setModelChoice(event.target.value)}
+            className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 outline-none transition focus:border-purple-500 focus:ring-2 focus:ring-purple-200 disabled:opacity-50"
+          >
+            {MODEL_OPTIONS.map((option) => (
+              <option key={option.value || 'default'} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+            <option value={CUSTOM_MODEL}>Mô hình tùy chỉnh…</option>
+          </select>
+
+          {isCustomModel && (
+            <input
+              type="text"
+              value={customModel}
+              disabled={isProcessing || disabled}
+              onChange={(event) => setCustomModel(event.target.value)}
+              placeholder="VD: gemini-2.5-pro"
+              className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-mono text-xs text-slate-800 outline-none transition focus:border-purple-500 focus:ring-2 focus:ring-purple-200 disabled:opacity-50"
+            />
+          )}
+
+          <p className="text-[11px] leading-snug text-slate-500">
+            {mode === 'auto'
+              ? 'Chỉ dùng khi phân tích nhanh không đủ dữ liệu để chuyển sang AI.'
+              : 'Mô hình này sẽ được gọi trực tiếp cho toàn bộ tệp.'}
+          </p>
+        </div>
+      )}
 
       {/* Dropzone */}
       <div

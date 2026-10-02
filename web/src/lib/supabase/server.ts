@@ -1,3 +1,4 @@
+import { cache } from 'react';
 import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
 
@@ -10,8 +11,12 @@ import { cookies } from 'next/headers';
  *
  * The publishable key is preferred; `NEXT_PUBLIC_SUPABASE_ANON_KEY` is a
  * fallback for projects created before the publishable/secret key scheme.
+ *
+ * Wrapped in React `cache` so a page (and everything it renders) shares ONE
+ * client per request instead of constructing one per call site — each
+ * construction re-reads the cookie store and re-validates the session.
  */
-export async function createClient() {
+export const createClient = cache(async () => {
   const cookieStore = await cookies();
 
   return createServerClient(
@@ -35,4 +40,4 @@ export async function createClient() {
       },
     },
   );
-}
+});

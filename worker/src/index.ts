@@ -16,7 +16,7 @@
 
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { AiEngineError, extractWithAi } from './ai/ai-engine';
+import { AiEngineError, extractWithAi, resolveModelName } from './ai/ai-engine';
 import { DocxError, preprocessDocx } from './parser/xml-preprocessor';
 import { extractWithRules } from './parser/rule-engine';
 import type { EngineUsed, ExtractionMode, ExtractedQuestion } from './types';
@@ -26,11 +26,71 @@ export interface Env {
   GEMINI_API_KEY?: string;
   /** Shared secret required in the X-Internal-Secret header. Unset = bypassed. */
   INTERNAL_SECRET?: string;
-  /** Overridable Gemini model name (see wrangler.toml [vars]). */
+  /** Worker-level default model (see wrangler.toml [vars]). */
+  DEFAULT_AI_MODEL?: string;
+  /** Legacy alias for DEFAULT_AI_MODEL, kept for already-deployed configs. */
   GEMINI_MODEL?: string;
 }
 
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // keep in sync with the preprocessor
+
+/* ========================================================================== */
+/* In-Worker rate limiter (Phase 5.3 §1)                                      */
+/* -------------------------------------------------------------------------- */
+/* A sliding-window log per client IP, held in module scope. Cloudflare runs   */
+/* many isolates and recycles them, so this is a best-effort shield — it stops */
+/* a single abusive client from burning the Worker quota, without requiring    */
+/* the paid WAF rate-limiting product.                                         */
+/* ========================================================================== */
+
+/** Max practice uploads allowed from one IP inside the window. */
+const RATE_LIMIT_MAX = 5;
+/** Window length in milliseconds. */
+const RATE_LIMIT_WINDOW_MS = 60_000;
+/** Drop fully-expired buckets; bounds memory if many IPs ever hit us. */
+const RATE_LIMIT_SWEEP_MS = 5 * 60_000;
+
+/** ip -> ascending list of request timestamps (ms). */
+const rateBuckets = new Map<string, number[]>();
+let lastSweepAt = 0;
+
+/** Removes every bucket whose newest hit is already outside the window. */
+function sweepRateBuckets(now: number): void {
+  if (now - lastSweepAt < RATE_LIMIT_SWEEP_MS) return;
+  lastSweepAt = now;
+  for (const [ip, timestamps] of rateBuckets) {
+    const newest = timestamps[timestamps.length - 1] ?? 0;
+    if (now - newest >= RATE_LIMIT_WINDOW_MS) rateBuckets.delete(ip);
+  }
+}
+
+/** Resolves the caller IP behind Cloudflare. */
+function clientIp(c: { req: { header: (name: string) => string | undefined } }): string {
+  const direct = c.req.header('cf-connecting-ip');
+  if (direct && direct.trim() !== '') return direct.trim();
+  const forwarded = c.req.header('x-forwarded-for');
+  if (forwarded && forwarded.trim() !== '') {
+    const first = forwarded.split(',')[0];
+    if (first && first.trim() !== '') return first.trim();
+  }
+  return '127.0.0.1';
+}
+
+/**
+ * Records one hit for `ip` and reports whether it is within the allowance.
+ * The bucket is updated in place so a rejected call still counts as an
+ * attempt — otherwise a client could hammer past the limit for free.
+ */
+function checkRateLimit(ip: string, now: number): boolean {
+  sweepRateBuckets(now);
+
+  const cutoff = now - RATE_LIMIT_WINDOW_MS;
+  const recent = (rateBuckets.get(ip) ?? []).filter((at) => at > cutoff);
+  recent.push(now);
+  rateBuckets.set(ip, recent);
+
+  return recent.length <= RATE_LIMIT_MAX;
+}
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -40,7 +100,7 @@ app.get('/', (c) =>
   c.json({
     service: 'docx-extractor-v2',
     endpoints: [
-      'POST /api/v1/extract?mode=rule|ai|auto',
+      'POST /api/v1/extract?mode=rule|ai|auto&model=<model-id>',
       'POST /api/v1/extract-practice',
     ],
     engines: ['rule', 'ai'],
@@ -57,6 +117,11 @@ function parseMode(raw: string | undefined): ExtractionMode {
 
 function errorResponse(message: string, status: number, code: string) {
   return { success: false, engine_used: null, count: 0, data: [], error: { code, message } };
+}
+
+/** The Worker-level default model binding (new name wins over the legacy one). */
+function envDefaultModel(env: Env): string | undefined {
+  return env.DEFAULT_AI_MODEL ?? env.GEMINI_MODEL;
 }
 
 /** Reads and validates the `file` field of a multipart body. */
@@ -128,18 +193,24 @@ app.post('/api/v1/extract', async (c) => {
   // --- 2. Read multipart body ---------------------------------------------
   let archive: Uint8Array;
   let filename = '';
+  let formModel: string | undefined;
   try {
     const body = await c.req.parseBody();
     const upload = await readUpload(body['file']);
     if (!upload.ok) return c.json(upload.body, upload.status);
     archive = upload.archive;
     filename = upload.filename;
+    const rawModel = body['model'];
+    if (typeof rawModel === 'string' && rawModel.trim() !== '') formModel = rawModel.trim();
   } catch (error) {
     return c.json(
       errorResponse(`Failed to read upload: ${(error as Error).message}`, 400, 'BAD_UPLOAD'),
       400,
     );
   }
+
+  // Model selection (Phase 5.3 §2): `?model=` wins, then the multipart field.
+  const requestedModel = c.req.query('model')?.trim() || formModel;
 
   // --- 3. Preprocess (shared by both engines) ------------------------------
   const pre = runPreprocess(archive);
@@ -172,7 +243,8 @@ app.post('/api/v1/extract', async (c) => {
     try {
       const result = await extractWithAi({
         apiKey: c.env.GEMINI_API_KEY,
-        model: c.env.GEMINI_MODEL,
+        model: requestedModel,
+        envModel: envDefaultModel(c.env),
         text,
       });
       data = result.data;
@@ -199,7 +271,8 @@ app.post('/api/v1/extract', async (c) => {
       try {
         const aiResult = await extractWithAi({
           apiKey: c.env.GEMINI_API_KEY,
-          model: c.env.GEMINI_MODEL,
+          model: requestedModel,
+          envModel: envDefaultModel(c.env),
           text,
         });
         // Prefer the AI result only when it actually improves on Engine 1.
@@ -226,6 +299,10 @@ app.post('/api/v1/extract', async (c) => {
       correct_spans_detected: correctSpanCount,
       has_answers: data.some((question) => question.correct_answer !== null),
       fallback_reason: fallbackReason,
+      // Reported so the teacher UI can confirm which model actually ran.
+      model_used: engineUsed === 'ai'
+        ? resolveModelName(requestedModel, envDefaultModel(c.env))
+        : null,
     },
   });
 });
@@ -243,8 +320,28 @@ app.post('/api/v1/extract', async (c) => {
  *   - The response intentionally INCLUDES `correct_answer` and `explanation`:
  *     practice grading is client-side, and the document is the student's own.
  *     Nothing is persisted server-side (no Supabase writes here).
+ *   - Rate limited in-process (Phase 5.3 §1): 5 uploads / 60s / IP, since the
+ *     endpoint is unauthenticated and otherwise trivially abusable.
  */
 app.post('/api/v1/extract-practice', async (c) => {
+  // --- 0. Sliding-window rate limit ---------------------------------------
+  if (!checkRateLimit(clientIp(c), Date.now())) {
+    return c.json(
+      {
+        success: false,
+        engine_used: null,
+        count: 0,
+        data: [],
+        message: 'Bạn tải file quá nhanh. Vui lòng chờ 1 phút.',
+        error: {
+          code: 'RATE_LIMITED',
+          message: 'Bạn tải file quá nhanh. Vui lòng chờ 1 phút.',
+        },
+      },
+      429,
+    );
+  }
+
   // --- 1. Read multipart body ---------------------------------------------
   let archive: Uint8Array;
   let filename = '';

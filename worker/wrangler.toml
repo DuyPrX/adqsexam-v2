@@ -17,8 +17,8 @@ compatibility_flags = ["nodejs_compat"]
 #                   When unset (local dev), the header check is bypassed.
 
 [vars]
-# Overridable Gemini model for Engine 2 (Engine 2 fallback).
-GEMINI_MODEL = "gemini-2.5-flash"
+# Default AI model for Engine 2. A caller-supplied `?model=` overrides this.
+DEFAULT_AI_MODEL = "gemini-2.5-flash"
 
 [observability]
 enabled = true
