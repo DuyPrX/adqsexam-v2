@@ -42,12 +42,16 @@ Secrets are read from the Worker environment and are **never** committed.
 | `GEMINI_API_KEY` | only for `mode=ai` / `auto` fallback | Google AI Studio key |
 | `INTERNAL_SECRET` | production | Must match the `X-Internal-Secret` header. Unset ⇒ check bypassed (local dev) |
 | `DEFAULT_AI_MODEL` | no | Worker-level default AI model. Overridden per-request by `?model=` (or the `model` form field) |
+| `SUPABASE_URL` | no | Keep-alive ping target (Phase 5.7). Unset ⇒ the cron handler logs a skip and does nothing |
+| `SUPABASE_ANON_KEY` | no | Anon/publishable key for the keep-alive ping. Unset ⇒ same skip |
 
 Local development — create `worker/.dev.vars` (git-ignored):
 
 ```ini
 GEMINI_API_KEY=""
 INTERNAL_SECRET="local-dev-secret"
+SUPABASE_URL="http://127.0.0.1:54321"
+SUPABASE_ANON_KEY="<local publishable key>"
 ```
 
 Production:
@@ -55,7 +59,28 @@ Production:
 ```powershell
 npx wrangler secret put GEMINI_API_KEY
 npx wrangler secret put INTERNAL_SECRET
+npx wrangler secret put SUPABASE_URL
+npx wrangler secret put SUPABASE_ANON_KEY
 ```
+
+### Keep-alive cron (Phase 5.7)
+
+`wrangler.toml` declares `[triggers] crons = ["0 0 */3 * *"]`. Every 3rd day at
+00:00 UTC the `scheduled` handler issues one `GET {SUPABASE_URL}/rest/v1/` with
+the anon key, which opens a PostgREST transaction and therefore counts as
+database activity — resetting the Supabase free tier's 7-day inactivity pause
+counter.
+
+Notes:
+- `*/3` on day-of-month fires on days 1, 4, 7, … 28 and then *restarts* at the
+  month boundary, so the longest gap is 3 days and the shortest 1. The pause
+  window is 7 days, so this never trips regardless.
+- The ping is best-effort: a missing binding or a network failure is logged and
+  swallowed. A cron invocation has no caller to receive a rejection.
+- The ping reads no table. PostgREST still opens a transaction to set role /
+  `search_path` per request, which is what the inactivity counter observes.
+- This is the *only* defense against a paused project: pg_cron cannot help,
+  because a paused project runs no background workers at all.
 
 ---
 

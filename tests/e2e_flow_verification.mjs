@@ -56,6 +56,9 @@ const SB_PUBLISHABLE =
 const SB_SECRET =
   process.env.SB_SECRET ||
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU';
+// Local Supabase database container, used only by Step 21 (cron.* is not
+// reachable through PostgREST, so its rows are probed over psql).
+const SB_DB_CONTAINER = process.env.SB_DB_CONTAINER || 'supabase_db_v2';
 
 // supabase-js lives in the teacher app's node_modules; resolve it by URL so the
 // script works regardless of the current working directory.
@@ -137,6 +140,8 @@ const { default: workerApp } = await import(
   new URL('../worker/src/index.ts', import.meta.url).href
 );
 const { readFileSync } = await import('node:fs');
+// Step 21 seeds/inspects cron.job_run_details, which is not API-exposed.
+const { execFileSync } = await import('node:child_process');
 
 const TEACHER = { email: 'e2e.teacher@adqsexam.local', password: 'e2e-password-123' };
 const EXAM = {
@@ -1515,13 +1520,19 @@ async function main() {
     return realFetch(input, init);
   };
 
-  /** POSTs a DOCX to a Worker route with the given mode. */
+  /**
+   * POSTs a DOCX to a Worker route with the given mode.
+   *
+   * Phase 5.7: the Worker's default export is now the module-worker handler
+   * object ({ fetch, scheduled }) rather than the bare Hono app, so the request
+   * goes through `handler.fetch(Request, env)` — the same entrypoint Cloudflare
+   * invokes in production.
+   */
   const callExtract = async (bytes, filename, mode) => {
     const form = new FormData();
     form.append('file', new Blob([bytes]), filename);
-    const response = await workerApp.request(
-      `http://localhost/api/v1/extract?mode=${mode}`,
-      { method: 'POST', body: form },
+    const response = await workerApp.fetch(
+      new Request(`http://localhost/api/v1/extract?mode=${mode}`, { method: 'POST', body: form }),
       { GEMINI_API_KEY: 'e2e-stub-key' },
     );
     return response.json();
@@ -1568,6 +1579,128 @@ async function main() {
       `${test2.data.filter((q) => q.correct_answer !== null).length}/${test2.question_count}`);
   } finally {
     globalThis.fetch = realFetch;
+  }
+
+  /* --- 21. pg_cron log retention (Phase 5.7) ---------------------------- */
+  step(21, 'purge_expired_exams() prunes stale cron.job_run_details rows');
+
+  // The `cron` schema is not exposed through the PostgREST API, and
+  // cron.job_run_details is RLS-guarded (`username = CURRENT_USER`), so the
+  // probe rows are seeded and inspected over a direct SQL connection.
+  const sql = (statement) => {
+    const output = execFileSync(
+      'docker',
+      ['exec', SB_DB_CONTAINER, 'psql', '-U', 'postgres', '-d', 'postgres', '-tAc', statement],
+      { encoding: 'utf8' },
+    );
+    return output.trim();
+  };
+
+  const sqlJson = (statement) => JSON.parse(sql(statement));
+
+  try {
+    // Seed one stale (35-day-old) row and one fresh row. runid uses a high
+    // sentinel range so the cleanup below cannot touch real cron history.
+    sql(
+      `insert into cron.job_run_details
+         (jobid, runid, job_pid, database, username, command, status, return_message, start_time, end_time)
+       values
+         (-1, 990001, 0, 'postgres', 'postgres', 'e2e stale probe', 'succeeded', 'x',
+          now() - interval '35 days', now() - interval '35 days'),
+         (-1, 990002, 0, 'postgres', 'postgres', 'e2e fresh probe', 'succeeded', 'x', now(), now());`,
+    );
+
+    check('stale + fresh probe rows were seeded',
+      sql("select count(*) from cron.job_run_details where runid in (990001, 990002);") === '2');
+
+    const pruneResult = sqlJson('select public.purge_expired_exams();');
+    check('purge reports the pruned log count', pruneResult.pruned_logs >= 1,
+      JSON.stringify(pruneResult));
+    check('purge still reports exam purging unchanged', pruneResult.success === true
+      && typeof pruneResult.purged_count === 'number', JSON.stringify(pruneResult));
+
+    check('the 35-day-old log row is gone',
+      sql('select count(*) from cron.job_run_details where runid = 990001;') === '0');
+    check('the fresh log row survives the prune',
+      sql('select count(*) from cron.job_run_details where runid = 990002;') === '1');
+    check('no log rows older than 30 days remain',
+      sql("select count(*) from cron.job_run_details where start_time < now() - interval '30 days';") === '0');
+
+    // Idempotency + blank-state safety: a second sweep must be a clean no-op.
+    const secondPrune = sqlJson('select public.purge_expired_exams();');
+    check('a second sweep prunes nothing and stays successful',
+      secondPrune.success === true && secondPrune.pruned_logs === 0,
+      JSON.stringify(secondPrune));
+
+    // The daily pg_cron job must still point at the same function.
+    check('the daily purge job is still scheduled',
+      sql("select count(*) from cron.job where jobname = 'purge-expired-exams-daily' and active;") === '1');
+  } finally {
+    sql('delete from cron.job_run_details where runid in (990001, 990002);');
+  }
+
+  /* --- 22. Worker keep-alive scheduled handler (Phase 5.7) --------------- */
+  step(22, 'Worker scheduled handler pings Supabase PostgREST');
+
+  // Capture the outgoing ping without touching the network.
+  const pinged = [];
+  const keepAliveFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.includes('supabase.co')) {
+      pinged.push({ url, method: init?.method, headers: init?.headers });
+      return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    return keepAliveFetch(input, init);
+  };
+
+  /** Drives the cron entrypoint the way Cloudflare does, tracking waitUntil. */
+  const runScheduled = async (env) => {
+    const pending = [];
+    const ctx = { waitUntil: (promise) => pending.push(promise), passThroughOnException() {} };
+    await workerApp.scheduled({ cron: '0 0 */3 * *', scheduledTime: Date.now() }, env, ctx);
+    await Promise.all(pending);
+    return pending.length;
+  };
+
+  try {
+    const scheduledCount = await runScheduled({
+      SUPABASE_URL: 'https://example-project.supabase.co/',
+      SUPABASE_ANON_KEY: 'anon-key-under-test',
+    });
+
+    check('the scheduled handler registered exactly one waitUntil task', scheduledCount === 1,
+      String(scheduledCount));
+    check('exactly one Supabase ping was issued', pinged.length === 1, String(pinged.length));
+    check('the ping targets the PostgREST root',
+      pinged[0]?.url === 'https://example-project.supabase.co/rest/v1/',
+      String(pinged[0]?.url));
+    check('the ping carries the anon key as apikey + bearer',
+      pinged[0]?.headers?.apikey === 'anon-key-under-test'
+        && pinged[0]?.headers?.Authorization === 'Bearer anon-key-under-test',
+      JSON.stringify(pinged[0]?.headers));
+
+    // Missing bindings must be a silent skip, not a crash or a request.
+    pinged.length = 0;
+    const skippedCount = await runScheduled({});
+    check('an unbound keep-alive is skipped without pinging',
+      skippedCount === 1 && pinged.length === 0, `${skippedCount}/${pinged.length}`);
+
+    // A throwing fetch must be swallowed — the cron runtime has no catch point.
+    globalThis.fetch = async (input) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url.includes('supabase.co')) throw new Error('simulated network failure');
+      return keepAliveFetch(input);
+    };
+    let survived = true;
+    try {
+      await runScheduled({ SUPABASE_URL: 'https://x.supabase.co', SUPABASE_ANON_KEY: 'k' });
+    } catch {
+      survived = false;
+    }
+    check('a failed ping is swallowed, never rejecting the cron handler', survived === true);
+  } finally {
+    globalThis.fetch = keepAliveFetch;
   }
 
   /* --- teardown --------------------------------------------------------- */

@@ -1280,12 +1280,26 @@ $$;
 
 
 -- ----------------------------------------------------------------------------
--- C.11  purge_expired_exams  (maintenance, Phase 5.5)
+-- C.11  purge_expired_exams  (maintenance, Phase 5.5; log retention Phase 5.7)
 --       Hard-deletes every exam whose 7-day Trash window has elapsed. This is a
 --       global sweep, not an owner-scoped action: it only ever touches rows that
 --       are already scheduled for destruction, so triggering it early cannot
 --       destroy anything a teacher did not already delete. Cascades take the
 --       dependent results / students / questions with it.
+--
+--       Also trims pg_cron's run history (30 days) so that the daily schedule
+--       installed in Section D.3 cannot grow cron.job_run_details without bound
+--       — pg_cron never prunes that table itself.
+--
+--       The prune is guarded rather than assumed: this function must stay
+--       creatable and callable on a database where pg_cron was never installed
+--       (plpgsql plans statements lazily, so the guarded DELETE is not even
+--       resolved when the guard is false).
+--
+--       RLS note: cron.job_run_details is RLS-enabled (policy
+--       `username = CURRENT_USER`). SECURITY DEFINER here runs as `postgres`,
+--       which holds BYPASSRLS, so the DELETE is not row-filtered. If ownership
+--       ever moved to a role without BYPASSRLS the prune would silently no-op.
 -- ----------------------------------------------------------------------------
 create or replace function public.purge_expired_exams()
 returns jsonb
@@ -1295,6 +1309,7 @@ set search_path = public, pg_temp
 as $$
 declare
     v_purged integer;
+    v_pruned bigint := 0;
 begin
     with doomed as (
         delete from public.exams e
@@ -1304,10 +1319,18 @@ begin
     )
     select count(*) into v_purged from doomed;
 
+    -- Prune pg_cron's own run history (retain 30 days).
+    if exists (select 1 from pg_extension where extname = 'pg_cron') then
+        delete from cron.job_run_details
+         where start_time < now() - interval '30 days';
+        get diagnostics v_pruned = row_count;
+    end if;
+
     return jsonb_build_object(
-        'success',        true,
-        'purged_count',   coalesce(v_purged, 0),
-        'message',        'Đã xóa vĩnh viễn các đề thi quá thời hạn lưu trữ.'
+        'success',      true,
+        'purged_count', coalesce(v_purged, 0),
+        'pruned_logs',  coalesce(v_pruned, 0),
+        'message',      'Đã xóa vĩnh viễn các đề thi quá thời hạn lưu trữ.'
     );
 end;
 $$;

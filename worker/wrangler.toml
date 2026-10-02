@@ -1,4 +1,4 @@
-name = "docx-extractor-v2"
+﻿name = "docx-extractor-v2"
 main = "src/index.ts"
 compatibility_date = "2026-01-01"
 compatibility_flags = ["nodejs_compat"]
@@ -19,6 +19,24 @@ compatibility_flags = ["nodejs_compat"]
 [vars]
 # Default AI model for Engine 2. A caller-supplied `?model=` overrides this.
 DEFAULT_AI_MODEL = "gemini-3.5-flash-lite"
+# Keep-alive ping target (Phase 5.7). Bind these so the `scheduled` handler can
+# touch Supabase every 3 days and reset its 7-day inactivity pause counter.
+# The anon/publishable key is sufficient: PostgREST only needs a valid key to
+# open a database transaction, and the ping reads nothing.
+# Provision as plain vars or secrets:
+#   SUPABASE_URL      = "https://<project-ref>.supabase.co"
+#   SUPABASE_ANON_KEY = "<publishable/anon key>"
+
+# ---------------------------------------------------------------------------
+# Cron Triggers (Phase 5.7)
+# `0 0 */3 * *` = 00:00 UTC every 3rd day-of-month (1, 4, 7, ... , 28, then it
+# restarts at the month boundary, so the longest gap is up to 3 days and the
+# shortest can be 1 day). That is well inside the 7-day pause window, so the
+# project never sleeps. Fields: min hour day-of-month month day-of-week.
+# ---------------------------------------------------------------------------
+[triggers]
+crons = ["0 0 */3 * *"]
 
 [observability]
 enabled = true
+

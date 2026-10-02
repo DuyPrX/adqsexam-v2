@@ -7,6 +7,9 @@
  * Route: POST /api/v1/extract-practice
  * No secret, no `mode` parameter — ALWAYS the rule engine (Phase 5.2, rule).
  *
+ * Cron Trigger (Phase 5.7): a `scheduled` handler pings Supabase so the free
+ * tier's 7-day inactivity pause never trips. See wrangler.toml [triggers].
+ *
  * Engine dispatch (Phase 2 decision, ARCHITECTURE_FREEZE.md §3.5):
  *   rule -> Engine 1 only
  *   ai   -> Engine 2 only
@@ -31,6 +34,10 @@ export interface Env {
   DEFAULT_AI_MODEL?: string;
   /** Legacy alias for DEFAULT_AI_MODEL, kept for already-deployed configs. */
   GEMINI_MODEL?: string;
+  /** Supabase project URL, used only by the keep-alive cron (Phase 5.7). */
+  SUPABASE_URL?: string;
+  /** Supabase anon/publishable key, used only by the keep-alive cron. */
+  SUPABASE_ANON_KEY?: string;
 }
 
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // keep in sync with the preprocessor
@@ -414,4 +421,81 @@ app.onError((error, c) => {
   return c.json(errorResponse(`Unhandled error: ${error.message}`, 500, 'INTERNAL'), 500);
 });
 
-export default app;
+/* ========================================================================== */
+/* Keep-alive cron (Phase 5.7)                                                */
+/* -------------------------------------------------------------------------- */
+/* Supabase pauses a free-tier project after 7 days without database activity, */
+/* and a paused project runs no pg_cron workers — so the database cannot keep  */
+/* itself awake. An external pinger is the only thing that can.                */
+/*                                                                            */
+/* Why PostgREST rather than a `select 1`: it is the same project endpoint the */
+/* app already uses, it needs no extra service role, and the anon key is       */
+/* already public. PostgREST opens a transaction per request (setting role /   */
+/* search_path), which is what the inactivity counter observes — no table read */
+/* is required, so this leaks nothing.                                        */
+/*                                                                            */
+/* `0 0 *\/3 * *` at 00:00 UTC keeps the longest gap at 3 days, comfortably     */
+/* inside the 7-day window. The trigger is the only caller, so this costs one  */
+/* Worker invocation every 3 days — negligible against the daily quota.       */
+/* ========================================================================== */
+
+/** Ping URL for a project URL, tolerating a trailing slash. */
+function keepAliveUrl(supabaseUrl: string): string {
+  return `${supabaseUrl.replace(/\/+$/, '')}/rest/v1/`;
+}
+
+/**
+ * Scheduled handler — pings Supabase to reset its inactivity counter.
+ *
+ * Resolves (never rejects): a failed keep-alive must not surface as an
+ * unhandled rejection in the cron runtime, where nothing would catch it.
+ */
+async function handleKeepAlive(env: Env): Promise<void> {
+  const supabaseUrl = env.SUPABASE_URL?.trim();
+  const anonKey = env.SUPABASE_ANON_KEY?.trim();
+
+  if (!supabaseUrl || !anonKey) {
+    console.warn('[KeepAlive] Skipped: SUPABASE_URL or SUPABASE_ANON_KEY not bound');
+    return;
+  }
+
+  try {
+    const response = await fetch(keepAliveUrl(supabaseUrl), {
+      method: 'GET',
+      headers: { apikey: anonKey, Authorization: `Bearer ${anonKey}` },
+    });
+    if (response.ok) {
+      console.log(`[KeepAlive] Pinged Supabase PostgREST status=${response.status}`);
+    } else {
+      // Still a sign of life (the project answered), but flag it: a persistent
+      // 401/404 means the binding or project ref is wrong and the ping is not
+      // actually resetting the counter.
+      console.warn(`[KeepAlive] Supabase responded status=${response.status}`);
+    }
+  } catch (error) {
+    console.error('[KeepAlive] Failed to ping Supabase:', error);
+  }
+}
+
+/**
+ * Cloudflare module-worker entrypoint.
+ *
+ * `fetch` is Hono's pre-bound arrow-property, so it can be passed by reference
+ * without losing `this`. `scheduled` is the Cron Trigger entrypoint.
+ *
+ * The parameter is typed `ScheduledController` (the current
+ * @cloudflare/workers-types name); the older `ScheduledEvent` alias is
+ * deprecated and does not satisfy `ExportedHandler`.
+ */
+export default {
+  fetch: app.fetch,
+  async scheduled(
+    _controller: ScheduledController,
+    env: Env,
+    ctx: ExecutionContext,
+  ): Promise<void> {
+    // waitUntil lets the runtime keep the invocation alive for the ping while
+    // the handler itself returns immediately, as the cron contract expects.
+    ctx.waitUntil(handleKeepAlive(env));
+  },
+} satisfies ExportedHandler<Env>;
