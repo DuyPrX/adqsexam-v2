@@ -1,7 +1,8 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, Download, Loader2, RefreshCw, Users } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { AlertTriangle, Download, Loader2, Radio, RefreshCw, Users } from 'lucide-react';
+import type { RealtimePostgresChangesPayload } from '@supabase/supabase-js';
 import { createClient } from '@/lib/supabase/client';
 import { exportResultsWorkbook } from '@/lib/excel';
 import { PersistenceError } from '@/lib/exams';
@@ -24,6 +25,11 @@ function percentage(score: number, total: number): number {
  *
  * Reads are RLS-scoped to the owning teacher (Phase 1 §B), and the 3-sheet
  * workbook is generated client-side by excel.ts (D4).
+ *
+ * Realtime (Phase 5, D2) applies each `exam_results` change to local state
+ * instead of refetching the table: a submit is a single INSERT, and a regrade
+ * is an UPDATE. Upserting by `id` keeps ordering stable and avoids a query
+ * round-trip per event.
  */
 export function ResultsDashboard({
   exam,
@@ -34,6 +40,13 @@ export function ResultsDashboard({
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showRoster, setShowRoster] = useState(false);
+  const [isLive, setIsLive] = useState(false);
+
+  /** Newest-first ordering, matching the server-side query. */
+  const sortResults = (rows: ExamResultRow[]) =>
+    [...rows].sort(
+      (a, b) => new Date(b.submitted_at).getTime() - new Date(a.submitted_at).getTime(),
+    );
 
   const refresh = useCallback(async () => {
     setIsRefreshing(true);
@@ -58,6 +71,28 @@ export function ResultsDashboard({
   // Live updates: v1 used Firebase RTDB listeners; v2 uses Realtime (D2).
   useEffect(() => {
     const supabase = createClient();
+
+    const applyChange = (payload: RealtimePostgresChangesPayload<ExamResultRow>) => {
+      if (payload.eventType === 'DELETE') {
+        const removedId = (payload.old as Partial<ExamResultRow>)?.id;
+        if (!removedId) { void refresh(); return; }
+        setResults((previous) => previous.filter((row) => row.id !== removedId));
+        return;
+      }
+
+      const row = payload.new as ExamResultRow;
+      if (!row?.id) return;
+      if (row.exam_code !== exam.code) return;
+
+      setResults((previous) => {
+        const index = previous.findIndex((existing) => existing.id === row.id);
+        if (index === -1) return sortResults([row, ...previous]);
+        const next = [...previous];
+        next[index] = row;
+        return next;
+      });
+    };
+
     const channel = supabase
       .channel(`exam_results:${exam.code}`)
       .on(
@@ -68,28 +103,45 @@ export function ResultsDashboard({
           table: 'exam_results',
           filter: `exam_code=eq.${exam.code}`,
         },
-        () => void refresh(),
+        applyChange,
       )
-      .subscribe();
+      .subscribe((status) => setIsLive(status === 'SUBSCRIBED'));
 
     return () => {
       void supabase.removeChannel(channel);
     };
   }, [exam.code, refresh]);
 
-  const needsGrading = results.filter((r) => r.needs_grading).length;
-  const averageScore =
-    results.length === 0 ? 0 : results.reduce((sum, r) => sum + r.score, 0) / results.length;
-  const averagePercent =
-    results.length === 0
-      ? 0
-      : results.reduce((sum, r) => sum + percentage(r.score, r.total_questions), 0) / results.length;
+  const stats = useMemo(() => {
+    const needsGrading = results.filter((r) => r.needs_grading).length;
+    const averageScore =
+      results.length === 0 ? 0 : results.reduce((sum, r) => sum + r.score, 0) / results.length;
+    const averagePercent =
+      results.length === 0
+        ? 0
+        : results.reduce((sum, r) => sum + percentage(r.score, r.total_questions), 0) /
+          results.length;
+    return { needsGrading, averageScore, averagePercent };
+  }, [results]);
+
+  const { needsGrading, averageScore, averagePercent } = stats;
 
   return (
     <div className="space-y-4">
       {/* KPI strip */}
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <StatCard label="Số bài nộp" value={String(results.length)} />
+        <StatCard
+          label="Số bài nộp"
+          value={String(results.length)}
+          badge={
+            isLive ? (
+              <span className="flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
+                <Radio size={11} />
+                Trực tiếp
+              </span>
+            ) : undefined
+          }
+        />
         <StatCard label="Số câu hỏi" value={String(questions.length)} />
         <StatCard
           label="Điểm trung bình"
@@ -222,14 +274,19 @@ function StatCard({
   label,
   value,
   highlight = false,
+  badge,
 }: {
   label: string;
   value: string;
   highlight?: boolean;
+  badge?: React.ReactNode;
 }) {
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-3.5">
-      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</p>
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</p>
+        {badge}
+      </div>
       <p
         className={
           highlight ? 'mt-1 text-xl font-bold text-amber-600' : 'mt-1 text-xl font-bold text-slate-900'

@@ -813,6 +813,48 @@ grant execute on function public.get_student_exam_payload(varchar, uuid)        
 grant execute on function public.submit_exam_result(varchar, varchar, uuid, jsonb, jsonb)                     to anon, authenticated;
 grant execute on function public.record_proctoring_snapshot(varchar, varchar, uuid, text)                     to anon, authenticated;
 
+
+-- ============================================================================
+-- SECTION D.2 — REALTIME PUBLICATION (D2)
+-- ----------------------------------------------------------------------------
+-- A table must belong to the `supabase_realtime` publication or Realtime
+-- delivers NOTHING for it, even though [realtime] is enabled. Supabase creates
+-- the publication empty, and the SQL Editor does not add tables automatically,
+-- so the teacher live monitor would silently never receive an event if this
+-- section were omitted.
+--
+--   exam_results    -> live scoreboard (INSERT on submit, UPDATE on grading)
+--   active_sessions -> live proctoring feed (INSERT/UPDATE on heartbeat)
+--
+-- `add table` raises 42710 when the table is already a member, so guard it to
+-- keep the script re-runnable.
+-- ============================================================================
+do $$
+begin
+    if not exists (
+        select 1 from pg_publication_tables
+        where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'active_sessions'
+    ) then
+        alter publication supabase_realtime add table public.active_sessions;
+    end if;
+
+    if not exists (
+        select 1 from pg_publication_tables
+        where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'exam_results'
+    ) then
+        alter publication supabase_realtime add table public.exam_results;
+    end if;
+end
+$$;
+
+-- Realtime evaluates a `filter` against the row in the WAL record. With the
+-- default replica identity an UPDATE/DELETE record carries only the primary
+-- key, so a filter on a non-key column (`exam_code`) cannot match and the
+-- event is dropped. `exam_results` is keyed on `id`, so its exam_code filter
+-- needs the full old row. `active_sessions` keeps exam_code inside its
+-- composite primary key and therefore needs no change.
+alter table public.exam_results replica identity full;
+
 commit;
 
 

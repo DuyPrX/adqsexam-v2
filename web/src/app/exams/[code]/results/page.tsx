@@ -3,8 +3,9 @@ import { notFound } from 'next/navigation';
 import { ArrowLeft } from 'lucide-react';
 import { createClient } from '@/lib/supabase/server';
 import { PersistenceError } from '@/lib/exams';
-import type { ExamResultRow, ExamRow, QuestionBankRow } from '@/lib/types';
+import type { ExamResultRow, ExamRow, QuestionBankRow, StudentRow } from '@/lib/types';
 import { ResultsDashboard } from '@/components/ResultsDashboard';
+import { LiveProctorPanel } from '@/components/LiveProctorPanel';
 
 export const dynamic = 'force-dynamic';
 
@@ -32,7 +33,7 @@ export default async function ExamResultsPage({ params }: PageProps) {
 
   const supabase = await createClient();
 
-  const [resultsResponse, questionsResponse] = await Promise.all([
+  const [resultsResponse, questionsResponse, rosterResponse] = await Promise.all([
     supabase
       .from('exam_results')
       .select('*')
@@ -43,10 +44,17 @@ export default async function ExamResultsPage({ params }: PageProps) {
       .select('*')
       .eq('exam_id', exam.id)
       .order('position', { ascending: true }),
+    // Roster: active_sessions carries no names, so the live monitor resolves
+    // identity from `students` in memory.
+    supabase
+      .from('students')
+      .select('student_code, exam_code, full_name, class_name')
+      .eq('exam_code', exam.code),
   ]);
 
   if (resultsResponse.error) throw new PersistenceError(resultsResponse.error.message);
   if (questionsResponse.error) throw new PersistenceError(questionsResponse.error.message);
+  if (rosterResponse.error) throw new PersistenceError(rosterResponse.error.message);
 
   return (
     <main className="mx-auto max-w-6xl space-y-4 p-6">
@@ -66,6 +74,8 @@ export default async function ExamResultsPage({ params }: PageProps) {
           </p>
         </div>
       </div>
+
+      <LiveProctorPanel examCode={exam.code} roster={(rosterResponse.data ?? []) as StudentRow[]} />
 
       <ResultsDashboard
         exam={exam}

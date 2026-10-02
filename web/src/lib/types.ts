@@ -109,3 +109,30 @@ export interface RosterEntry {
   full_name: string;
   class_name: string;
 }
+
+/**
+ * A row of `public.active_sessions` — the live proctoring feed (Phase 5).
+ *
+ * One row per candidate/exam (PK is `student_code` + `exam_code`), upserted by
+ * the 20s heartbeat RPC. Holds no names: the live monitor joins these against
+ * `students` to display identity.
+ */
+export interface ActiveSessionRow {
+  student_code: string;
+  exam_code: string;
+  session_token: string;
+  last_heartbeat: string;
+  current_question: number;
+  answered_count: number;
+  blur_count: number;
+  fullscreen_exit_count: number;
+  device_info: string | null;
+}
+
+/** A roster row used by the live monitor to resolve student identity. */
+export interface StudentRow {
+  student_code: string;
+  exam_code: string;
+  full_name: string;
+  class_name: string;
+}
