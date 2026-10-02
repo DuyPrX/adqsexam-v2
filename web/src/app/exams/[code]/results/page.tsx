@@ -2,11 +2,12 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { ArrowLeft } from 'lucide-react';
 import { createClient } from '@/lib/supabase/server';
-import { PersistenceError } from '@/lib/exams';
+import { EXAM_COLUMNS, PersistenceError } from '@/lib/exams';
 import type { ExamResultRow, ExamRow, QuestionBankRow, StudentRow } from '@/lib/types';
 import { ResultsDashboard } from '@/components/ResultsDashboard';
 import { LiveProctorPanel } from '@/components/LiveProctorPanel';
 import { ExamActiveToggle } from '@/components/ExamActiveToggle';
+import { RegradeButton } from '@/components/RegradeButton';
 
 export const dynamic = 'force-dynamic';
 
@@ -19,7 +20,7 @@ async function loadExam(code: string): Promise<ExamRow | null> {
   const supabase = await createClient();
   const { data, error } = await supabase
     .from('exams')
-    .select('id, user_id, code, title, duration_minutes, is_active, starts_at, ends_at, created_at')
+    .select(EXAM_COLUMNS)
     .eq('code', code)
     .maybeSingle<ExamRow>();
 
@@ -86,7 +87,12 @@ export default async function ExamResultsPage({ params }: PageProps) {
             {exam.duration_minutes} phút
           </p>
         </div>
-        <ExamActiveToggle examCode={exam.code} initialActive={exam.is_active} className="ml-auto" />
+        <ExamActiveToggle
+          examCode={exam.code}
+          initialActive={exam.is_active}
+          className="ml-auto"
+        />
+        <RegradeButton examCode={exam.code} submissionCount={resultsResponse.data?.length ?? 0} />
         <Link
           href={`/exams/${exam.code}/edit`}
           className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"

@@ -48,13 +48,17 @@ create table if not exists public.exams (
     -- Scheduling window (Phase 5.4). NULL = unbounded on that side.
     starts_at        timestamptz,
     ends_at          timestamptz,
+    -- Soft-delete / Trash marker (Phase 5.5). NULL = live; otherwise the exam is
+    -- in the Trash and is purgeable 7 days after this timestamp.
+    deleted_at       timestamptz,
     created_at       timestamptz  not null default now()
 );
 
 -- Idempotency: databases created before Phase 5.4 lack the scheduling columns,
 -- and `create table if not exists` would silently skip them.
-alter table public.exams add column if not exists starts_at timestamptz;
-alter table public.exams add column if not exists ends_at   timestamptz;
+alter table public.exams add column if not exists starts_at  timestamptz;
+alter table public.exams add column if not exists ends_at    timestamptz;
+alter table public.exams add column if not exists deleted_at timestamptz;
 
 comment on table public.exams is 'Teacher-owned exam metadata. Multi-tenant via user_id + RLS.';
 
@@ -321,6 +325,7 @@ revoke all on public.proctoring_snapshots from anon;
 --        EXAM_INACTIVE           -> teacher closed the exam (is_active = false)
 --        EXAM_NOT_STARTED        -> now() is before starts_at
 --        EXAM_EXPIRED            -> now() is after ends_at
+--        EXAM_NOT_FOUND          -> exam is in the Trash (deleted_at set) or gone
 -- ----------------------------------------------------------------------------
 create or replace function public.verify_and_acquire_session(
     p_exam_code      varchar,
@@ -343,6 +348,13 @@ begin
     -- 1. Exam must exist and be open.
     select * into v_exam from public.exams where code = p_exam_code;
     if not found then
+        return jsonb_build_object('success', false, 'message', 'EXAM_NOT_FOUND');
+    end if;
+
+    -- 1.0 Soft-deleted exams are indistinguishable from missing ones: the Trash
+    --     is a teacher-only concept, and revealing it would leak that the code
+    --     once existed. Same code as a genuine miss on purpose.
+    if v_exam.deleted_at is not null then
         return jsonb_build_object('success', false, 'message', 'EXAM_NOT_FOUND');
     end if;
 
@@ -577,34 +589,33 @@ $$;
 
 
 -- ----------------------------------------------------------------------------
--- C.4  submit_exam_result
---      Server-authoritative grading (F3). The client's claimed score is never
---      accepted; only raw answers are. Duplicate submission is rejected by the
---      UNIQUE(exam_code, student_code) constraint plus an explicit guard.
---      Returns: { success, message, result_id, score, total_questions, needs_grading }
---      `result_id` is the public certificate handle consumed by verify.html.
+-- C.4a  grade_exam_answers  (internal — helper for C.4 and C.8a)
+--       The single authoritative implementation of the F3 scoring rules.
+--
+--       Both submit_exam_result (initial grading) and recalculate_exam_scores
+--       (re-grading against edited keys) call this, so the Ministry-of-Education
+--       scale can never drift between the two code paths.
+--
+--       `p_answers` is the raw client answer array (submit) OR a stored
+--       `exam_results.answers_json` (re-grade) — both share the same keys:
+--         { questionIndex, selectedIndex | selectedAnswers | selectedAnswerText }
+--
+--       Returns: { score, total, needs_grading, corrected }
 -- ----------------------------------------------------------------------------
-create or replace function public.submit_exam_result(
-    p_exam_code     varchar,
-    p_student_code  varchar,
-    p_session_token uuid,
-    p_answers       jsonb,
-    p_metrics       jsonb default '{}'::jsonb
+create or replace function public.grade_exam_answers(
+    p_exam_id uuid,
+    p_answers jsonb
 ) returns jsonb
 language plpgsql
 security definer
 set search_path = public, pg_temp
 as $$
 declare
-    v_exam          public.exams%rowtype;
-    v_student       public.students%rowtype;
-    v_session       public.active_sessions%rowtype;
     v_q             public.question_bank%rowtype;
     v_ans           jsonb;
     v_idx           integer := 0;
     v_total         integer := 0;
     v_sum           numeric := 0;
-    v_score         numeric := 0;
     v_needs_grading boolean := false;
     v_corrected     jsonb   := '[]'::jsonb;
     v_type          text;
@@ -615,46 +626,17 @@ declare
     v_selected_arr  jsonb;
     v_correct_count integer;
     v_q_score       numeric;
-    v_result_id     uuid;
     i               integer;
 begin
-    -- 1. Exam.
-    select * into v_exam from public.exams where code = p_exam_code;
-    if not found then
-        return jsonb_build_object('success', false, 'message', 'EXAM_NOT_FOUND');
-    end if;
-
-    -- 2. Session must be live and bound to this candidate.
-    select * into v_session
-      from public.active_sessions
-     where exam_code      = p_exam_code
-       and student_code   = p_student_code
-       and session_token  = p_session_token;
-    if not found then
-        return jsonb_build_object('success', false, 'message', 'INVALID_SESSION');
-    end if;
-
-    -- 3. One submission per candidate.
-    if exists (
-        select 1 from public.exam_results
-         where exam_code = p_exam_code and student_code = p_student_code
-    ) then
-        return jsonb_build_object('success', false, 'message', 'ALREADY_SUBMITTED');
-    end if;
-
-    select * into v_student
-      from public.students
-     where exam_code = p_exam_code and student_code = p_student_code;
-
-    -- 4. Walk the authoritative question order and grade each answer.
+    -- Walk the authoritative question order and grade each answer.
     for v_q in
         select * from public.question_bank q
-         where q.exam_id = v_exam.id
+         where q.exam_id = p_exam_id
          order by q.position, q.created_at, q.id
     loop
         v_type := upper(coalesce(v_q.question_type, ''));
 
-        -- Locate the client answer for this 0-based index (absent = unanswered).
+        -- Locate the answer for this 0-based index (absent = unanswered).
         -- CASE (not AND) guarantees the regex is checked before the ::int cast,
         -- so a hostile questionIndex cannot raise a cast error.
         v_ans := null;
@@ -752,8 +734,80 @@ begin
         v_idx   := v_idx + 1;
     end loop;
 
-    -- 5. Aggregate: clamp(round(sum*100)/100, 0, total).
-    v_score := greatest(0, least(v_total, round(v_sum * 100) / 100));
+    return jsonb_build_object(
+        -- clamp(round(sum*100)/100, 0, total)
+        'score',         greatest(0, least(v_total, round(v_sum * 100) / 100)),
+        'total',         v_total,
+        'needs_grading', v_needs_grading,
+        'corrected',     v_corrected
+    );
+end;
+$$;
+
+
+-- ----------------------------------------------------------------------------
+-- C.4  submit_exam_result
+--      Server-authoritative grading (F3). The client's claimed score is never
+--      accepted; only raw answers are. Duplicate submission is rejected by the
+--      UNIQUE(exam_code, student_code) constraint plus an explicit guard.
+--      Scoring itself lives in grade_exam_answers (C.4a), shared with the
+--      re-grading RPC so both always apply the same scale.
+--      Returns: { success, message, result_id, score, total_questions, needs_grading }
+--      `result_id` is the public certificate handle consumed by verify.html.
+-- ----------------------------------------------------------------------------
+create or replace function public.submit_exam_result(
+    p_exam_code     varchar,
+    p_student_code  varchar,
+    p_session_token uuid,
+    p_answers       jsonb,
+    p_metrics       jsonb default '{}'::jsonb
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+    v_exam      public.exams%rowtype;
+    v_student   public.students%rowtype;
+    v_session   public.active_sessions%rowtype;
+    v_grade     jsonb;
+    v_result_id uuid;
+begin
+    -- 1. Exam.
+    select * into v_exam from public.exams where code = p_exam_code;
+    if not found then
+        return jsonb_build_object('success', false, 'message', 'EXAM_NOT_FOUND');
+    end if;
+
+    -- 1a. A trashed exam accepts no further submissions.
+    if v_exam.deleted_at is not null then
+        return jsonb_build_object('success', false, 'message', 'EXAM_NOT_FOUND');
+    end if;
+
+    -- 2. Session must be live and bound to this candidate.
+    select * into v_session
+      from public.active_sessions
+     where exam_code      = p_exam_code
+       and student_code   = p_student_code
+       and session_token  = p_session_token;
+    if not found then
+        return jsonb_build_object('success', false, 'message', 'INVALID_SESSION');
+    end if;
+
+    -- 3. One submission per candidate.
+    if exists (
+        select 1 from public.exam_results
+         where exam_code = p_exam_code and student_code = p_student_code
+    ) then
+        return jsonb_build_object('success', false, 'message', 'ALREADY_SUBMITTED');
+    end if;
+
+    select * into v_student
+      from public.students
+     where exam_code = p_exam_code and student_code = p_student_code;
+
+    -- 4. Grade every answer against the authoritative question order.
+    v_grade := public.grade_exam_answers(v_exam.id, p_answers);
 
     insert into public.exam_results (
         exam_code, student_code, student_name, class_name,
@@ -762,11 +816,13 @@ begin
     ) values (
         p_exam_code, p_student_code,
         coalesce(v_student.full_name, ''), coalesce(v_student.class_name, ''),
-        v_score, v_total, v_corrected,
+        (v_grade ->> 'score')::numeric,
+        (v_grade ->> 'total')::int,
+        v_grade -> 'corrected',
         coalesce(nullif(regexp_replace(p_metrics ->> 'blurCount', '\D', '', 'g'), '')::int, 0),
         coalesce(nullif(regexp_replace(p_metrics ->> 'fullscreenExitCount', '\D', '', 'g'), '')::int, 0),
         coalesce(nullif(regexp_replace(p_metrics ->> 'elapsedSeconds', '\D', '', 'g'), '')::int, 0),
-        v_needs_grading
+        (v_grade ->> 'needs_grading')::boolean
     )
     returning id into v_result_id;
 
@@ -778,9 +834,9 @@ begin
         'success',         true,
         'message',         'SUBMITTED',
         'result_id',       v_result_id,
-        'score',           v_score,
-        'total_questions', v_total,
-        'needs_grading',   v_needs_grading
+        'score',           (v_grade ->> 'score')::numeric,
+        'total_questions', (v_grade ->> 'total')::int,
+        'needs_grading',   (v_grade ->> 'needs_grading')::boolean
     );
 end;
 $$;
@@ -1101,6 +1157,227 @@ end;
 $$;
 
 
+-- ----------------------------------------------------------------------------
+-- C.9  delete_exam  (teacher — authenticated, Phase 5.5)
+--      Two-tier deletion driven by whether any submission exists.
+--
+--        * 0 submissions  -> HARD DELETE. The exam carries no graded history, so
+--          every dependent row (active_sessions, students, question_bank, and
+--          the exam itself) is removed outright. FKs are `on delete cascade`,
+--          but the children are deleted explicitly so the intent is auditable.
+--
+--        * > 0 submissions -> SOFT DELETE. Flipping `deleted_at` preserves the
+--          results for the 7-day retention window; `is_active` is forced false
+--          so the exam cannot be entered while it sits in the Trash.
+--
+--      Ownership is checked inside the body (SECURITY DEFINER bypasses RLS).
+--      Returns: { success, action, message, purge_at? }
+-- ----------------------------------------------------------------------------
+create or replace function public.delete_exam(p_exam_code varchar)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+    v_exam_id     uuid;
+    v_owner       uuid;
+    v_deleted_at  timestamptz;
+    v_submissions integer;
+begin
+    select e.id, e.user_id, e.deleted_at
+      into v_exam_id, v_owner, v_deleted_at
+      from public.exams e
+     where e.code = p_exam_code;
+    if not found then
+        return jsonb_build_object('success', false, 'message', 'EXAM_NOT_FOUND');
+    end if;
+    if auth.uid() is null or auth.uid() <> v_owner then
+        return jsonb_build_object('success', false, 'message', 'NOT_AUTHORIZED');
+    end if;
+
+    -- Already trashed: deleting again is a no-op rather than a data hazard.
+    if v_deleted_at is not null then
+        return jsonb_build_object(
+            'success', true,
+            'action',  'already_deleted',
+            'message', 'Đề thi đã nằm trong thùng rác.'
+        );
+    end if;
+
+    select count(*) into v_submissions
+      from public.exam_results r
+     where r.exam_code = p_exam_code;
+
+    if v_submissions > 0 then
+        update public.exams
+           set deleted_at = now(),
+               is_active  = false
+         where code = p_exam_code;
+
+        return jsonb_build_object(
+            'success',  true,
+            'action',   'soft_deleted',
+            'purge_at', now() + interval '7 days',
+            'message',  'Đề thi đã có kết quả. Đã chuyển vào thùng rác (tự động xóa sau 7 ngày).'
+        );
+    end if;
+
+    -- Hard delete: children first, then the exam. proctoring_snapshots can hold
+    -- rows for a candidate who captured a webcam frame but never submitted, so
+    -- it is cleared explicitly rather than left to the cascade.
+    delete from public.active_sessions      s where s.exam_code = p_exam_code;
+    delete from public.students             s where s.exam_code = p_exam_code;
+    delete from public.question_bank        q where q.exam_id   = v_exam_id;
+    delete from public.exam_results         r where r.exam_code = p_exam_code;
+    delete from public.proctoring_snapshots p where p.exam_code = p_exam_code;
+    delete from public.exams                e where e.id        = v_exam_id;
+
+    return jsonb_build_object(
+        'success', true,
+        'action',  'hard_deleted',
+        'message', 'Đã xóa hoàn toàn đề thi và câu hỏi.'
+    );
+end;
+$$;
+
+
+-- ----------------------------------------------------------------------------
+-- C.10  restore_exam  (teacher — authenticated, Phase 5.5)
+--       Clears the Trash marker. `is_active` is deliberately left false: a
+--       restored exam must be re-opened by the teacher on purpose, otherwise
+--       students could walk into an exam that was pulled mid-session.
+-- ----------------------------------------------------------------------------
+create or replace function public.restore_exam(p_exam_code varchar)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+    v_owner uuid;
+begin
+    select e.user_id into v_owner
+      from public.exams e
+     where e.code = p_exam_code;
+    if not found then
+        return jsonb_build_object('success', false, 'message', 'EXAM_NOT_FOUND');
+    end if;
+    if auth.uid() is null or auth.uid() <> v_owner then
+        return jsonb_build_object('success', false, 'message', 'NOT_AUTHORIZED');
+    end if;
+
+    update public.exams
+       set deleted_at = null
+     where code = p_exam_code;
+
+    return jsonb_build_object(
+        'success', true,
+        'message', 'Đã khôi phục đề thi từ thùng rác.'
+    );
+end;
+$$;
+
+
+-- ----------------------------------------------------------------------------
+-- C.11  purge_expired_exams  (maintenance, Phase 5.5)
+--       Hard-deletes every exam whose 7-day Trash window has elapsed. This is a
+--       global sweep, not an owner-scoped action: it only ever touches rows that
+--       are already scheduled for destruction, so triggering it early cannot
+--       destroy anything a teacher did not already delete. Cascades take the
+--       dependent results / students / questions with it.
+-- ----------------------------------------------------------------------------
+create or replace function public.purge_expired_exams()
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+    v_purged integer;
+begin
+    with doomed as (
+        delete from public.exams e
+         where e.deleted_at is not null
+           and e.deleted_at < now() - interval '7 days'
+        returning 1
+    )
+    select count(*) into v_purged from doomed;
+
+    return jsonb_build_object(
+        'success',        true,
+        'purged_count',   coalesce(v_purged, 0),
+        'message',        'Đã xóa vĩnh viễn các đề thi quá thời hạn lưu trữ.'
+    );
+end;
+$$;
+
+
+-- ----------------------------------------------------------------------------
+-- C.12  recalculate_exam_scores  (teacher — authenticated, Phase 5.5)
+--       Re-grades every submission of an exam against the CURRENT question_bank
+--       keys, which matters after a teacher edits an answer key (C.8 allows
+--       content edits even once submissions exist).
+--
+--       Scoring is delegated to grade_exam_answers (C.4a) — the same function
+--       used at submit time — so a re-grade can never apply a different scale
+--       than the original grading.
+--
+--       `answers_json` is exactly the shape grade_exam_answers consumes
+--       (questionIndex + selectedIndex/selectedAnswers/selectedAnswerText), so
+--       the stored answers are replayed verbatim.
+--
+--       Returns: { success, updated_count, message }
+-- ----------------------------------------------------------------------------
+create or replace function public.recalculate_exam_scores(p_exam_code varchar)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+    v_exam_id uuid;
+    v_owner   uuid;
+    v_result  public.exam_results%rowtype;
+    v_grade   jsonb;
+    v_updated integer := 0;
+begin
+    select e.id, e.user_id into v_exam_id, v_owner
+      from public.exams e
+     where e.code = p_exam_code;
+    if not found then
+        return jsonb_build_object('success', false, 'message', 'EXAM_NOT_FOUND');
+    end if;
+    if auth.uid() is null or auth.uid() <> v_owner then
+        return jsonb_build_object('success', false, 'message', 'NOT_AUTHORIZED');
+    end if;
+
+    for v_result in
+        select * from public.exam_results r
+         where r.exam_code = p_exam_code
+         order by r.submitted_at, r.id
+    loop
+        v_grade := public.grade_exam_answers(v_exam_id, v_result.answers_json);
+
+        update public.exam_results r
+           set score           = (v_grade ->> 'score')::numeric,
+               total_questions = (v_grade ->> 'total')::int,
+               answers_json    = v_grade -> 'corrected',
+               needs_grading   = (v_grade ->> 'needs_grading')::boolean
+         where r.id = v_result.id;
+
+        v_updated := v_updated + 1;
+    end loop;
+
+    return jsonb_build_object(
+        'success',       true,
+        'updated_count', v_updated,
+        'message',       'Đã chấm lại toàn bộ bài thi theo đáp án mới nhất.'
+    );
+end;
+$$;
+
+
 -- ============================================================================
 -- SECTION D — EXECUTE GRANTS
 -- ----------------------------------------------------------------------------
@@ -1114,6 +1391,11 @@ revoke all on function public.record_proctoring_snapshot(varchar, varchar, uuid,
 revoke all on function public.get_certificate_verification(uuid)                                          from public;
 revoke all on function public.verify_student_practice(varchar, varchar)                                    from public;
 revoke all on function public.update_exam_questions_safe(varchar, jsonb)                                   from public;
+revoke all on function public.grade_exam_answers(uuid, jsonb)                                              from public;
+revoke all on function public.delete_exam(varchar)                                                         from public;
+revoke all on function public.restore_exam(varchar)                                                        from public;
+revoke all on function public.purge_expired_exams()                                                        from public;
+revoke all on function public.recalculate_exam_scores(varchar)                                             from public;
 
 grant execute on function public.verify_and_acquire_session(varchar, varchar, varchar, varchar, text, uuid)   to anon, authenticated;
 grant execute on function public.record_student_heartbeat(varchar, varchar, uuid, integer, integer, integer, integer) to anon, authenticated;
@@ -1124,6 +1406,12 @@ grant execute on function public.get_certificate_verification(uuid)             
 grant execute on function public.verify_student_practice(varchar, varchar)                                     to anon, authenticated;
 -- Teacher-only: never exposed to anon (ownership is enforced inside the body).
 grant execute on function public.update_exam_questions_safe(varchar, jsonb)                                    to authenticated;
+grant execute on function public.delete_exam(varchar)                                                          to authenticated;
+grant execute on function public.restore_exam(varchar)                                                         to authenticated;
+grant execute on function public.purge_expired_exams()                                                         to authenticated;
+grant execute on function public.recalculate_exam_scores(varchar)                                              to authenticated;
+-- Internal helper: called only from other SECURITY DEFINER functions, never
+-- directly by a client (no EXECUTE grant to anon/authenticated).
 
 
 -- ============================================================================

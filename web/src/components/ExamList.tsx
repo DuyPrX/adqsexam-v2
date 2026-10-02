@@ -3,13 +3,17 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
-import { FileText, LogOut, Pencil, Plus, Users } from 'lucide-react';
+import { FileText, LogOut, Pencil, Plus, Trash2, Users } from 'lucide-react';
 import { signOut } from '@/lib/supabase/auth';
 import type { ExamRow } from '@/lib/types';
+import { cn } from '@/lib/utils';
 import { ExamActiveToggle } from './ExamActiveToggle';
+import { DeleteExamDialog } from './DeleteExamDialog';
+import { TrashList } from './TrashList';
 
 interface ExamListProps {
   exams: ExamRow[];
+  trashedExams: ExamRow[];
   counts: Record<string, number>;
   teacherEmail: string | null;
 }
@@ -17,10 +21,15 @@ interface ExamListProps {
 /**
  * Exam list table. Kept as a client component so the sign-out action and row
  * links can navigate without a full server round-trip.
+ *
+ * Phase 5.5 §3.2 adds an "active vs Trash" tab. Both lists are rendered from
+ * server-fetched props rather than re-fetched on tab change, so switching tabs
+ * is instantaneous.
  */
-export function ExamList({ exams, counts, teacherEmail }: ExamListProps) {
+export function ExamList({ exams, trashedExams, counts, teacherEmail }: ExamListProps) {
   const router = useRouter();
   const [isSigningOut, setIsSigningOut] = useState(false);
+  const [tab, setTab] = useState<'active' | 'trash'>('active');
 
   const handleSignOut = async () => {
     setIsSigningOut(true);
@@ -63,7 +72,34 @@ export function ExamList({ exams, counts, teacherEmail }: ExamListProps) {
         </div>
       </div>
 
-      {exams.length === 0 ? (
+      {/* Active / Trash tabs */}
+      <div className="flex gap-1 rounded-lg border border-slate-200 bg-white p-1">
+        <button
+          type="button"
+          onClick={() => setTab('active')}
+          className={cn(
+            'flex-1 rounded-md px-3 py-1.5 text-sm font-semibold transition',
+            tab === 'active' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100',
+          )}
+        >
+          Đề thi đang hoạt động ({exams.length})
+        </button>
+        <button
+          type="button"
+          onClick={() => setTab('trash')}
+          className={cn(
+            'flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-semibold transition',
+            tab === 'trash' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100',
+          )}
+        >
+          <Trash2 size={14} />
+          Thùng rác ({trashedExams.length})
+        </button>
+      </div>
+
+      {tab === 'trash' ? (
+        <TrashList exams={trashedExams} />
+      ) : exams.length === 0 ? (
         <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-slate-300 bg-white p-12 text-center">
           <FileText size={32} className="text-slate-300" />
           <div>
@@ -127,6 +163,12 @@ export function ExamList({ exams, counts, teacherEmail }: ExamListProps) {
                         >
                           Xem kết quả
                         </Link>
+                        <DeleteExamDialog
+                          examCode={exam.code}
+                          examTitle={exam.title}
+                          submissionCount={counts[exam.code] ?? 0}
+                          onDeleted={() => router.refresh()}
+                        />
                       </div>
                     </td>
                   </tr>

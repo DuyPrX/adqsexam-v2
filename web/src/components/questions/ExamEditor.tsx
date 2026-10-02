@@ -11,6 +11,8 @@ import {
 } from '@/lib/exams';
 import type { ExamRow, ExtractedQuestion, QuestionBankRow, QuestionType } from '@/lib/types';
 import { cn, hasResolvedAnswer } from '@/lib/utils';
+import { toLocalDatetimeString, toUtcIsoString } from '@/lib/date';
+import { DeleteExamDialog } from '@/components/DeleteExamDialog';
 import { QuestionCard } from './QuestionCard';
 
 interface ExamEditorProps {
@@ -20,25 +22,9 @@ interface ExamEditorProps {
   submissionCount: number;
 }
 
-/** ISO timestamp -> value accepted by <input type="datetime-local"> (local time). */
-function toDateTimeLocal(iso: string | null): string {
-  if (!iso) return '';
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return '';
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(
-    date.getHours(),
-  )}:${pad(date.getMinutes())}`;
-}
-
-/** datetime-local value -> ISO string, or null when cleared. */
-function fromDateTimeLocal(value: string): string | null {
-  if (!value.trim()) return null;
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date.toISOString();
-}
-
-/** A blank MULTIPLE_CHOICE template appended by "Thêm câu hỏi mới". */
+/**
+ * A blank MULTIPLE_CHOICE template appended by "Thêm câu hỏi mới".
+ */
 function blankQuestion(position: number): ExtractedQuestion {
   return {
     position,
@@ -75,8 +61,8 @@ export function ExamEditor({ exam, initialQuestions, submissionCount }: ExamEdit
   const [title, setTitle] = useState(exam.title);
   const [durationMinutes, setDurationMinutes] = useState(exam.duration_minutes);
   const [isActive, setIsActive] = useState(exam.is_active);
-  const [startsAt, setStartsAt] = useState(toDateTimeLocal(exam.starts_at));
-  const [endsAt, setEndsAt] = useState(toDateTimeLocal(exam.ends_at));
+  const [startsAt, setStartsAt] = useState(toLocalDatetimeString(exam.starts_at));
+  const [endsAt, setEndsAt] = useState(toLocalDatetimeString(exam.ends_at));
   const [questions, setQuestions] = useState<ExtractedQuestion[]>(() =>
     toEditable(initialQuestions),
   );
@@ -126,8 +112,8 @@ export function ExamEditor({ exam, initialQuestions, submissionCount }: ExamEdit
         title,
         durationMinutes,
         isActive,
-        startsAt: fromDateTimeLocal(startsAt),
-        endsAt: fromDateTimeLocal(endsAt),
+        startsAt: toUtcIsoString(startsAt),
+        endsAt: toUtcIsoString(endsAt),
       });
 
       await updateExamQuestionsSafe(supabase, exam.code, questions);
@@ -310,6 +296,24 @@ export function ExamEditor({ exam, initialQuestions, submissionCount }: ExamEdit
           {isSaving ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
           {isSaving ? 'Đang lưu…' : 'Lưu thay đổi'}
         </button>
+      </div>
+
+      {/* Destructive action lives apart from the save flow (Phase 5.5 §3.3). */}
+      <div className="flex items-center justify-between rounded-xl border border-rose-200 bg-rose-50/50 px-4 py-3">
+        <div>
+          <p className="text-sm font-semibold text-rose-800">Xóa đề thi</p>
+          <p className="text-xs text-rose-700">
+            {locked
+              ? `Đề thi đã có ${submissionCount} bài nộp nên sẽ được chuyển vào thùng rác 7 ngày.`
+              : 'Đề thi chưa có bài nộp nên sẽ bị xóa vĩnh viễn.'}
+          </p>
+        </div>
+        <DeleteExamDialog
+          examCode={exam.code}
+          examTitle={exam.title}
+          submissionCount={submissionCount}
+          onDeleted={() => router.push('/')}
+        />
       </div>
     </div>
   );

@@ -23,6 +23,14 @@
  *      bank freely before any submission, then locks structure afterwards.
  *  14. Multi-variant sub-sampling (Phase 5.4): generateExamVariants draws K of N
  *      with contiguous 1..K positions, unique codes, and synced answer keys.
+ *  15. Timezone helpers (Phase 5.5): the local <-> UTC converters round-trip the
+ *      exact same instant and match the platform's own offset.
+ *  16. Hard delete (Phase 5.5): an exam with 0 submissions is wiped from every
+ *      dependent table.
+ *  17. Soft delete / Trash (Phase 5.5): an exam with submissions is soft-deleted,
+ *      becomes unreachable to students, and can be restored.
+ *  18. Re-grading (Phase 5.5): editing an answer key + recalculate_exam_scores
+ *      updates the stored score to match.
  *
  * Usage:
  *   node v2/tests/e2e_flow_verification.mjs
@@ -72,6 +80,12 @@ const { generateExamVariants } = await import(
   new URL('../web/src/lib/shuffle.ts', import.meta.url).href
 );
 
+// Phase 5.5 Step 15 exercises the timezone helpers. `date.ts` has no imports of
+// its own, so it loads directly through the same extension-resolving hook.
+const { toLocalDatetimeString, toUtcIsoString, daysUntil } = await import(
+  new URL('../web/src/lib/date.ts', import.meta.url).href
+);
+
 const TEACHER = { email: 'e2e.teacher@adqsexam.local', password: 'e2e-password-123' };
 const EXAM = {
   code: 'E2E' + String(Math.floor(100 + Math.random() * 900)), // 6 chars
@@ -106,6 +120,22 @@ const EDIT_EXAM = {
 };
 const EXPECTED_SCORE = 2.5; // MCQ 1.0 + TRUE_FALSE 3/4 = 0.5 + SHORT_ANSWER 1.0
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Phase 5.5 — dedicated exams for the deletion / re-grading steps.
+const HARD_DEL_EXAM = {
+  code: 'HDL' + String(Math.floor(100 + Math.random() * 900)),
+  title: 'E2E Hard Delete',
+  duration: 30,
+};
+const SOFT_DEL_EXAM = {
+  code: 'SDL' + String(Math.floor(100 + Math.random() * 900)),
+  title: 'E2E Soft Delete',
+  duration: 30,
+};
+const SOFT_DEL_STUDENT = {
+  code: 'E2ESDL01',
+  fullName: 'Phạm Thị Rác',
+  className: '12SDL',
+};
 
 /* ---------------------------------------------------------------- harness */
 
@@ -904,11 +934,369 @@ async function main() {
   check('K is capped at the pool size N', capped[0]?.questions.length === 5,
     String(capped[0]?.questions.length));
 
+  /* --- 15. Timezone helpers (Phase 5.5) --------------------------------- */
+  step(15, 'Timezone helpers round-trip the exact same instant');
+
+  const sampleIso = '2026-10-02T01:30:00.000Z';
+  const localValue = toLocalDatetimeString(sampleIso);
+  check('UTC ISO converts to a datetime-local string',
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(localValue), localValue);
+
+  // The local wall clock must reflect the platform's real UTC offset for that
+  // instant — parsed back on its own it is a LOCAL date, so re-deriving the UTC
+  // instant from it must land on the original timestamp.
+  const [datePart, timePart] = localValue.split('T');
+  const [y, mo, d] = datePart.split('-').map(Number);
+  const [h, mi] = timePart.split(':').map(Number);
+  const localReconstructed = new Date(y, mo - 1, d, h, mi, 0, 0);
+  check('local string reflects the platform UTC offset',
+    localReconstructed.getTime() === new Date(sampleIso).getTime(),
+    `${localReconstructed.toISOString()} vs ${sampleIso}`);
+
+  // Round-trip: local -> UTC must reproduce the same instant (minute precision).
+  const roundTripped = toUtcIsoString(localValue);
+  check('local string converts back to the same UTC instant',
+    roundTripped === sampleIso, `${roundTripped} vs ${sampleIso}`);
+  check('round-trip preserves the exact epoch millisecond',
+    new Date(roundTripped).getTime() === new Date(sampleIso).getTime(),
+    String(new Date(roundTripped).getTime()));
+
+  // An offset with a non-zero minute component (e.g. UTC+05:45) must survive the
+  // round-trip rather than being truncated to a whole hour. This assertion holds
+  // in ANY host timezone, since both directions use the same local calendar.
+  const minuteOffsetIso = '2026-01-15T06:15:00.000Z';
+  check('minute-level offsets survive the round-trip',
+    toUtcIsoString(toLocalDatetimeString(minuteOffsetIso)) === minuteOffsetIso,
+    String(toUtcIsoString(toLocalDatetimeString(minuteOffsetIso))));
+
+  // Null / invalid inputs must degrade to "no bound" rather than throw.
+  check('null ISO yields an empty input value', toLocalDatetimeString(null) === '');
+  check('null local yields a null bound', toUtcIsoString(null) === null);
+  check('empty local yields a null bound', toUtcIsoString('   ') === null);
+  check('invalid local yields a null bound', toUtcIsoString('not-a-date') === null);
+
+  // daysUntil drives the Trash "time remaining" label.
+  const inSevenDays = new Date(Date.now() + 7 * 86_400_000).toISOString();
+  check('daysUntil reports 7 days for a fresh 7-day window', daysUntil(inSevenDays) === 7,
+    String(daysUntil(inSevenDays)));
+  check('daysUntil reports 0 once the deadline has passed',
+    daysUntil(new Date(Date.now() - 1000).toISOString()) === 0,
+    String(daysUntil(new Date(Date.now() - 1000).toISOString())));
+
+  /* --- 16. Hard delete (Phase 5.5) -------------------------------------- */
+  step(16, 'delete_exam hard-deletes an exam with zero submissions');
+
+  await teacher.from('exams').delete().eq('code', HARD_DEL_EXAM.code);
+  const hardInsert = await teacher
+    .from('exams')
+    .insert({
+      user_id: teacherId,
+      code: HARD_DEL_EXAM.code,
+      title: HARD_DEL_EXAM.title,
+      duration_minutes: HARD_DEL_EXAM.duration,
+    })
+    .select('id')
+    .single();
+  check('hard-delete exam created', !hardInsert.error, hardInsert.error?.message);
+  const hardExamId = hardInsert.data?.id;
+
+  const hardRoster = await teacher.from('students').insert({
+    student_code: SOFT_DEL_STUDENT.code,
+    full_name: SOFT_DEL_STUDENT.fullName,
+    class_name: SOFT_DEL_STUDENT.className,
+    exam_code: HARD_DEL_EXAM.code,
+  });
+  check('hard-delete roster seeded', !hardRoster.error, hardRoster.error?.message);
+
+  const hardQuestions = await teacher.from('question_bank').insert([
+    {
+      user_id: teacherId,
+      exam_id: hardExamId,
+      question_text: 'Câu sẽ bị xóa',
+      question_type: 'MULTIPLE_CHOICE',
+      options: ['A', 'B', 'C', 'D'],
+      correct_answer: 0,
+      position: 1,
+    },
+  ]);
+  check('hard-delete questions seeded', !hardQuestions.error, hardQuestions.error?.message);
+
+  const hardDelete = await teacher.rpc('delete_exam', { p_exam_code: HARD_DEL_EXAM.code });
+  check('hard delete reported success', hardDelete.data?.success === true,
+    JSON.stringify(hardDelete.data ?? hardDelete.error));
+  check('hard delete reports action = hard_deleted',
+    hardDelete.data?.action === 'hard_deleted', String(hardDelete.data?.action));
+
+  const hardGoneExam = await teacher
+    .from('exams')
+    .select('id')
+    .eq('code', HARD_DEL_EXAM.code);
+  check('exam row is gone after hard delete', hardGoneExam.data?.length === 0,
+    String(hardGoneExam.data?.length));
+
+  const hardGoneQuestions = await teacher
+    .from('question_bank')
+    .select('id')
+    .eq('exam_id', hardExamId);
+  check('question_bank rows are gone after hard delete', hardGoneQuestions.data?.length === 0,
+    String(hardGoneQuestions.data?.length));
+
+  const hardGoneRoster = await teacher
+    .from('students')
+    .select('id')
+    .eq('exam_code', HARD_DEL_EXAM.code);
+  check('roster rows are gone after hard delete', hardGoneRoster.data?.length === 0,
+    String(hardGoneRoster.data?.length));
+
+  // Deleting an already-deleted (or unknown) exam must not raise.
+  const hardDeleteAgain = await teacher.rpc('delete_exam', { p_exam_code: HARD_DEL_EXAM.code });
+  check('re-deleting a vanished exam is rejected cleanly',
+    hardDeleteAgain.data?.success === false && hardDeleteAgain.data?.message === 'EXAM_NOT_FOUND',
+    JSON.stringify(hardDeleteAgain.data));
+
+  /* --- 17. Soft delete & Trash (Phase 5.5) ------------------------------ */
+  step(17, 'delete_exam soft-deletes an exam that has submissions');
+
+  await teacher.from('exams').delete().eq('code', SOFT_DEL_EXAM.code);
+  const softInsert = await teacher
+    .from('exams')
+    .insert({
+      user_id: teacherId,
+      code: SOFT_DEL_EXAM.code,
+      title: SOFT_DEL_EXAM.title,
+      duration_minutes: SOFT_DEL_EXAM.duration,
+    })
+    .select('id')
+    .single();
+  check('soft-delete exam created', !softInsert.error, softInsert.error?.message);
+  const softExamId = softInsert.data?.id;
+
+  await teacher.from('students').insert({
+    student_code: SOFT_DEL_STUDENT.code,
+    full_name: SOFT_DEL_STUDENT.fullName,
+    class_name: SOFT_DEL_STUDENT.className,
+    exam_code: SOFT_DEL_EXAM.code,
+  });
+
+  const softBank = await teacher.from('question_bank').insert([
+    {
+      user_id: teacherId,
+      exam_id: softExamId,
+      question_text: 'Câu hỏi gốc',
+      question_type: 'MULTIPLE_CHOICE',
+      options: ['A', 'B', 'C', 'D'],
+      correct_answer: 0,
+      position: 1,
+    },
+    {
+      user_id: teacherId,
+      exam_id: softExamId,
+      question_text: 'Câu hỏi phụ',
+      question_type: 'MULTIPLE_CHOICE',
+      options: ['A', 'B', 'C', 'D'],
+      correct_answer: 1,
+      position: 2,
+    },
+  ]);
+  check('soft-delete questions seeded', !softBank.error, softBank.error?.message);
+
+  // Produce one real submission so the exam becomes soft-delete eligible.
+  const softAcquire = await student.rpc('verify_and_acquire_session', {
+    p_exam_code: SOFT_DEL_EXAM.code,
+    p_student_code: SOFT_DEL_STUDENT.code,
+    p_full_name: SOFT_DEL_STUDENT.fullName,
+    p_class_name: SOFT_DEL_STUDENT.className,
+    p_device_info: 'e2e-softdel/1.0',
+    p_existing_token: null,
+  });
+  check('soft-delete candidate acquired a session',
+    softAcquire.data?.success === true, JSON.stringify(softAcquire.data ?? softAcquire.error));
+
+  const softSubmit = await student.rpc('submit_exam_result', {
+    p_exam_code: SOFT_DEL_EXAM.code,
+    p_student_code: SOFT_DEL_STUDENT.code,
+    p_session_token: softAcquire.data?.session_token,
+    // Answer Q1 correctly (A=0), Q2 wrongly (marked 1, submitted 0) => 1.0 / 2.
+    p_answers: [
+      { questionIndex: 0, selectedIndex: 0 },
+      { questionIndex: 1, selectedIndex: 0 },
+    ],
+    p_metrics: {},
+  });
+  check('soft-delete submission accepted', softSubmit.data?.success === true,
+    JSON.stringify(softSubmit.data ?? softSubmit.error));
+  check('initial score is 1 of 2', Number(softSubmit.data?.score) === 1,
+    String(softSubmit.data?.score));
+
+  const softDelete = await teacher.rpc('delete_exam', { p_exam_code: SOFT_DEL_EXAM.code });
+  check('soft delete reported success', softDelete.data?.success === true,
+    JSON.stringify(softDelete.data ?? softDelete.error));
+  check('soft delete reports action = soft_deleted',
+    softDelete.data?.action === 'soft_deleted', String(softDelete.data?.action));
+  check('soft delete returns a purge_at 7 days out',
+    !!softDelete.data?.purge_at
+      && Math.abs(
+        new Date(softDelete.data.purge_at).getTime() - (Date.now() + 7 * 86_400_000),
+      ) < 60_000,
+    String(softDelete.data?.purge_at));
+
+  const softRow = await teacher
+    .from('exams')
+    .select('deleted_at, is_active')
+    .eq('code', SOFT_DEL_EXAM.code)
+    .maybeSingle();
+  check('deleted_at is stamped', !!softRow.data?.deleted_at, JSON.stringify(softRow.data));
+  check('soft-deleted exam is forced inactive', softRow.data?.is_active === false,
+    String(softRow.data?.is_active));
+
+  // A trashed exam must be unreachable to students.
+  const softLoginAfterDelete = await student.rpc('verify_and_acquire_session', {
+    p_exam_code: SOFT_DEL_EXAM.code,
+    p_student_code: SOFT_DEL_STUDENT.code,
+    p_full_name: SOFT_DEL_STUDENT.fullName,
+    p_class_name: SOFT_DEL_STUDENT.className,
+    p_device_info: 'e2e-softdel/2.0',
+    p_existing_token: null,
+  });
+  check('student login into a trashed exam is rejected as EXAM_NOT_FOUND',
+    softLoginAfterDelete.data?.success === false
+      && softLoginAfterDelete.data?.message === 'EXAM_NOT_FOUND',
+    JSON.stringify(softLoginAfterDelete.data));
+
+  // ...and it must not appear as a live exam.
+  const liveAfterDelete = await teacher
+    .from('exams')
+    .select('code')
+    .is('deleted_at', null)
+    .eq('code', SOFT_DEL_EXAM.code);
+  check('trashed exam is excluded from the live list', liveAfterDelete.data?.length === 0,
+    String(liveAfterDelete.data?.length));
+
+  const trashAfterDelete = await teacher
+    .from('exams')
+    .select('code')
+    .not('deleted_at', 'is', null)
+    .eq('code', SOFT_DEL_EXAM.code);
+  check('trashed exam appears in the Trash list', trashAfterDelete.data?.length === 1,
+    String(trashAfterDelete.data?.length));
+
+  // Restore clears the marker but leaves the exam closed.
+  const restored = await teacher.rpc('restore_exam', { p_exam_code: SOFT_DEL_EXAM.code });
+  check('restore reported success', restored.data?.success === true,
+    JSON.stringify(restored.data ?? restored.error));
+
+  const restoredRow = await teacher
+    .from('exams')
+    .select('deleted_at, is_active')
+    .eq('code', SOFT_DEL_EXAM.code)
+    .maybeSingle();
+  check('restore clears deleted_at', restoredRow.data?.deleted_at === null,
+    JSON.stringify(restoredRow.data));
+  check('restore deliberately leaves the exam closed', restoredRow.data?.is_active === false,
+    String(restoredRow.data?.is_active));
+
+  // purge_expired_exams must NOT touch a freshly-restored (live) exam.
+  const purgeSweep = await teacher.rpc('purge_expired_exams');
+  check('purge sweep runs', purgeSweep.data?.success === true,
+    JSON.stringify(purgeSweep.data ?? purgeSweep.error));
+  const survivesPurge = await teacher
+    .from('exams')
+    .select('code')
+    .eq('code', SOFT_DEL_EXAM.code);
+  check('a live exam survives the purge sweep', survivesPurge.data?.length === 1,
+    String(survivesPurge.data?.length));
+
+  // Ownership: an anonymous caller must never delete or restore.
+  const anonDelete = await student.rpc('delete_exam', { p_exam_code: SOFT_DEL_EXAM.code });
+  check('anon cannot call delete_exam',
+    !!anonDelete.error || anonDelete.data?.success === false,
+    JSON.stringify(anonDelete.error ?? anonDelete.data));
+
+  /* --- 18. Re-grading (Phase 5.5) --------------------------------------- */
+  step(18, 'recalculate_exam_scores re-grades against the latest keys');
+
+  // The verification exam (EXAM.code) has STUDENT's submission at EXPECTED_SCORE.
+  // Flip Q3's SHORT_ANSWER key from "3" to "5" so the candidate's stored "3"
+  // becomes wrong: 2.5 - 1.0 = 1.5.
+  const keyEdit = await teacher.rpc('update_exam_questions_safe', {
+    p_exam_code: EXAM.code,
+    p_questions: [
+      {
+        position: 1,
+        question_type: 'MULTIPLE_CHOICE',
+        question_text: 'Thủ đô của Việt Nam là gì?',
+        options: ['Hà Nội', 'Huế', 'Đà Nẵng', 'TP.HCM'],
+        correct_answer: 0,
+        explanation: 'Hà Nội là thủ đô.',
+      },
+      {
+        position: 2,
+        question_type: 'TRUE_FALSE',
+        question_text: 'Xét tính đúng sai của các mệnh đề:',
+        options: ['a) 2 + 2 = 4', 'b) 3 > 5', 'c) Trái Đất hình cầu', 'd) 1 = 2'],
+        correct_answer: ['Đ', 'S', 'Đ', 'S'],
+        explanation: null,
+      },
+      {
+        position: 3,
+        question_type: 'SHORT_ANSWER',
+        question_text: 'Tính 1,5 + 1,5 = ?',
+        options: [],
+        correct_answer: '5',
+        explanation: null,
+      },
+    ],
+  });
+  check('answer key edit accepted after submission',
+    keyEdit.data?.success === true, JSON.stringify(keyEdit.data ?? keyEdit.error));
+
+  const beforeRegrade = await teacher
+    .from('exam_results')
+    .select('score')
+    .eq('exam_code', EXAM.code)
+    .eq('student_code', STUDENT.code)
+    .maybeSingle();
+  check('stored score is still the stale value before re-grading',
+    Number(beforeRegrade.data?.score) === EXPECTED_SCORE, String(beforeRegrade.data?.score));
+
+  const regrade = await teacher.rpc('recalculate_exam_scores', { p_exam_code: EXAM.code });
+  check('re-grade reported success', regrade.data?.success === true,
+    JSON.stringify(regrade.data ?? regrade.error));
+  // Two candidates submitted to EXAM.code (the passing student and the failing one).
+  check('re-grade updated every submission (2)',
+    regrade.data?.updated_count === 2, String(regrade.data?.updated_count));
+  check('re-grade returns the Vietnamese confirmation',
+    regrade.data?.message === 'Đã chấm lại toàn bộ bài thi theo đáp án mới nhất.',
+    String(regrade.data?.message));
+
+  const afterRegrade = await teacher
+    .from('exam_results')
+    .select('score, answers_json')
+    .eq('exam_code', EXAM.code)
+    .eq('student_code', STUDENT.code)
+    .maybeSingle();
+  check('re-graded score drops by the rekeyed question (2.5 -> 1.5)',
+    Number(afterRegrade.data?.score) === 1.5, String(afterRegrade.data?.score));
+
+  const correctedQ3 = (afterRegrade.data?.answers_json ?? []).find((a) => a.questionIndex === 2);
+  check('re-graded answers_json marks Q3 incorrect',
+    correctedQ3?.isCorrect === false, JSON.stringify(correctedQ3));
+  check('re-graded answers_json carries the NEW correct answer',
+    correctedQ3?.correctAnswer === '5', JSON.stringify(correctedQ3));
+
+  // Ownership: re-grading someone else's exam must be refused.
+  const anonRegrade = await student.rpc('recalculate_exam_scores', { p_exam_code: EXAM.code });
+  check('anon cannot call recalculate_exam_scores',
+    !!anonRegrade.error || anonRegrade.data?.success === false,
+    JSON.stringify(anonRegrade.error ?? anonRegrade.data));
+
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);
   await teacher.from('exams').delete().eq('code', EXAM.code); // cascades
   await teacher.from('exams').delete().eq('code', SCHED_EXAM.code);
   await teacher.from('exams').delete().eq('code', EDIT_EXAM.code);
+  await teacher.from('exams').delete().eq('code', HARD_DEL_EXAM.code);
+  await teacher.from('exams').delete().eq('code', SOFT_DEL_EXAM.code);
 
   console.log(`\n${'='.repeat(74)}`);
   console.log(`RESULT: ${passed} passed, ${failed} failed`);

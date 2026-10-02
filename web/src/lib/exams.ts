@@ -14,6 +14,14 @@ import { generateExamCode } from './utils';
 
 const UNIQUE_VIOLATION = '23505';
 
+/**
+ * Canonical `exams` column list. Centralised because every `ExamRow` consumer
+ * must agree on the shape — omitting a newer column (e.g. `deleted_at`) leaves
+ * it `undefined` at runtime while TypeScript still believes it is `string | null`.
+ */
+export const EXAM_COLUMNS =
+  'id, user_id, code, title, duration_minutes, is_active, starts_at, ends_at, deleted_at, created_at';
+
 export class PersistenceError extends Error {
   constructor(message: string) {
     super(message);
@@ -53,7 +61,7 @@ async function insertExamWithFreshCode(
         title,
         duration_minutes: durationMinutes,
       })
-      .select('id, user_id, code, title, duration_minutes, is_active, starts_at, ends_at, created_at')
+      .select(EXAM_COLUMNS)
       .single<ExamRow>();
 
     if (!error && data) return data;
@@ -170,7 +178,7 @@ export async function saveExamVariants(
   const examsInsert = await supabase
     .from('exams')
     .insert(examRows)
-    .select('id, user_id, code, title, duration_minutes, is_active, starts_at, ends_at, created_at');
+    .select(EXAM_COLUMNS);
 
   if (examsInsert.error || !examsInsert.data) {
     throw new PersistenceError(
@@ -250,19 +258,36 @@ export async function saveRoster(
 }
 
 /**
- * Fetches every exam owned by the current teacher, newest first.
+ * Fetches every LIVE exam owned by the current teacher, newest first.
  *
  * Wrapped in React `cache` (Phase 5.3 §3): the dashboard renders in one request
  * pass, and server components may legitimately ask for the same list more than
  * once. Without this, each call is a fresh Supabase round-trip.
+ *
+ * `.is('deleted_at', null)` excludes Trash items (Phase 5.5). A trashed exam is
+ * still the owner's row, so RLS returns it — the filter is what keeps it out of
+ * the active list.
  */
 export const listExams = cache(async (supabase: SupabaseClient): Promise<ExamRow[]> => {
   const { data, error } = await supabase
     .from('exams')
-    .select('id, user_id, code, title, duration_minutes, is_active, starts_at, ends_at, created_at')
+    .select(EXAM_COLUMNS)
+    .is('deleted_at', null)
     .order('created_at', { ascending: false });
 
   if (error) throw new PersistenceError(`Không tải được danh sách đề: ${error.message}`);
+  return data ?? [];
+});
+
+/** Fetches the teacher's trashed exams, most recently deleted first (Phase 5.5). */
+export const listTrashedExams = cache(async (supabase: SupabaseClient): Promise<ExamRow[]> => {
+  const { data, error } = await supabase
+    .from('exams')
+    .select(EXAM_COLUMNS)
+    .not('deleted_at', 'is', null)
+    .order('deleted_at', { ascending: false });
+
+  if (error) throw new PersistenceError(`Không tải được thùng rác: ${error.message}`);
   return data ?? [];
 });
 
@@ -271,8 +296,9 @@ export const loadExamByCode = cache(
   async (supabase: SupabaseClient, code: string): Promise<ExamRow | null> => {
     const { data, error } = await supabase
       .from('exams')
-      .select('id, user_id, code, title, duration_minutes, is_active, starts_at, ends_at, created_at')
+      .select(EXAM_COLUMNS)
       .eq('code', code)
+      .is('deleted_at', null)
       .maybeSingle<ExamRow>();
 
     if (error) throw new PersistenceError(`Không tải được đề thi: ${error.message}`);
@@ -408,3 +434,85 @@ export const countResultsByExam = cache(
     return counts;
   },
 );
+
+/* -------------------------------------------------------------------------- */
+/* Lifecycle: delete / restore / purge / re-grade (Phase 5.5)                  */
+/* -------------------------------------------------------------------------- */
+
+export interface DeleteExamResult {
+  action: 'hard_deleted' | 'soft_deleted' | 'already_deleted';
+  message: string;
+  /** Set only for `soft_deleted`: when the Trash window closes. */
+  purgeAt?: string | null;
+}
+
+/**
+ * Two-tier delete (Phase 5.5).
+ *
+ * The tier is decided server-side from the submission count, so the UI never has
+ * to guess: 0 submissions wipes the exam, otherwise it moves to the 7-day Trash.
+ */
+export async function deleteExam(
+  supabase: SupabaseClient,
+  examCode: string,
+): Promise<DeleteExamResult> {
+  const { data, error } = await supabase.rpc('delete_exam', { p_exam_code: examCode });
+  if (error) throw new PersistenceError(`Không xóa được đề thi: ${error.message}`);
+
+  const result = data as { success: boolean; action: DeleteExamResult['action']; message: string; purge_at?: string | null };
+  if (!result?.success) {
+    throw new PersistenceError(result?.message ?? 'Không xóa được đề thi.');
+  }
+
+  return { action: result.action, message: result.message, purgeAt: result.purge_at ?? null };
+}
+
+/** Restores a trashed exam (Phase 5.5). The exam is left closed; re-open it explicitly. */
+export async function restoreExam(supabase: SupabaseClient, examCode: string): Promise<string> {
+  const { data, error } = await supabase.rpc('restore_exam', { p_exam_code: examCode });
+  if (error) throw new PersistenceError(`Không khôi phục được đề thi: ${error.message}`);
+
+  const result = data as { success: boolean; message: string };
+  if (!result?.success) {
+    throw new PersistenceError(result?.message ?? 'Không khôi phục được đề thi.');
+  }
+  return result.message;
+}
+
+/** Permanently deletes one trashed exam by purging it (Phase 5.5 "Xóa vĩnh viễn"). */
+export async function purgeExamNow(supabase: SupabaseClient, examCode: string): Promise<void> {
+  const { data, error } = await supabase
+    .from('exams')
+    .delete()
+    .eq('code', examCode)
+    .select('code')
+    .maybeSingle<{ code: string }>();
+
+  if (error) throw new PersistenceError(`Không xóa vĩnh viễn được: ${error.message}`);
+  if (!data) throw new PersistenceError('Không tìm thấy đề thi để xóa.');
+}
+
+/** Runs the global 7-day Trash sweep (Phase 5.5). Returns how many exams were purged. */
+export async function purgeExpiredExams(supabase: SupabaseClient): Promise<number> {
+  const { data, error } = await supabase.rpc('purge_expired_exams');
+  if (error) throw new PersistenceError(`Không dọn được thùng rác: ${error.message}`);
+  return (data as { purged_count?: number } | null)?.purged_count ?? 0;
+}
+
+/**
+ * Re-grades every submission against the current answer keys (Phase 5.5).
+ * Returns how many results were rewritten.
+ */
+export async function recalculateExamScores(
+  supabase: SupabaseClient,
+  examCode: string,
+): Promise<{ updatedCount: number; message: string }> {
+  const { data, error } = await supabase.rpc('recalculate_exam_scores', { p_exam_code: examCode });
+  if (error) throw new PersistenceError(`Không chấm lại được: ${error.message}`);
+
+  const result = data as { success: boolean; updated_count: number; message: string };
+  if (!result?.success) {
+    throw new PersistenceError(result?.message ?? 'Không chấm lại được.');
+  }
+  return { updatedCount: result.updated_count, message: result.message };
+}

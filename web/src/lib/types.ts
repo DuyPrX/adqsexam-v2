@@ -66,6 +66,8 @@ export interface ExamRow {
   /** Scheduling window (Phase 5.4). ISO timestamp, or null when unbounded. */
   starts_at: string | null;
   ends_at: string | null;
+  /** Trash marker (Phase 5.5). ISO timestamp, or null when the exam is live. */
+  deleted_at: string | null;
   created_at: string;
 }
 
