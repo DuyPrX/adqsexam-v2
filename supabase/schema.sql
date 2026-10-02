@@ -1455,6 +1455,42 @@ $$;
 -- composite primary key and therefore needs no change.
 alter table public.exam_results replica identity full;
 
+
+-- ============================================================================
+-- SECTION D.3 — SCHEDULED TRASH PURGE (pg_cron)
+-- ----------------------------------------------------------------------------
+-- purge_expired_exams() (C.11) is the mechanism behind the "tự động xóa sau 7
+-- ngày" promise in delete_exam()'s soft-delete message. Until this section
+-- existed, nothing ever called it — the Trash simply grew forever.
+--
+-- Scheduling lives IN the database rather than in a Worker/Edge Function:
+--   * no additional component to deploy, warm, or authorize;
+--   * no outbound network path, so zero Cloudflare request-quota cost;
+--   * it runs in the same transaction domain as the rows it deletes.
+--
+-- 0 3 * * * → 03:00 UTC daily → 10:00 giờ Việt Nam (UTC+7).
+--
+-- `cron.schedule(job_name, ...)` upserts on job_name (verified on pg_cron
+-- 1.6.4), so re-running this script replaces the job in place and keeps its
+-- jobid. No prior cron.unschedule() is needed — and it would be actively
+-- harmful to call unconditionally, since unscheduling an unknown name raises
+-- "could not find valid entry for job".
+--
+-- Deploy note (Supabase free tier): a paused project runs no background
+-- workers, so this job is suspended along with the database. The schedule
+-- definition survives, and the next wake-up resumes the normal cadence without
+-- reconfiguration. The Teacher Web Trash view performs a lazy purge on read
+-- (see listTrashedExams), which covers the gap between wake-up and the next
+-- 03:00 run.
+-- ============================================================================
+create extension if not exists pg_cron;
+
+select cron.schedule(
+    'purge-expired-exams-daily',
+    '0 3 * * *',
+    'select public.purge_expired_exams()'
+);
+
 commit;
 
 
