@@ -74,6 +74,13 @@ export interface ExamRow {
   ends_at: string | null;
   /** Trash marker (Phase 5.5). ISO timestamp, or null when the exam is live. */
   deleted_at: string | null;
+  /**
+   * Practice opt-in (Phase 5.8). When true, a rostered student may pull this
+   * exam's questions WITH answer keys through `get_practice_exam_payload`
+   * (self-practice by exam code). Defaults false so an official sitting leaks
+   * nothing.
+   */
+  allow_practice: boolean;
   created_at: string;
 }
 

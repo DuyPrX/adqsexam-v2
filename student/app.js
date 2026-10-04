@@ -41,6 +41,9 @@ const RPC_MESSAGES = {
   SESSION_ACTIVE_ELSEWHERE: 'Tài khoản của bạn đang được đăng nhập trên một thiết bị khác.',
   INVALID_SESSION: 'Phiên làm bài không còn hợp lệ.',
   SESSION_EXPIRED: 'Phiên làm bài đã hết hạn do không hoạt động.',
+  // Phase 5.8 — practice-by-code refusals.
+  PRACTICE_NOT_ALLOWED: 'Giáo viên chưa mở đề này cho chế độ luyện tập.',
+  PRACTICE_EMPTY: 'Đề này chưa có câu hỏi nào để luyện tập.',
 };
 
 /* =====================================================================
@@ -99,6 +102,25 @@ const state = {
   // practice mode: questions carry their own correct_answer + explanation
   practiceQuestions: [],
   practiceStartedAt: null,
+  /**
+   * Phase 5.8 — the chosen practice source: 'code' (a teacher-enabled exam) or
+   * 'file' (a personal .docx). Only affects the landing form.
+   */
+  practiceSource: 'code',
+  /**
+   * Phase 5.8 — true for the whole self-practice session. `state.mode` flips to
+   * 'result' before the result screen renders, so the certificate gate needs a
+   * flag that survives that transition (rule 4: practice NEVER certifies).
+   */
+  isPractice: false,
+  /**
+   * Phase 5.8 — official-exam display shuffle.
+   * `displayOrder[displayIndex]` is the question's ORIGINAL 0-based position.
+   * The server grades `questionIndex` against `position ASC`, so answers are
+   * re-mapped through this array before `submit_exam_result`. Null in practice
+   * mode, where the original order is preserved verbatim.
+   */
+  displayOrder: null,
 };
 
 /* =====================================================================
@@ -336,6 +358,41 @@ function deviceInfo() {
    Exam loading
    ===================================================================== */
 
+/**
+ * Phase 5.8 — Fisher-Yates (Durstenfeld) permutation of 0..n-1.
+ *
+ * Returns `order` where `order[displayIndex]` is the ORIGINAL position of the
+ * question shown at that slot. Used for the official exam only: each candidate
+ * sees their own question order, but the server still grades against
+ * `position ASC`, so answers are re-mapped through this array on submit.
+ */
+function shuffledOrder(n) {
+  const order = Array.from({ length: n }, (_, i) => i);
+  for (let i = n - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [order[i], order[j]] = [order[j], order[i]];
+  }
+  return order;
+}
+
+/**
+ * Applies the per-student display shuffle to the official exam.
+ *
+ * `state.questions` becomes the DISPLAY array (shuffled), while the untouched
+ * originals are kept in `state.displayOrder`. Options are NOT reordered — their
+ * indices are tied to the stored `correct_answer`.
+ */
+function applyDisplayShuffle() {
+  const total = state.questions.length;
+  if (total < 2) {
+    state.displayOrder = null;
+    return;
+  }
+  const order = shuffledOrder(total);
+  state.displayOrder = order;
+  state.questions = order.map((originalIndex) => state.questions[originalIndex]);
+}
+
 async function enterExam() {
   busy(true, 'Đang tải đề thi…');
   try {
@@ -363,6 +420,10 @@ async function enterExam() {
 
     state.exam = payload.exam || {};
     state.questions = Array.isArray(payload.questions) ? payload.questions : [];
+    // Phase 5.8: shuffle the QUESTION order per candidate. Must run before the
+    // answer slots are created so state.answers stays parallel to the display.
+    applyDisplayShuffle();
+    state.isPractice = false;
     state.durationSeconds = Math.max(1, Number(state.exam.duration_minutes) || 45) * 60;
     state.answers = state.questions.map(makeEmptyAnswer);
     state.currentIndex = 0;
@@ -409,6 +470,8 @@ function resetToLogin(message) {
   hide($('resultScreen'));
   show($('loginScreen'));
   state.mode = 'login';
+  state.isPractice = false;
+  state.displayOrder = null;
   if (message) loginError(message);
 }
 
@@ -954,15 +1017,18 @@ function buildAnswersPayload() {
   state.questions.forEach((question, index) => {
     const type = normalizeType(question.type);
     const answer = state.answers[index];
+    // The display slot maps back to the question's ORIGINAL 0-based position;
+    // the server grades against `position ASC` (see state.displayOrder).
+    const questionIndex = state.displayOrder ? state.displayOrder[index] : index;
 
     if (type === 'MCQ') {
-      if (answer.draft !== null) payload.push({ questionIndex: index, selectedIndex: answer.draft });
+      if (answer.draft !== null) payload.push({ questionIndex, selectedIndex: answer.draft });
     } else if (type === 'TRUE_FALSE') {
       if (answer.draft.some((value) => value !== '')) {
-        payload.push({ questionIndex: index, selectedAnswers: answer.draft.slice() });
+        payload.push({ questionIndex, selectedAnswers: answer.draft.slice() });
       }
     } else if (String(answer.draft || '').trim() !== '') {
-      payload.push({ questionIndex: index, selectedAnswerText: answer.draft });
+      payload.push({ questionIndex, selectedAnswerText: answer.draft });
     }
   });
   return payload;
@@ -1173,6 +1239,26 @@ function renderResult(outcome) {
     return;
   }
 
+  checkAndShowCertificateOption(outcome);
+}
+
+/**
+ * Phase 5.8 rule 4 — practice NEVER issues a certificate.
+ *
+ * The check is deliberately belt-and-braces: `state.isPractice` survives the
+ * mode flip to 'result' (state.mode alone would already be 'result' by the time
+ * the banner is considered), and `state.mode === 'practice'` covers any caller
+ * that invokes this while a practice session is still live. Nothing was written
+ * to Supabase in practice mode either, so `resultId` is always null there — the
+ * certificate could not be minted even if this gate were bypassed.
+ */
+function checkAndShowCertificateOption(outcome) {
+  if (state.isPractice || state.mode === 'practice') return;
+  if (outcome.practice === true) return;
+
+  const total = Math.max(1, outcome.total || 1);
+  const percent = Math.round((outcome.score / total) * 100);
+
   // Passing result (>= 80%) unlocks the certificate. The server enforces the
   // same threshold in get_certificate_verification, so this is presentation
   // only — a forged banner cannot mint a verifiable certificate.
@@ -1313,19 +1399,115 @@ function selectModeTab(mode) {
   }
 }
 
+/**
+ * Phase 5.8 — switches the practice form between "by exam code" and "by .docx".
+ * Both share the identity fields; only the question SOURCE differs.
+ */
+function selectPracticeSource(source) {
+  const byCode = source === 'code';
+  state.practiceSource = byCode ? 'code' : 'file';
+  $('practiceSourceCodeBtn').classList.toggle('is-active', byCode);
+  $('practiceSourceFileBtn').classList.toggle('is-active', !byCode);
+  $('practiceSourceCodeBtn').setAttribute('aria-selected', String(byCode));
+  $('practiceSourceFileBtn').setAttribute('aria-selected', String(!byCode));
+
+  if (byCode) { show($('practiceCodeFields')); hide($('practiceFileFields')); }
+  else { hide($('practiceCodeFields')); show($('practiceFileFields')); }
+  practiceError('');
+}
+
+/**
+ * Phase 5.8 — builds the practice question set from a teacher-enabled exam.
+ *
+ * `get_practice_exam_payload` is the only RPC that returns answer keys for a
+ * stored exam, and it does so ONLY when the teacher set `allow_practice` and
+ * the caller is on the exam's roster.
+ */
+async function loadPracticeFromExamCode(examCode) {
+  const result = await callRpc('get_practice_exam_payload', {
+    p_exam_code: examCode,
+    p_student_code: state.studentCode,
+    p_class_name: state.className,
+  });
+
+  if (!result.ok) {
+    return { ok: false, message: 'Không kết nối được máy chủ. Vui lòng kiểm tra mạng và thử lại.' };
+  }
+
+  const payload = result.data || {};
+  if (payload.success !== true) {
+    return { ok: false, message: rpcMessage(payload.message, 'Không mở được đề luyện tập này.') };
+  }
+
+  const raw = Array.isArray(payload.questions) ? payload.questions.slice() : [];
+  if (raw.length === 0) return { ok: false, message: rpcMessage('PRACTICE_EMPTY') };
+
+  // Contract: questions come in original `position ASC` order. Sort defensively
+  // so a malformed `index` can never reorder the paper (practice must NOT shuffle).
+  raw.sort((a, b) => (Number(a.index) || 0) - (Number(b.index) || 0));
+
+  return {
+    ok: true,
+    title: payload.exam?.title || examCode,
+    questions: normalizePracticeQuestions(raw),
+  };
+}
+
 async function handlePracticeSubmit(event) {
   event.preventDefault();
   practiceError('');
 
   const studentCode = $('practiceStudentCode').value.trim();
   const className = $('practiceClassName').value.trim();
-  const fileInput = $('practiceFile');
-  const file = fileInput.files && fileInput.files[0];
 
   if (!studentCode || !className) {
     practiceError('Vui lòng nhập Mã học sinh và Lớp.');
     return;
   }
+  state.studentCode = studentCode;
+  state.className = className;
+
+  $('practiceStartBtn').disabled = true;
+  busy(true, 'Đang kiểm tra thông tin…');
+
+  try {
+    if (state.practiceSource === 'code') {
+      await startPracticeByCode();
+    } else {
+      await startPracticeByFile();
+    }
+  } finally {
+    busy(false);
+    $('practiceStartBtn').disabled = false;
+  }
+}
+
+/** Practice source A — a teacher-enabled exam, fetched by code. */
+async function startPracticeByCode() {
+  const examCode = $('practice-exam-code').value.trim();
+  if (!examCode) {
+    practiceError('Vui lòng nhập mã đề luyện tập.');
+    return;
+  }
+
+  busy(true, 'Đang mở đề luyện tập…');
+  const loaded = await loadPracticeFromExamCode(examCode);
+  if (!loaded.ok) {
+    practiceError(loaded.message);
+    return;
+  }
+
+  state.fullName = '';
+  state.examCode = examCode;
+  state.practiceQuestions = loaded.questions;
+  enterPractice(loaded.title);
+}
+
+/** Practice source B — a personal .docx parsed on the fly (Phase 5.2). */
+async function startPracticeByFile() {
+  const fileInput = $('practiceFile');
+  const file = fileInput.files && fileInput.files[0];
+
   if (!file) {
     practiceError('Vui lòng chọn file đề ôn tập (.docx).');
     return;
@@ -1335,48 +1517,38 @@ async function handlePracticeSubmit(event) {
     return;
   }
 
-  $('practiceStartBtn').disabled = true;
-  busy(true, 'Đang kiểm tra thông tin…');
-
-  try {
-    // --- 1. Authorization -------------------------------------------------
-    const auth = await callRpc('verify_student_practice', {
-      p_student_code: studentCode,
-      p_class_name: className,
-    });
-    if (!auth.ok) {
-      practiceError('Không kết nối được máy chủ. Vui lòng kiểm tra mạng và thử lại.');
-      return;
-    }
-    if (auth.data?.authorized !== true) {
-      practiceError(auth.data?.message
-        || 'Thông tin học sinh không có trong danh sách được phép ôn luyện.');
-      return;
-    }
-
-    // --- 2. Extract (rule engine only, no secret) -------------------------
-    busy(true, 'Đang đọc đề ôn tập…');
-    const payload = await extractPracticeDocx(file);
-    if (!payload.ok) {
-      practiceError(payload.message);
-      return;
-    }
-    if (payload.questions.length === 0) {
-      practiceError('Không tìm thấy câu hỏi nào trong file. Vui lòng kiểm tra lại đề.');
-      return;
-    }
-
-    // --- 3. Enter practice -------------------------------------------------
-    state.studentCode = studentCode;
-    state.className = className;
-    state.fullName = auth.data?.student_name || '';
-    state.practiceQuestions = payload.questions;
-
-    enterPractice(file.name);
-  } finally {
-    busy(false);
-    $('practiceStartBtn').disabled = false;
+  // --- 1. Authorization ---------------------------------------------------
+  const auth = await callRpc('verify_student_practice', {
+    p_student_code: state.studentCode,
+    p_class_name: state.className,
+  });
+  if (!auth.ok) {
+    practiceError('Không kết nối được máy chủ. Vui lòng kiểm tra mạng và thử lại.');
+    return;
   }
+  if (auth.data?.authorized !== true) {
+    practiceError(auth.data?.message
+      || 'Thông tin học sinh không có trong danh sách được phép ôn luyện.');
+    return;
+  }
+
+  // --- 2. Extract (rule engine only, no secret) ---------------------------
+  busy(true, 'Đang đọc đề ôn tập…');
+  const payload = await extractPracticeDocx(file);
+  if (!payload.ok) {
+    practiceError(payload.message);
+    return;
+  }
+  if (payload.questions.length === 0) {
+    practiceError('Không tìm thấy câu hỏi nào trong file. Vui lòng kiểm tra lại đề.');
+    return;
+  }
+
+  // --- 3. Enter practice --------------------------------------------------
+  state.fullName = auth.data?.student_name || '';
+  state.examCode = '';
+  state.practiceQuestions = payload.questions;
+  enterPractice(file.name.replace(/\.docx$/i, ''));
 }
 
 /** POSTs the .docx to the public practice endpoint (forced mode=rule). */
@@ -1410,8 +1582,12 @@ async function extractPracticeDocx(file) {
   return { ok: true, questions: normalizePracticeQuestions(json.data) };
 }
 
-function enterPractice(filename) {
+function enterPractice(title) {
   state.mode = 'practice';
+  state.isPractice = true;
+  // Phase 5.8 rule 1: practice STRICTLY preserves the original question order,
+  // so no display shuffle is applied and answers map 1:1 to the source order.
+  state.displayOrder = null;
   state.questions = state.practiceQuestions.slice();
   state.answers = state.questions.map(makeEmptyAnswer);
   state.currentIndex = 0;
@@ -1419,8 +1595,8 @@ function enterPractice(filename) {
   state.blurCount = 0;
   state.fullscreenExitCount = 0;
   state.practiceStartedAt = Date.now();
-  // No exam record exists; the title is derived from the uploaded file.
-  state.exam = { title: filename.replace(/\.docx$/i, '') };
+  // Practice has no server exam record; the title is derived from the source.
+  state.exam = { title };
 
   renderQuizShell();
   renderQuestion();
@@ -1677,6 +1853,8 @@ async function boot() {
   $('practiceForm').addEventListener('submit', handlePracticeSubmit);
   $('tabOfficial').addEventListener('click', () => selectModeTab('official'));
   $('tabPractice').addEventListener('click', () => selectModeTab('practice'));
+  $('practiceSourceCodeBtn').addEventListener('click', () => selectPracticeSource('code'));
+  $('practiceSourceFileBtn').addEventListener('click', () => selectPracticeSource('file'));
   $('navToggleBtn').addEventListener('click', openNavPanel);
   $('navCloseBtn').addEventListener('click', closeNavPanel);
   $('navBackdrop').addEventListener('click', closeNavPanel);

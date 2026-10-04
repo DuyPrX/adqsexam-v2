@@ -86,6 +86,7 @@ export function ExamPreviewEditor({
     initialQuestions.length,
   );
   const [shuffleDistractors, setShuffleDistractors] = useState(false);
+  const [allowPractice, setAllowPractice] = useState(false);
   const [savedVariants, setSavedVariants] = useState<SaveExamVariantsResult | null>(null);
 
   const stats = useMemo(() => {
@@ -129,6 +130,7 @@ export function ExamPreviewEditor({
         });
         const result = await saveExamVariants(supabase, {
           durationMinutes,
+          allowPractice,
           variants: variants.map((variant) => ({
             code: variant.code,
             title,
@@ -140,6 +142,7 @@ export function ExamPreviewEditor({
         const { exam, savedQuestions } = await saveExam(supabase, {
           title,
           durationMinutes,
+          allowPractice,
           questions,
         });
         setSavedCode(`${exam.code} (${savedQuestions} câu hỏi)`);
@@ -403,6 +406,19 @@ export function ExamPreviewEditor({
               className="accent-slate-900"
             />
             Đảo thứ tự phương án A/B/C/D (tự động đồng bộ đáp án đúng)
+          </label>
+
+          {/* Phase 5.8: opt-in only. An exam created for an official sitting must
+              not hand its answer keys to the student runtime unless the teacher
+              explicitly allows it here. */}
+          <label className="flex items-center gap-2 text-sm text-slate-700">
+            <input
+              type="checkbox"
+              checked={allowPractice}
+              onChange={(event) => setAllowPractice(event.target.checked)}
+              className="accent-slate-900"
+            />
+            Cho phép dùng để luyện tập (học sinh xem được đáp án &amp; giải thích)
           </label>
 
           <p className="text-[11px] text-slate-500">

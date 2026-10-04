@@ -193,6 +193,51 @@ const SOFT_DEL_STUDENT = {
   fullName: 'Phạm Thị Rác',
   className: '12SDL',
 };
+// Phase 5.8 — practice-enabled exam + three isolated candidates: one for the
+// practice-by-code flow, one for the shuffled official submission (with remap),
+// and one control that skips the remap to prove the mapping is load-bearing.
+const PRACTICE_EXAM = {
+  code: 'PRC' + String(Math.floor(100 + Math.random() * 900)),
+  title: 'E2E Practice Enabled',
+  duration: 30,
+};
+const PRACTICE_STUDENT = { code: 'E2EPRC01', fullName: 'Vũ Thị Luyện', className: '12PRC' };
+const SHUFFLE_STUDENT = { code: 'E2EPRC02', fullName: 'Đỗ Văn Trộn', className: '12PRC' };
+const SHUFFLE_CONTROL_STUDENT = { code: 'E2EPRC03', fullName: 'Hoàng Văn Lỗi', className: '12PRC' };
+// Questions for PRACTICE_EXAM, in the `position` order the RPC must preserve.
+const PRACTICE_QUESTIONS = [
+  {
+    question_text: 'Thủ đô của nước Pháp là gì?',
+    question_type: 'MULTIPLE_CHOICE',
+    options: ['Paris', 'Lyon', 'Nice', 'Marseille'],
+    correct_answer: 1,
+    explanation: 'Paris là thủ đô của Pháp.',
+  },
+  {
+    question_text: 'Xét tính đúng sai:',
+    question_type: 'TRUE_FALSE',
+    options: ['a) 1 + 1 = 2', 'b) 2 > 3', 'c) Trái Đất quay', 'd) 5 = 5'],
+    correct_answer: ['Đ', 'S', 'Đ', 'Đ'],
+    explanation: null,
+  },
+  {
+    question_text: 'Tính 2 + 3 = ?',
+    question_type: 'SHORT_ANSWER',
+    options: [],
+    correct_answer: '5',
+    explanation: 'Phép cộng cơ bản.',
+  },
+];
+// Fully-correct answers keyed by the ORIGINAL 0-based position.
+const PRACTICE_CORRECT_ANSWERS = [
+  { selectedIndex: 1 },
+  { selectedAnswers: ['Đ', 'S', 'Đ', 'Đ'] },
+  { selectedAnswerText: '5' },
+];
+const PRACTICE_FULL_SCORE = 3; // 1.0 + 1.0 + 1.0
+// A deliberately NON-identity permutation: display slot -> original position.
+// If the client failed to re-map, every answer would land on the wrong question.
+const SHUFFLE_ORDER = [2, 0, 1];
 
 /* ---------------------------------------------------------------- harness */
 
@@ -1703,6 +1748,260 @@ async function main() {
     globalThis.fetch = keepAliveFetch;
   }
 
+  /* --- 23. Practice-enabled exams & practice-by-code (Phase 5.8) -------- */
+  step(23, 'allow_practice gates get_practice_exam_payload; keys + original order');
+
+  // Clean up any previous run of this exam code (cascades to its questions).
+  await teacher.from('exams').delete().eq('code', PRACTICE_EXAM.code);
+
+  // Created with the DEFAULT allow_practice = false, exactly as the teacher UI
+  // does before the toggle is touched.
+  const practiceExamInsert = await teacher
+    .from('exams')
+    .insert({
+      user_id: teacherId,
+      code: PRACTICE_EXAM.code,
+      title: PRACTICE_EXAM.title,
+      duration_minutes: PRACTICE_EXAM.duration,
+    })
+    .select('id, allow_practice')
+    .single();
+  check('practice exam created', !practiceExamInsert.error && !!practiceExamInsert.data,
+    practiceExamInsert.error?.message);
+  check('allow_practice defaults to false', practiceExamInsert.data?.allow_practice === false,
+    String(practiceExamInsert.data?.allow_practice));
+  const practiceExamId = practiceExamInsert.data?.id;
+
+  const practiceQuestionRows = PRACTICE_QUESTIONS.map((question, index) => ({
+    user_id: teacherId,
+    exam_id: practiceExamId,
+    ...question,
+    // Written 1-based, the Phase 2 contract.
+    position: index + 1,
+  }));
+  const practiceQuestionsInsert = await teacher.from('question_bank').insert(practiceQuestionRows);
+  check('practice questions seeded', !practiceQuestionsInsert.error,
+    practiceQuestionsInsert.error?.message);
+
+  const practiceRoster = await teacher.from('students').insert([
+    { student_code: PRACTICE_STUDENT.code, full_name: PRACTICE_STUDENT.fullName, class_name: PRACTICE_STUDENT.className, exam_code: PRACTICE_EXAM.code },
+    { student_code: SHUFFLE_STUDENT.code, full_name: SHUFFLE_STUDENT.fullName, class_name: SHUFFLE_STUDENT.className, exam_code: PRACTICE_EXAM.code },
+    { student_code: SHUFFLE_CONTROL_STUDENT.code, full_name: SHUFFLE_CONTROL_STUDENT.fullName, class_name: SHUFFLE_CONTROL_STUDENT.className, exam_code: PRACTICE_EXAM.code },
+  ]);
+  check('practice roster seeded', !practiceRoster.error, practiceRoster.error?.message);
+
+  // The student runtime is anon and holds no table privileges.
+  const practiceClient = createClient(SB_URL, SB_PUBLISHABLE, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+
+  /* --- 23a. allow_practice = false must refuse the key ------------------ */
+  const denied = await practiceClient.rpc('get_practice_exam_payload', {
+    p_exam_code: PRACTICE_EXAM.code,
+    p_student_code: PRACTICE_STUDENT.code,
+    p_class_name: PRACTICE_STUDENT.className,
+  });
+  check('closed practice returns success = false', denied.data?.success === false,
+    JSON.stringify(denied.data ?? denied.error));
+  check('closed practice reports PRACTICE_NOT_ALLOWED',
+    denied.data?.message === 'PRACTICE_NOT_ALLOWED', String(denied.data?.message));
+  check('closed practice leaks no questions', denied.data?.questions === undefined,
+    JSON.stringify(denied.data));
+
+  // A stranger cannot harvest keys even once practice is enabled.
+  const strangerDenied = await practiceClient.rpc('get_practice_exam_payload', {
+    p_exam_code: PRACTICE_EXAM.code,
+    p_student_code: 'NOT-ON-ROSTER',
+    p_class_name: PRACTICE_STUDENT.className,
+  });
+  check('an off-roster caller is rejected while practice is closed',
+    strangerDenied.data?.success === false, JSON.stringify(strangerDenied.data));
+
+  /* --- 23b. allow_practice = true unlocks order + keys ------------------ */
+  const enablePractice = await teacher
+    .from('exams')
+    .update({ allow_practice: true })
+    .eq('code', PRACTICE_EXAM.code)
+    .select('allow_practice')
+    .maybeSingle();
+  check('teacher enabled allow_practice', enablePractice.data?.allow_practice === true,
+    enablePractice.error?.message ?? String(enablePractice.data?.allow_practice));
+
+  const allowed = await practiceClient.rpc('get_practice_exam_payload', {
+    p_exam_code: PRACTICE_EXAM.code,
+    p_student_code: PRACTICE_STUDENT.code,
+    p_class_name: PRACTICE_STUDENT.className,
+  });
+  check('enabled practice succeeds', allowed.data?.success === true,
+    JSON.stringify(allowed.data ?? allowed.error));
+  check('enabled practice returns all 3 questions',
+    allowed.data?.questions?.length === 3, String(allowed.data?.questions?.length));
+
+  // Original `position ASC` order — practice must NEVER shuffle.
+  check('questions are returned in original position order',
+    JSON.stringify(allowed.data?.questions?.map((q) => q.index)) === '[0,1,2]',
+    JSON.stringify(allowed.data?.questions?.map((q) => q.index)));
+  check('question texts match the stored order',
+    allowed.data?.questions?.[0]?.question_text === PRACTICE_QUESTIONS[0].question_text
+      && allowed.data?.questions?.[2]?.question_text === PRACTICE_QUESTIONS[2].question_text,
+    JSON.stringify(allowed.data?.questions?.map((q) => q.question_text)));
+
+  // The whole point of the RPC: keys + explanations reach the student runtime.
+  check('MCQ answer key is included',
+    allowed.data?.questions?.[0]?.correct_answer === 1,
+    JSON.stringify(allowed.data?.questions?.[0]?.correct_answer));
+  check('TRUE_FALSE answer key is included',
+    JSON.stringify(allowed.data?.questions?.[1]?.correct_answer) === JSON.stringify(['Đ', 'S', 'Đ', 'Đ']),
+    JSON.stringify(allowed.data?.questions?.[1]?.correct_answer));
+  check('SHORT_ANSWER key is included',
+    allowed.data?.questions?.[2]?.correct_answer === '5',
+    JSON.stringify(allowed.data?.questions?.[2]?.correct_answer));
+  check('explanations are included',
+    allowed.data?.questions?.[0]?.explanation === 'Paris là thủ đô của Pháp.',
+    JSON.stringify(allowed.data?.questions?.[0]?.explanation));
+
+  // The roster check stays load-bearing even with practice enabled.
+  const strangerAllowed = await practiceClient.rpc('get_practice_exam_payload', {
+    p_exam_code: PRACTICE_EXAM.code,
+    p_student_code: 'NOT-ON-ROSTER',
+    p_class_name: PRACTICE_STUDENT.className,
+  });
+  check('an off-roster caller is still rejected when practice is enabled',
+    strangerAllowed.data?.success === false
+      && strangerAllowed.data?.message === 'STUDENT_NOT_WHITELISTED',
+    JSON.stringify(strangerAllowed.data));
+
+  const missingExam = await practiceClient.rpc('get_practice_exam_payload', {
+    p_exam_code: 'NOEX01',
+    p_student_code: PRACTICE_STUDENT.code,
+    p_class_name: PRACTICE_STUDENT.className,
+  });
+  check('an unknown exam reports EXAM_NOT_FOUND',
+    missingExam.data?.success === false && missingExam.data?.message === 'EXAM_NOT_FOUND',
+    JSON.stringify(missingExam.data));
+
+  /* --- 23c. a trashed practice exam is invisible to students ------------ */
+  await teacher.from('exams').update({ deleted_at: new Date().toISOString() })
+    .eq('code', PRACTICE_EXAM.code);
+  const trashedProbe = await practiceClient.rpc('get_practice_exam_payload', {
+    p_exam_code: PRACTICE_EXAM.code,
+    p_student_code: PRACTICE_STUDENT.code,
+    p_class_name: PRACTICE_STUDENT.className,
+  });
+  check('a trashed exam is reported as EXAM_NOT_FOUND',
+    trashedProbe.data?.success === false && trashedProbe.data?.message === 'EXAM_NOT_FOUND',
+    JSON.stringify(trashedProbe.data));
+  await teacher.from('exams').update({ deleted_at: null }).eq('code', PRACTICE_EXAM.code);
+
+  /* --- 23d. practice is graded locally: nothing is persisted ------------ */
+  // The student SPA grades in RAM for practice, so no result row, no session
+  // row and — critically — no certificate can ever be produced.
+  const practiceResults = await teacher
+    .from('exam_results')
+    .select('id')
+    .eq('exam_code', PRACTICE_EXAM.code);
+  check('a practice run writes no exam_results row',
+    !practiceResults.error && (practiceResults.data ?? []).length === 0,
+    JSON.stringify(practiceResults.data));
+
+  const practiceSessions = await teacher
+    .from('active_sessions')
+    .select('student_code')
+    .eq('exam_code', PRACTICE_EXAM.code);
+  check('a practice run writes no active_sessions row',
+    !practiceSessions.error && (practiceSessions.data ?? []).length === 0,
+    JSON.stringify(practiceSessions.data));
+
+  // Even a PERFECT practice score cannot yield a verifiable certificate: the
+  // server mints one only from a persisted passing result, and practice has no
+  // result at all. This mirrors the client's `checkAndShowCertificateOption`
+  // guard, which returns early in practice mode (state.isPractice).
+  const practicePayloadJson = JSON.stringify(allowed.data ?? {});
+  check('the practice payload carries no result_id to certify',
+    !practicePayloadJson.includes('result_id') && !practicePayloadJson.includes('resultId'));
+
+  /* --- 23e. shuffled official submission still grades correctly --------- */
+  // Mirrors the SPA: questions are shown in a per-student shuffled order, but
+  // answers are re-mapped through displayOrder back to the ORIGINAL 0-based
+  // position before submit_exam_result (which grades `position ASC`).
+  const shuffledStudent = SHUFFLE_STUDENT; // the dedicated shuffle candidate
+
+  const acquireShuffle = await practiceClient.rpc('verify_and_acquire_session', {
+    p_exam_code: PRACTICE_EXAM.code,
+    p_student_code: shuffledStudent.code,
+    p_full_name: shuffledStudent.fullName,
+    p_class_name: shuffledStudent.className,
+    p_device_info: 'e2e-shuffle/1.0',
+    p_existing_token: null,
+  });
+  check('shuffle candidate acquired a session', acquireShuffle.data?.success === true,
+    JSON.stringify(acquireShuffle.data ?? acquireShuffle.error));
+  const shuffleToken = acquireShuffle.data?.session_token;
+  const shufflePayload = await practiceClient.rpc('get_student_exam_payload', {
+    p_exam_code: PRACTICE_EXAM.code,
+    p_session_token: shuffleToken,
+  });
+  check('official payload omits the keys (F1/F3), unlike practice',
+    shufflePayload.data?.success === true
+      && !JSON.stringify(shufflePayload.data).includes('correct_answer'),
+    JSON.stringify(shufflePayload.data).slice(0, 160));
+  check('official payload delivered 3 questions',
+    shufflePayload.data?.questions?.length === 3, String(shufflePayload.data?.questions?.length));
+
+  // Build the answer array exactly as the SPA would for SHUFFLE_ORDER:
+  // display slot i shows the question at original position SHUFFLE_ORDER[i].
+  const shuffledAnswers = SHUFFLE_ORDER.map((originalIndex) => ({
+    questionIndex: originalIndex,
+    ...PRACTICE_CORRECT_ANSWERS[originalIndex],
+  }));
+  check('the shuffled answer array is not in display order',
+    shuffledAnswers.map((a) => a.questionIndex).join(',') === '2,0,1',
+    shuffledAnswers.map((a) => a.questionIndex).join(','));
+
+  const shuffledSubmit = await practiceClient.rpc('submit_exam_result', {
+    p_exam_code: PRACTICE_EXAM.code,
+    p_student_code: shuffledStudent.code,
+    p_session_token: shuffleToken,
+    p_answers: shuffledAnswers,
+    p_metrics: { blurCount: 0, fullscreenExitCount: 0, elapsedSeconds: 120 },
+  });
+  check('shuffled submission accepted', shuffledSubmit.data?.success === true,
+    JSON.stringify(shuffledSubmit.data ?? shuffledSubmit.error));
+  check('the re-mapped answers earn the full score',
+    Number(shuffledSubmit.data?.score) === PRACTICE_FULL_SCORE,
+    String(shuffledSubmit.data?.score));
+
+  /* --- 23f. control: WITHOUT the remap the score collapses -------------- */
+  // Emulates the buggy client: the candidate answers correctly on screen, but
+  // the payload uses the DISPLAY slot as `questionIndex` instead of the original
+  // position. Each on-screen choice is the right one for original question
+  // SHUFFLE_ORDER[displayIndex], so submitting it at `questionIndex = displayIndex`
+  // lands every answer on the wrong question. This proves the remap in 23e is
+  // what makes it pass, rather than the questions happening to align.
+  const controlAcquire = await practiceClient.rpc('verify_and_acquire_session', {
+    p_exam_code: PRACTICE_EXAM.code,
+    p_student_code: SHUFFLE_CONTROL_STUDENT.code,
+    p_full_name: SHUFFLE_CONTROL_STUDENT.fullName,
+    p_class_name: SHUFFLE_CONTROL_STUDENT.className,
+    p_device_info: 'e2e-shuffle-control/1.0',
+    p_existing_token: null,
+  });
+  const controlToken = controlAcquire.data?.session_token;
+  const controlAnswers = SHUFFLE_ORDER.map((originalIndex, displayIndex) => ({
+    questionIndex: displayIndex, // BUG: display slot used as the original position
+    ...PRACTICE_CORRECT_ANSWERS[originalIndex],
+  }));
+  const controlSubmit = await practiceClient.rpc('submit_exam_result', {
+    p_exam_code: PRACTICE_EXAM.code,
+    p_student_code: SHUFFLE_CONTROL_STUDENT.code,
+    p_session_token: controlToken,
+    p_answers: controlAnswers,
+    p_metrics: { blurCount: 0, fullscreenExitCount: 0, elapsedSeconds: 120 },
+  });
+  check('an un-remapped (display-order) submission does NOT score full marks',
+    controlSubmit.data?.success === true && Number(controlSubmit.data?.score) < PRACTICE_FULL_SCORE,
+    String(controlSubmit.data?.score));
+
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);
   await teacher.from('exams').delete().eq('code', EXAM.code); // cascades
@@ -1710,6 +2009,7 @@ async function main() {
   await teacher.from('exams').delete().eq('code', EDIT_EXAM.code);
   await teacher.from('exams').delete().eq('code', HARD_DEL_EXAM.code);
   await teacher.from('exams').delete().eq('code', SOFT_DEL_EXAM.code);
+  await teacher.from('exams').delete().eq('code', PRACTICE_EXAM.code);
 
   console.log(`\n${'='.repeat(74)}`);
   console.log(`RESULT: ${passed} passed, ${failed} failed`);

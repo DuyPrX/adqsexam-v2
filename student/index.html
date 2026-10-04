@@ -92,11 +92,19 @@
         <div id="practicePanel" class="mode-panel hidden" role="tabpanel" aria-labelledby="tabPractice">
           <h1 class="login__title">Tự ôn luyện</h1>
           <p class="login__subtitle">
-            Dành cho học sinh đã có tên trong danh sách dự thi. Tải lên file
-            <strong>.docx</strong> đề ôn tập của bạn để làm bài và xem đáp án ngay.
+            Dành cho học sinh đã có tên trong danh sách dự thi. Làm lại đề giáo viên
+            đã mở luyện tập, hoặc tải lên file <strong>.docx</strong> đề ôn tập riêng của bạn.
           </p>
 
           <form id="practiceForm" class="login__form" novalidate>
+            <!-- Phase 5.8: choose the practice source. Reuses the top-level tab styling. -->
+            <div class="mode-tabs" role="tablist" aria-label="Nguồn đề luyện tập">
+              <button id="practiceSourceCodeBtn" type="button" class="mode-tab is-active"
+                      role="tab" aria-selected="true" aria-controls="practiceCodeFields">Luyện tập theo Mã đề</button>
+              <button id="practiceSourceFileBtn" type="button" class="mode-tab"
+                      role="tab" aria-selected="false" aria-controls="practiceFileFields">Tải file đề cá nhân (.docx)</button>
+            </div>
+
             <div class="field">
               <label for="practiceStudentCode">Mã học sinh</label>
               <input id="practiceStudentCode" name="practiceStudentCode" type="text"
@@ -107,11 +115,24 @@
               <input id="practiceClassName" name="practiceClassName" type="text"
                      autocomplete="off" maxlength="50" placeholder="VD: 12A1" required />
             </div>
-            <div class="field">
-              <label for="practiceFile">File đề ôn tập (.docx)</label>
-              <input id="practiceFile" name="practiceFile" type="file"
-                     accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                     required />
+
+            <!-- Source A: an exam the teacher explicitly opened for practice. -->
+            <div id="practiceCodeFields">
+              <div class="field">
+                <label for="practice-exam-code">Mã đề luyện tập</label>
+                <input id="practice-exam-code" name="practice-exam-code" type="text"
+                       inputmode="numeric" autocomplete="off" maxlength="20"
+                       placeholder="Nhập mã đề (VD: 839201)" />
+              </div>
+            </div>
+
+            <!-- Source B: a personal .docx, parsed on the fly (Phase 5.2). -->
+            <div id="practiceFileFields" class="hidden">
+              <div class="field">
+                <label for="practiceFile">File đề ôn tập (.docx)</label>
+                <input id="practiceFile" name="practiceFile" type="file"
+                       accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
+              </div>
             </div>
 
             <p id="practiceError" class="alert alert--error hidden" role="alert"></p>
@@ -121,7 +142,7 @@
             </button>
             <p class="login__note">
               Chế độ ôn luyện không bật toàn màn hình, không ghi nhận vi phạm và
-              không lưu kết quả lên hệ thống. Đáp án chỉ tồn tại trên thiết bị của bạn.
+              không lưu kết quả lên hệ thống. Câu hỏi và đáp án chỉ tồn tại trên thiết bị của bạn.
             </p>
           </form>
         </div>

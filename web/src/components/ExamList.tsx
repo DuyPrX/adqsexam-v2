@@ -134,7 +134,17 @@ export function ExamList({ exams, trashedExams, counts, teacherEmail }: ExamList
                 {exams.map((exam) => (
                   <tr key={exam.id} className="transition hover:bg-slate-50">
                     <td className="px-3 py-2.5 font-mono text-xs font-semibold">{exam.code}</td>
-                    <td className="px-3 py-2.5 font-medium text-slate-800">{exam.title}</td>
+                    <td className="px-3 py-2.5 font-medium text-slate-800">
+                      <span className="inline-flex items-center gap-1.5">
+                        {exam.title}
+                        {/* Phase 5.8: surfaces which exams a student may self-practice. */}
+                        {exam.allow_practice && (
+                          <span className="inline-flex shrink-0 items-center rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
+                            📚 Luyện tập
+                          </span>
+                        )}
+                      </span>
+                    </td>
                     <td className="px-3 py-2.5 text-slate-500">{exam.duration_minutes} phút</td>
                     <td className="px-3 py-2.5">
                       <span className="inline-flex items-center gap-1 text-slate-700">

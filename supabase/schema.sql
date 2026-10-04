@@ -51,6 +51,10 @@ create table if not exists public.exams (
     -- Soft-delete / Trash marker (Phase 5.5). NULL = live; otherwise the exam is
     -- in the Trash and is purgeable 7 days after this timestamp.
     deleted_at       timestamptz,
+    -- Practice opt-in (Phase 5.8). Default FALSE so an exam created for an
+    -- official sitting never hands its answer keys to the student runtime; the
+    -- teacher must explicitly enable practice.
+    allow_practice   boolean      not null default false,
     created_at       timestamptz  not null default now()
 );
 
@@ -59,6 +63,9 @@ create table if not exists public.exams (
 alter table public.exams add column if not exists starts_at  timestamptz;
 alter table public.exams add column if not exists ends_at    timestamptz;
 alter table public.exams add column if not exists deleted_at timestamptz;
+-- NOT NULL DEFAULT false is load-bearing: an exam that predates this column must
+-- stay locked down rather than silently becoming practiceable.
+alter table public.exams add column if not exists allow_practice boolean not null default false;
 
 comment on table public.exams is 'Teacher-owned exam metadata. Multi-tenant via user_id + RLS.';
 
@@ -1401,6 +1408,120 @@ end;
 $$;
 
 
+-- ----------------------------------------------------------------------------
+-- C.13  get_practice_exam_payload  (student — anon, Phase 5.8)
+--       The ONLY path that hands out answer keys for a STORED exam. Self-practice
+--       used to require a personal .docx because F1/F3 keep question_bank keys
+--       away from the student runtime; this is the narrow, teacher-controlled
+--       exception: it returns questions in original `position ASC` order WITH
+--       `correct_answer` + `explanation`, and refuses unless the teacher set
+--       `exams.allow_practice = true`.
+--
+--       Returning: { success: true, exam: {...}, questions: [...] }
+--              or: { success: false, message: <CODE> }
+--       Codes: PRACTICE_NOT_ALLOWED / STUDENT_NOT_WHITELISTED / PRACTICE_EMPTY
+--              (a trashed or missing exam reports EXAM_NOT_FOUND).
+--
+--       Authorization: the caller must be ON THIS EXAM'S ROSTER (`students`),
+--       matched case/whitespace-insensitively on student_code + class_name —
+--       so guessing a 6-digit code cannot harvest keys even when practice is on.
+--
+--       Deliberately NOT gated on is_active / the scheduling window (a teacher
+--       who closes an exam for the sitting may still want it practiceable), but
+--       trashed exams ARE refused (Phase 5.5: Trash is invisible to students).
+-- ----------------------------------------------------------------------------
+create or replace function public.get_practice_exam_payload(
+    p_exam_code    varchar,
+    p_student_code varchar,
+    p_class_name   varchar
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+    v_exam      public.exams%rowtype;
+    v_questions jsonb;
+    v_total     integer;
+begin
+    if p_student_code is null or trim(p_student_code) = ''
+       or p_class_name is null or trim(p_class_name) = '' then
+        return jsonb_build_object('success', false, 'message', 'STUDENT_NOT_WHITELISTED');
+    end if;
+
+    select * into v_exam from public.exams where code = p_exam_code;
+    if not found then
+        return jsonb_build_object('success', false, 'message', 'EXAM_NOT_FOUND');
+    end if;
+
+    -- Trashed exams stay invisible to students (mirrors verify_and_acquire_session).
+    if v_exam.deleted_at is not null then
+        return jsonb_build_object('success', false, 'message', 'EXAM_NOT_FOUND');
+    end if;
+
+    -- The teacher's explicit consent is the ONLY thing that unlocks the key.
+    if v_exam.allow_practice is not true then
+        return jsonb_build_object('success', false, 'message', 'PRACTICE_NOT_ALLOWED');
+    end if;
+
+    -- Caller must be on THIS exam's roster (case/whitespace-insensitive, matching
+    -- verify_and_acquire_session's identity comparison).
+    if not exists (
+        select 1
+          from public.students s
+         where s.exam_code = p_exam_code
+           and lower(trim(s.student_code)) = lower(trim(p_student_code))
+           and lower(trim(s.class_name))   = lower(trim(p_class_name))
+    ) then
+        return jsonb_build_object('success', false, 'message', 'STUDENT_NOT_WHITELISTED');
+    end if;
+
+    -- Original order. Position ASC is the contract: practice must NOT shuffle,
+    -- so that a student reviewing "Câu 7" sees the same numbering as the paper.
+    -- `correct_answer` and `explanation` are included on purpose.
+    with ordered as (
+        select q.*,
+               (row_number() over (order by q.position, q.created_at, q.id) - 1) as idx
+          from public.question_bank q
+         where q.exam_id = v_exam.id
+    )
+    select
+        coalesce(
+            jsonb_agg(
+                jsonb_build_object(
+                    'index',          o.idx,
+                    'question_text',  o.question_text,
+                    'question_type',  o.question_type,
+                    'options',        o.options,
+                    'correct_answer', o.correct_answer,
+                    'explanation',    o.explanation
+                )
+                order by o.idx
+            ),
+            '[]'::jsonb
+        ),
+        count(*)
+      into v_questions, v_total
+      from ordered o;
+
+    if coalesce(v_total, 0) = 0 then
+        return jsonb_build_object('success', false, 'message', 'PRACTICE_EMPTY');
+    end if;
+
+    return jsonb_build_object(
+        'success', true,
+        'exam', jsonb_build_object(
+            'code',             v_exam.code,
+            'title',            v_exam.title,
+            'duration_minutes', v_exam.duration_minutes,
+            'total_questions',  v_total
+        ),
+        'questions', v_questions
+    );
+end;
+$$;
+
+
 -- ============================================================================
 -- SECTION D — EXECUTE GRANTS
 -- ----------------------------------------------------------------------------
@@ -1419,6 +1540,7 @@ revoke all on function public.delete_exam(varchar)                              
 revoke all on function public.restore_exam(varchar)                                                        from public;
 revoke all on function public.purge_expired_exams()                                                        from public;
 revoke all on function public.recalculate_exam_scores(varchar)                                             from public;
+revoke all on function public.get_practice_exam_payload(varchar, varchar, varchar)                          from public;
 
 grant execute on function public.verify_and_acquire_session(varchar, varchar, varchar, varchar, text, uuid)   to anon, authenticated;
 grant execute on function public.record_student_heartbeat(varchar, varchar, uuid, integer, integer, integer, integer) to anon, authenticated;
@@ -1427,6 +1549,8 @@ grant execute on function public.submit_exam_result(varchar, varchar, uuid, json
 grant execute on function public.record_proctoring_snapshot(varchar, varchar, uuid, text)                     to anon, authenticated;
 grant execute on function public.get_certificate_verification(uuid)                                           to anon, authenticated;
 grant execute on function public.verify_student_practice(varchar, varchar)                                     to anon, authenticated;
+-- Phase 5.8: student-facing, but the body gates on the exam roster + allow_practice.
+grant execute on function public.get_practice_exam_payload(varchar, varchar, varchar)                          to anon, authenticated;
 -- Teacher-only: never exposed to anon (ownership is enforced inside the body).
 grant execute on function public.update_exam_questions_safe(varchar, jsonb)                                    to authenticated;
 grant execute on function public.delete_exam(varchar)                                                          to authenticated;

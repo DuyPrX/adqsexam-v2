@@ -61,6 +61,7 @@ export function ExamEditor({ exam, initialQuestions, submissionCount }: ExamEdit
   const [title, setTitle] = useState(exam.title);
   const [durationMinutes, setDurationMinutes] = useState(exam.duration_minutes);
   const [isActive, setIsActive] = useState(exam.is_active);
+  const [allowPractice, setAllowPractice] = useState(exam.allow_practice);
   const [startsAt, setStartsAt] = useState(toLocalDatetimeString(exam.starts_at));
   const [endsAt, setEndsAt] = useState(toLocalDatetimeString(exam.ends_at));
   const [questions, setQuestions] = useState<ExtractedQuestion[]>(() =>
@@ -112,6 +113,7 @@ export function ExamEditor({ exam, initialQuestions, submissionCount }: ExamEdit
         title,
         durationMinutes,
         isActive,
+        allowPractice,
         startsAt: toUtcIsoString(startsAt),
         endsAt: toUtcIsoString(endsAt),
       });
@@ -193,17 +195,35 @@ export function ExamEditor({ exam, initialQuestions, submissionCount }: ExamEdit
           gian này.
         </p>
 
-        <label className="flex items-center gap-2 border-t border-slate-100 pt-3 text-sm text-slate-700">
-          <input
-            type="checkbox"
-            checked={isActive}
-            onChange={(event) => setIsActive(event.target.checked)}
-            className="accent-slate-900"
-          />
-          <span className={cn('font-semibold', isActive ? 'text-emerald-700' : 'text-slate-500')}>
-            {isActive ? 'Đang mở nhận thí sinh' : 'Đang đóng'}
-          </span>
-        </label>
+        <div className="space-y-2 border-t border-slate-100 pt-3">
+          <label className="flex items-center gap-2 text-sm text-slate-700">
+            <input
+              type="checkbox"
+              checked={isActive}
+              onChange={(event) => setIsActive(event.target.checked)}
+              className="accent-slate-900"
+            />
+            <span className={cn('font-semibold', isActive ? 'text-emerald-700' : 'text-slate-500')}>
+              {isActive ? 'Đang mở nhận thí sinh' : 'Đang đóng'}
+            </span>
+          </label>
+
+          {/* Phase 5.8: opt-in gate for practice-by-code. Off by default so an
+              official sitting never exposes this exam's answer keys. */}
+          <label className="flex items-center gap-2 text-sm text-slate-700">
+            <input
+              type="checkbox"
+              checked={allowPractice}
+              onChange={(event) => setAllowPractice(event.target.checked)}
+              className="accent-slate-900"
+            />
+            <span className={cn('font-semibold', allowPractice ? 'text-emerald-700' : 'text-slate-500')}>
+              {allowPractice
+                ? 'Cho phép luyện tập (học sinh xem được đáp án)'
+                : 'Không cho phép luyện tập'}
+            </span>
+          </label>
+        </div>
       </div>
 
       {/* Submission guard notice */}

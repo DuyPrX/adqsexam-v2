@@ -20,7 +20,7 @@ const UNIQUE_VIOLATION = '23505';
  * it `undefined` at runtime while TypeScript still believes it is `string | null`.
  */
 export const EXAM_COLUMNS =
-  'id, user_id, code, title, duration_minutes, is_active, starts_at, ends_at, deleted_at, created_at';
+  'id, user_id, code, title, duration_minutes, is_active, starts_at, ends_at, deleted_at, allow_practice, created_at';
 
 export class PersistenceError extends Error {
   constructor(message: string) {
@@ -50,6 +50,7 @@ async function insertExamWithFreshCode(
   userId: string,
   title: string,
   durationMinutes: number,
+  allowPractice: boolean,
 ): Promise<ExamRow> {
   for (let attempt = 0; attempt < 10; attempt++) {
     const code = generateExamCode();
@@ -60,6 +61,7 @@ async function insertExamWithFreshCode(
         code,
         title,
         duration_minutes: durationMinutes,
+        allow_practice: allowPractice,
       })
       .select(EXAM_COLUMNS)
       .single<ExamRow>();
@@ -77,6 +79,8 @@ export interface SaveExamInput {
   title: string;
   durationMinutes: number;
   questions: ExtractedQuestion[];
+  /** Phase 5.8: let students self-practice this exam (defaults to false). */
+  allowPractice?: boolean;
 }
 
 export interface SaveExamResult {
@@ -96,13 +100,19 @@ export async function saveExam(
   supabase: SupabaseClient,
   input: SaveExamInput,
 ): Promise<SaveExamResult> {
-  const { title, durationMinutes, questions } = input;
+  const { title, durationMinutes, questions, allowPractice = false } = input;
 
   if (!title.trim()) throw new PersistenceError('Vui lòng nhập tên đề thi.');
   if (questions.length === 0) throw new PersistenceError('Đề thi chưa có câu hỏi nào.');
 
   const userId = await requireUserId(supabase);
-  const exam = await insertExamWithFreshCode(supabase, userId, title.trim(), durationMinutes);
+  const exam = await insertExamWithFreshCode(
+    supabase,
+    userId,
+    title.trim(),
+    durationMinutes,
+    allowPractice,
+  );
 
   const rows = questions.map((question, index) => ({
     user_id: userId,
@@ -136,6 +146,8 @@ export interface ExamVariantInput {
 export interface SaveExamVariantsInput {
   durationMinutes: number;
   variants: ExamVariantInput[];
+  /** Phase 5.8: applies to every generated variant (school-wide opt-in). */
+  allowPractice?: boolean;
 }
 
 export interface SaveExamVariantsResult {
@@ -156,7 +168,7 @@ export async function saveExamVariants(
   supabase: SupabaseClient,
   input: SaveExamVariantsInput,
 ): Promise<SaveExamVariantsResult> {
-  const { durationMinutes, variants } = input;
+  const { durationMinutes, variants, allowPractice = false } = input;
 
   if (variants.length === 0) throw new PersistenceError('Chưa có mã đề nào để lưu.');
   for (const variant of variants) {
@@ -173,6 +185,7 @@ export async function saveExamVariants(
     code: variant.code,
     title: variant.title.trim(),
     duration_minutes: durationMinutes,
+    allow_practice: allowPractice,
   }));
 
   const examsInsert = await supabase
@@ -327,6 +340,8 @@ export interface ExamMetadataPatch {
   /** ISO string, or null to clear the bound. */
   startsAt?: string | null;
   endsAt?: string | null;
+  /** Phase 5.8 practice opt-in. */
+  allowPractice?: boolean;
 }
 
 /** Updates exam metadata (Phase 5.4 edit route general-info form). */
@@ -349,6 +364,7 @@ export async function updateExamMetadata(
   if (patch.isActive !== undefined) row.is_active = patch.isActive;
   if (patch.startsAt !== undefined) row.starts_at = patch.startsAt;
   if (patch.endsAt !== undefined) row.ends_at = patch.endsAt;
+  if (patch.allowPractice !== undefined) row.allow_practice = patch.allowPractice;
 
   if (Object.keys(row).length === 0) return;
 
