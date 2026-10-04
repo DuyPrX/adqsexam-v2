@@ -15,6 +15,7 @@
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { orderPracticeQuestions, readShuffleToggle, shuffledOrder } from './practice-order.js';
 
 /* =====================================================================
    Constants
@@ -107,6 +108,11 @@ const state = {
    * 'file' (a personal .docx). Only affects the landing form.
    */
   practiceSource: 'code',
+  /**
+   * Phase 5.9 — whether the current practice run shuffles its questions. Read
+   * from #practice-shuffle-toggle when practice starts; false = source order.
+   */
+  practiceShuffle: false,
   /**
    * Phase 5.8 — true for the whole self-practice session. `state.mode` flips to
    * 'result' before the result screen renders, so the certificate gate needs a
@@ -359,24 +365,11 @@ function deviceInfo() {
    ===================================================================== */
 
 /**
- * Phase 5.8 — Fisher-Yates (Durstenfeld) permutation of 0..n-1.
- *
- * Returns `order` where `order[displayIndex]` is the ORIGINAL position of the
- * question shown at that slot. Used for the official exam only: each candidate
- * sees their own question order, but the server still grades against
- * `position ASC`, so answers are re-mapped through this array on submit.
- */
-function shuffledOrder(n) {
-  const order = Array.from({ length: n }, (_, i) => i);
-  for (let i = n - 1; i > 0; i -= 1) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [order[i], order[j]] = [order[j], order[i]];
-  }
-  return order;
-}
-
-/**
  * Applies the per-student display shuffle to the official exam.
+ *
+ * The Fisher-Yates permutation lives in `practice-order.js` (imported above) so
+ * this shuffle and the Phase 5.9 practice toggle share ONE implementation, and
+ * the e2e suite can exercise it without loading this DOM-bound module.
  *
  * `state.questions` becomes the DISPLAY array (shuffled), while the untouched
  * originals are kept in `state.displayOrder`. Options are NOT reordered — their
@@ -1354,7 +1347,7 @@ function restart() {
 
 /** Maps the Worker's question shape onto the renderer's shape. */
 function normalizePracticeQuestions(rawList) {
-  return (Array.isArray(rawList) ? rawList : []).map((raw) => {
+  return (Array.isArray(rawList) ? rawList : []).map((raw, index) => {
     const type = normalizeType(raw.question_type);
     const options = Array.isArray(raw.options) ? raw.options.slice() : [];
     const question = {
@@ -1362,6 +1355,10 @@ function normalizePracticeQuestions(rawList) {
       content: String(raw.question_text || ''),
       options,
       subQuestions: [],
+      // Phase 5.9: the source ordinal, so the practice form can offer the true
+      // original order. The by-code RPC already returns `position ASC`, so its
+      // payload is in order; a .docx extraction carries its own `position`.
+      position: Number(raw.position) || index + 1,
       // Practice keeps the key locally: grading is client-side by design.
       correctAnswer: raw.correct_answer === undefined ? null : raw.correct_answer,
       explanation: raw.explanation || null,
@@ -1585,10 +1582,16 @@ async function extractPracticeDocx(file) {
 function enterPractice(title) {
   state.mode = 'practice';
   state.isPractice = true;
-  // Phase 5.8 rule 1: practice STRICTLY preserves the original question order,
-  // so no display shuffle is applied and answers map 1:1 to the source order.
+  // Phase 5.9: the student chooses the display order per run. Reading the toggle
+  // HERE (rather than in each source handler) means both practice sources —
+  // by-code and by-.docx — honour the same setting with one code path.
+  const shouldShuffle = readShuffleToggle(document);
+  state.practiceShuffle = shouldShuffle;
+  // Practice is graded entirely in RAM (no server round-trip), so shuffling the
+  // questions array needs no index re-mapping: every question carries its own
+  // `correctAnswer`, and `displayOrder` stays null because nothing is submitted.
   state.displayOrder = null;
-  state.questions = state.practiceQuestions.slice();
+  state.questions = orderPracticeQuestions(state.practiceQuestions, shouldShuffle);
   state.answers = state.questions.map(makeEmptyAnswer);
   state.currentIndex = 0;
   state.flags = new Set();

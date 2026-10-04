@@ -207,6 +207,27 @@ body {
 .mode-tab.is-active { background: var(--surface); color: var(--accent); box-shadow: var(--shadow); }
 .mode-panel { animation: fadeIn .22s ease-out; }
 
+/* ---------- practice options (Phase 5.9) ---------- */
+/* A whole-row <label> keeps the box and text clickable as one target and, being
+   a flex row, stays aligned on both desktop and narrow mobile viewports. */
+.practice-option {
+  display: flex; align-items: center; gap: 10px;
+  padding: 11px 13px; margin: 2px 0;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 13.5px; line-height: 1.4; color: var(--text);
+  cursor: pointer; user-select: none;
+  transition: border-color .15s, background .15s;
+}
+.practice-option:hover { border-color: var(--border-strong); }
+.practice-option:focus-within { border-color: var(--accent); box-shadow: var(--focus); }
+/* Flex-none so the box never stretches or gets squeezed by the label text. */
+.practice-option input[type="checkbox"] {
+  flex: none; width: 18px; height: 18px; margin: 0;
+  accent-color: var(--accent); cursor: pointer;
+}
+.practice-option span { min-width: 0; }
+
 /* ---------- practice review ---------- */
 .review-list { display: grid; gap: 14px; }
 .review-card {

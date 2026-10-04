@@ -36,6 +36,16 @@
  *      keys, no answer-block leakage, in well under the CPU budget.
  *  20. Smart AI fallback (Phase 5.6): a structurally mismatched document in
  *      `auto` mode trips the anomaly linter and hands over to Engine 2.
+ *  21. pg_cron log retention (Phase 5.7): purge_expired_exams() prunes stale
+ *      cron.job_run_details rows and stays idempotent.
+ *  22. Worker keep-alive (Phase 5.7): the scheduled handler pings PostgREST and
+ *      never rejects on a failed/unbound ping.
+ *  23. Practice-enabled exams (Phase 5.8): allow_practice gates the key-bearing
+ *      get_practice_exam_payload; order + keys are preserved; practice persists
+ *      nothing; a shuffled official submission grades correctly via re-mapping.
+ *  24. Practice shuffle toggle (Phase 5.9): the student's toggle reorders the
+ *      questions while every key/explanation travels with its question, and the
+ *      OFF branch enforces the original `position ASC` order.
  *
  * Usage:
  *   node v2/tests/e2e_flow_verification.mjs
@@ -115,6 +125,12 @@ export async function load(url, context, nextLoad) {
 );
 const { generateExamVariants } = await import(
   new URL('../web/src/lib/shuffle.ts', import.meta.url).href
+);
+
+// Phase 5.9 Step 24 — the practice ordering helpers are dependency-free, so the
+// suite exercises the SAME module the student SPA imports (not a copy).
+const { shuffledOrder, orderPracticeQuestions, readShuffleToggle } = await import(
+  new URL('../student/practice-order.js', import.meta.url).href
 );
 
 // Phase 5.5 Step 15 exercises the timezone helpers. `date.ts` has no imports of
@@ -2001,6 +2017,88 @@ async function main() {
   check('an un-remapped (display-order) submission does NOT score full marks',
     controlSubmit.data?.success === true && Number(controlSubmit.data?.score) < PRACTICE_FULL_SCORE,
     String(controlSubmit.data?.score));
+
+  /* --- 24. Practice question shuffle toggle (Phase 5.9) ----------------- */
+  step(24, 'practice shuffle toggle reorders questions but keeps every key');
+
+  // A 6-question fixture with a distinct key per question, so any mis-ordering
+  // is detectable (a duplicate key would hide a permutation bug).
+  const practiceFixture = Array.from({ length: 6 }, (_, i) => ({
+    position: i + 1,
+    type: 'MCQ',
+    content: `Câu ${i + 1}`,
+    options: ['A', 'B', 'C', 'D'],
+    correctAnswer: i, // key encodes the question's identity
+    explanation: `Giải thích ${i + 1}`,
+  }));
+
+  // --- 24a. toggle OFF => strict original `position ASC` order ------------
+  const ordered = orderPracticeQuestions(practiceFixture, false);
+  check('shuffle OFF keeps the original source order',
+    JSON.stringify(ordered.map((q) => q.content)) === JSON.stringify(practiceFixture.map((q) => q.content)),
+    JSON.stringify(ordered.map((q) => q.content)));
+  check('shuffle OFF returns a new array (input not mutated)',
+    ordered !== practiceFixture
+      && JSON.stringify(practiceFixture.map((q) => q.position)) === '[1,2,3,4,5,6]');
+
+  // A caller that hands over a scrambled list must still get `position ASC`.
+  const scrambled = [practiceFixture[3], practiceFixture[0], practiceFixture[5], practiceFixture[1], practiceFixture[4], practiceFixture[2]];
+  const resorted = orderPracticeQuestions(scrambled, false);
+  check('shuffle OFF re-sorts a scrambled input by position',
+    JSON.stringify(resorted.map((q) => q.position)) === '[1,2,3,4,5,6]',
+    JSON.stringify(resorted.map((q) => q.position)));
+
+  // --- 24b. toggle ON => order differs, content preserved ----------------
+  const shuffled = orderPracticeQuestions(practiceFixture, true);
+  check('shuffle ON preserves the question count',
+    shuffled.length === practiceFixture.length, String(shuffled.length));
+  check('shuffle ON preserves every question exactly once',
+    JSON.stringify([...shuffled].map((q) => q.content).sort())
+      === JSON.stringify(practiceFixture.map((q) => q.content).sort()),
+    JSON.stringify(shuffled.map((q) => q.content)));
+  check('shuffle ON preserves every answer key with its question',
+    [...shuffled].every((q) => q.correctAnswer === practiceFixture.find((s) => s.content === q.content).correctAnswer),
+    JSON.stringify(shuffled.map((q) => [q.content, q.correctAnswer])));
+  check('shuffle ON preserves every explanation',
+    [...shuffled].every((q) => q.explanation === `Giải thích ${q.position}`),
+    JSON.stringify(shuffled.map((q) => q.explanation)));
+  check('shuffle ON does not mutate the source array',
+    JSON.stringify(practiceFixture.map((q) => q.position)) === '[1,2,3,4,5,6]');
+
+  // Randomness: over many runs a non-identity order must appear. (A 6! space
+  // makes a stuck identity astronomically unlikely if the shuffle truly runs.)
+  const seenOrders = new Set();
+  for (let i = 0; i < 60; i += 1) {
+    seenOrders.add(orderPracticeQuestions(practiceFixture, true).map((q) => q.content).join('|'));
+  }
+  check('shuffle ON produces more than one distinct order across runs',
+    seenOrders.size > 1, String(seenOrders.size));
+  check('shuffle ON can produce an order different from the original',
+    [...seenOrders].some((order) => order !== practiceFixture.map((q) => q.content).join('|')));
+
+  // --- 24c. the permutation primitive is sound ---------------------------
+  for (const n of [1, 2, 5, 25]) {
+    const perm = shuffledOrder(n);
+    check(`shuffledOrder(${n}) is a permutation of 0..n-1`,
+      perm.length === n && [...perm].sort((a, b) => a - b).every((v, i) => v === i),
+      JSON.stringify(perm));
+  }
+  check('shuffledOrder(0) is empty', shuffledOrder(0).length === 0);
+  check('shuffledOrder(1) is the identity', JSON.stringify(shuffledOrder(1)) === '[0]');
+
+  // --- 24d. the toggle reader defaults to "no shuffle" ------------------
+  const fakeDoc = (checked) => ({ getElementById: () => (checked === null ? null : { checked }) });
+  check('toggle unchecked => shuffle disabled', readShuffleToggle(fakeDoc(false)) === false);
+  check('toggle checked => shuffle enabled', readShuffleToggle(fakeDoc(true)) === true);
+  check('missing toggle node => shuffle disabled', readShuffleToggle(fakeDoc(null)) === false);
+  check('absent document => shuffle disabled', readShuffleToggle(undefined) === false);
+
+  // --- 24e. empty / degenerate inputs are safe --------------------------
+  check('empty list stays empty (shuffle ON)', orderPracticeQuestions([], true).length === 0);
+  check('empty list stays empty (shuffle OFF)', orderPracticeQuestions([], false).length === 0);
+  check('a non-array is treated as empty', orderPracticeQuestions(null, true).length === 0);
+  check('a single question survives the shuffle',
+    orderPracticeQuestions([practiceFixture[0]], true)[0].correctAnswer === 0);
 
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);
