@@ -58,6 +58,11 @@
  *      closed / not-yet-open / ended / unknown ones, and the identity picked from
  *      that roster plus the typed PIN passes verify_and_acquire_session — including
  *      the reload path, which must resend the PIN.
+ *  28. Tree of Knowledge (Phase 7.1): submit_tree_answer enforces the minimum word
+ *      count and the trigram similarity ceiling, assigns sequential fruit indices,
+ *      and updates in place on resubmission; anon can read the tree through the
+ *      SECURITY DEFINER RLS predicate but not tree_sessions itself; the class FK
+ *      is RESTRICT; and tree_submissions is in the realtime publication.
  *
  * Usage:
  *   node v2/tests/e2e_flow_verification.mjs
@@ -360,6 +365,46 @@ const ROSTER_ENDED_EXAM = {
   title: 'E2E Roster Ended',
   duration: 30,
 };
+
+// Phase 7.1 — Tree of Knowledge. A class with 5 members, plus a session whose
+// numbers make each branch of submit_tree_answer reachable:
+//   min_words = 10      -> a 3-word answer must be rejected
+//   max_similarity=.50  -> an identical/paraphrased answer rejected, a genuinely
+//                          different one accepted (measured 0.20 locally)
+const TREE_CLASS = 'E2E-TREE-' + String(Math.floor(1000 + Math.random() * 9000));
+const TREE_MEMBERS = [
+  { code: 'E2ETREE01', name: 'Trần Văn Một' },
+  { code: 'E2ETREE02', name: 'Lê Thị Hai' },
+  { code: 'E2ETREE03', name: 'Phạm Văn Ba' },
+  { code: 'E2ETREE04', name: 'Hoàng Thị Bốn' },
+  { code: 'E2ETREE05', name: 'Ngô Văn Năm' },
+];
+const TREE_SESSION = {
+  title: 'E2E Cây tri thức',
+  question: 'Theo em, tri thức là gì và nó được hình thành như thế nào?',
+  minWords: 10,
+  timeLimitMinutes: 45,
+  maxSimilarity: 0.50,
+};
+// Measured with pg_trgm (extension schema-qualified):
+//   original vs different      = 0.202  (< 0.50 -> accepted)
+//   near_dup vs different      = 0.222  (< 0.50 -> accepted)
+//   near_dup vs original       = 0.946  (> 0.50 -> rejected)
+// Word counts: short = 4, original = 15, different = 16, near_dup = 16, all >= 10.
+const TREE_ANSWER_ORIGINAL =
+  'Tri thuc la ket qua cua qua trinh hoc tap va trai nghiem khong ngung';
+const TREE_ANSWER_NEAR_DUPLICATE =
+  'Tri thuc la ket qua cua qua trinh hoc tap va trai nghiem khong ngung nhe';
+const TREE_ANSWER_DIFFERENT =
+  'Moi nguoi deu co the hoc hoi tu sach vo ban be va nhung sai lam';
+const TREE_SHORT_ANSWER = 'Tri thuc la gi';
+// A distinct text for the resubmission edit. Reusing TREE_ANSWER_DIFFERENT would
+// collide with member[1]'s accepted answer (0.202 is fine) but reusing the
+// ORIGINAL would be a 100% self-comparison — the RPC excludes the caller's own
+// row, yet the edited text must still clear the ceiling against the OTHER
+// student's answer, which this variant does (measured 0.222).
+const TREE_ANSWER_EDITED =
+  'Kien thuc den tu sach vo, thay co va ca nhung trai nghiem thuc te';
 
 /* ---------------------------------------------------------------- harness */
 
@@ -2902,6 +2947,278 @@ async function main() {
       && resumeWithPin.data?.message === 'SESSION_RESUMED'
       && resumeWithPin.data?.session_token === rosterRightPin.data?.session_token,
     JSON.stringify(resumeWithPin.data));
+
+  /* --- 28. Tree of Knowledge: schema, similarity & realtime (7.1) ------- */
+  step(28, 'tree of knowledge schema, similarity RPC, and realtime');
+
+  // --- 28a. fixtures: a 5-member class + an active session --------------
+  const treeClass = await teacher
+    .from('classes')
+    .insert({ user_id: teacherId, name: TREE_CLASS, academic_year: '2026-2027' })
+    .select('id')
+    .single();
+  check('28a: tree class created', !treeClass.error && !!treeClass.data,
+    treeClass.error?.message);
+  const treeClassId = treeClass.data?.id;
+
+  const treeMembers = await saveClassMembers(
+    teacher,
+    treeClassId,
+    TREE_MEMBERS.map((m) => ({ student_code: m.code, full_name: m.name, dob: null, pin: null })),
+  );
+  check('28a: the class has 5 members', treeMembers.saved === 5, String(treeMembers.saved));
+
+  const treeSession = await teacher
+    .from('tree_sessions')
+    .insert({
+      user_id: teacherId,
+      class_id: treeClassId,
+      title: TREE_SESSION.title,
+      question_text: TREE_SESSION.question,
+      min_words: TREE_SESSION.minWords,
+      time_limit_minutes: TREE_SESSION.timeLimitMinutes,
+      max_similarity: TREE_SESSION.maxSimilarity,
+    })
+    .select('id, min_words, max_similarity, tree_seed, is_active')
+    .single();
+  check('28a: tree session created', !treeSession.error && !!treeSession.data,
+    treeSession.error?.message);
+  const treeSessionId = treeSession.data?.id;
+  check('28a: min_words / max_similarity stored as configured',
+    Number(treeSession.data?.min_words) === TREE_SESSION.minWords
+      && Number(treeSession.data?.max_similarity) === TREE_SESSION.maxSimilarity,
+    JSON.stringify(treeSession.data));
+  // tree_seed must be auto-generated so every client renders the same tree.
+  check('28a: tree_seed defaulted to a non-null integer',
+    Number.isInteger(treeSession.data?.tree_seed), String(treeSession.data?.tree_seed));
+
+  // The CHECK must reject a nonsensical similarity ceiling: 0 would reject every
+  // answer, since a text is always 100% similar to itself.
+  const badCeiling = await teacher.from('tree_sessions').insert({
+    user_id: teacherId,
+    class_id: treeClassId,
+    title: 'Bad ceiling',
+    question_text: 'x',
+    max_similarity: 0,
+  }).select('id').single();
+  check('28a: max_similarity = 0 is rejected by the CHECK constraint',
+    !!badCeiling.error, JSON.stringify(badCeiling.data));
+
+  // Anonymous client — submit_tree_answer is the student-facing write path.
+  const treeAnon = createClient(SB_URL, SB_PUBLISHABLE, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const submitTree = (member, answer) => treeAnon.rpc('submit_tree_answer', {
+    p_session_id: treeSessionId,
+    p_student_code: member.code,
+    p_student_name: member.name,
+    p_answer_text: answer,
+  });
+
+  // --- 28b. minimum word count -------------------------------------------
+  const shortRes = await submitTree(TREE_MEMBERS[0], TREE_SHORT_ANSWER);
+  check('28b: a short answer is rejected with MIN_WORDS_NOT_MET',
+    shortRes.data?.success === false && shortRes.data?.code === 'MIN_WORDS_NOT_MET',
+    JSON.stringify(shortRes.data));
+  check('28b: the rejection reports both counts so the UI can guide the student',
+    shortRes.data?.current_words === 4 && shortRes.data?.required_words === TREE_SESSION.minWords,
+    JSON.stringify(shortRes.data));
+
+  // Whitespace must not be gameable: a "10 word" answer that is really 2 words
+  // plus padding has to be counted as 2. (Postgres regexp replaces runs.)
+  const paddedRes = await submitTree(TREE_MEMBERS[0], '   tri   thuc   ');
+  check('28b: whitespace padding does not inflate the word count',
+    paddedRes.data?.success === false && paddedRes.data?.current_words === 2,
+    JSON.stringify(paddedRes.data));
+
+  // --- 28c. first accepted answer gets fruit_index = 1 -------------------
+  const firstRes = await submitTree(TREE_MEMBERS[0], TREE_ANSWER_ORIGINAL);
+  check('28c: a valid original answer is accepted', firstRes.data?.success === true,
+    JSON.stringify(firstRes.data));
+  check('28c: the first fruit is index 1', firstRes.data?.fruit_index === 1,
+    String(firstRes.data?.fruit_index));
+  check('28c: the reported word_count matches the answer',
+    firstRes.data?.word_count === 15, String(firstRes.data?.word_count));
+
+  // --- 28d. similarity gate ----------------------------------------------
+  // A different student submitting (nearly) the same text must be refused.
+  const duplicateRes = await submitTree(TREE_MEMBERS[1], TREE_ANSWER_ORIGINAL);
+  check('28d: an identical answer is rejected with SIMILARITY_EXCEEDED',
+    duplicateRes.data?.success === false && duplicateRes.data?.code === 'SIMILARITY_EXCEEDED',
+    JSON.stringify(duplicateRes.data));
+  check('28d: the rejection reports the similarity as a percentage',
+    duplicateRes.data?.similarity_percent === 100.0,
+    String(duplicateRes.data?.similarity_percent));
+
+  const nearDupRes = await submitTree(TREE_MEMBERS[1], TREE_ANSWER_NEAR_DUPLICATE);
+  check('28d: a one-word-edit paraphrase is also rejected (0.946 > 0.50)',
+    nearDupRes.data?.success === false && nearDupRes.data?.code === 'SIMILARITY_EXCEEDED',
+    JSON.stringify(nearDupRes.data));
+
+  // The rejected attempts must NOT have created fruits.
+  const afterRejects = await treeAnon
+    .from('tree_submissions')
+    .select('student_code, fruit_index')
+    .eq('session_id', treeSessionId);
+  check('28d: rejected submissions did not grow the tree (still 1 fruit)',
+    afterRejects.data?.length === 1, String(afterRejects.data?.length));
+
+  // --- 28e. original answer below the threshold is accepted --------------
+  const secondRes = await submitTree(TREE_MEMBERS[1], TREE_ANSWER_DIFFERENT);
+  check('28e: a genuinely different answer is accepted', secondRes.data?.success === true,
+    JSON.stringify(secondRes.data));
+  check('28e: it becomes the second fruit', secondRes.data?.fruit_index === 2,
+    String(secondRes.data?.fruit_index));
+
+  // --- 28f. resubmission updates in place, no duplicate fruit ------------
+  // The same student edits their answer. `student_code <>` in the similarity
+  // check means their OWN text is not a self-match, so an edit is always allowed
+  // — but the new text still has to clear the ceiling against OTHER answers,
+  // which TREE_ANSWER_EDITED does (measured 0.222 vs member[1]'s answer).
+  const editRes = await submitTree(TREE_MEMBERS[0], TREE_ANSWER_EDITED);
+  check('28f: a student can edit their own answer', editRes.data?.success === true,
+    JSON.stringify(editRes.data));
+  check('28f: the edit reuses the same submission row', editRes.data?.submission_id
+    === firstRes.data?.submission_id, `${editRes.data?.submission_id} vs ${firstRes.data?.submission_id}`);
+  // fruit_index is intentionally preserved so the tree does not reshuffle.
+  check('28f: the edit keeps the original fruit_index (no new fruit)',
+    editRes.data?.fruit_index === 1, String(editRes.data?.fruit_index));
+
+  const finalTree = await treeAnon
+    .from('tree_submissions')
+    .select('student_code, fruit_index, word_count')
+    .eq('session_id', treeSessionId)
+    .order('fruit_index');
+  check('28f: the tree still holds exactly 2 fruits', finalTree.data?.length === 2,
+    String(finalTree.data?.length));
+  check('28f: fruit ordinals are 1 and 2 with no gap',
+    finalTree.data?.[0]?.fruit_index === 1 && finalTree.data?.[1]?.fruit_index === 2,
+    JSON.stringify(finalTree.data?.map((r) => r.fruit_index)));
+
+  // --- 28g. anon can READ the tree through the RLS policy ----------------
+  // This is the assertion that would have failed with the draft's inline EXISTS
+  // policy: anon holds no privilege on tree_sessions, so the predicate would
+  // have raised `permission denied` rather than returning rows.
+  check('28g: anon can read the session\'s submissions through RLS',
+    finalTree.error === null && finalTree.data?.length === 2,
+    finalTree.error?.message);
+  check('28g: anon still cannot read tree_sessions directly',
+    (await treeAnon.from('tree_sessions').select('id')).error !== null,
+    'anon should have been denied');
+
+  // --- 28h. closed / unknown sessions ------------------------------------
+  await teacher.from('tree_sessions').update({ is_active: false }).eq('id', treeSessionId);
+  const treeClosedRes = await submitTree(TREE_MEMBERS[2], TREE_ANSWER_DIFFERENT);
+  check('28h: a closed session rejects with SESSION_INACTIVE',
+    treeClosedRes.data?.success === false && treeClosedRes.data?.code === 'SESSION_INACTIVE',
+    JSON.stringify(treeClosedRes.data));
+
+  await teacher.from('tree_sessions').update({ is_active: true }).eq('id', treeSessionId);
+  const missingSession = await treeAnon.rpc('submit_tree_answer', {
+    p_session_id: '00000000-0000-0000-0000-000000000000',
+    p_student_code: TREE_MEMBERS[2].code,
+    p_student_name: TREE_MEMBERS[2].name,
+    p_answer_text: TREE_ANSWER_DIFFERENT,
+  });
+  check('28h: an unknown session reports SESSION_NOT_FOUND',
+    missingSession.data?.success === false && missingSession.data?.code === 'SESSION_NOT_FOUND',
+    JSON.stringify(missingSession.data));
+
+  const blankIdentity = await treeAnon.rpc('submit_tree_answer', {
+    p_session_id: treeSessionId,
+    p_student_code: '   ',
+    p_student_name: '',
+    p_answer_text: TREE_ANSWER_DIFFERENT,
+  });
+  check('28h: a blank identity is rejected with IDENTITY_REQUIRED',
+    blankIdentity.data?.success === false && blankIdentity.data?.code === 'IDENTITY_REQUIRED',
+    JSON.stringify(blankIdentity.data));
+
+  // A freshly created session with a 0-minute limit is already past its window.
+  const expiredSession = await teacher.from('tree_sessions').insert({
+    user_id: teacherId,
+    class_id: treeClassId,
+    title: 'Expired',
+    question_text: 'x',
+    min_words: 1,
+    time_limit_minutes: 1,
+    created_at: new Date(Date.now() - 3_600_000).toISOString(),
+  }).select('id').single();
+  const expiredRes = await treeAnon.rpc('submit_tree_answer', {
+    p_session_id: expiredSession.data?.id,
+    p_student_code: TREE_MEMBERS[2].code,
+    p_student_name: TREE_MEMBERS[2].name,
+    p_answer_text: TREE_ANSWER_DIFFERENT,
+  });
+  check('28h: a session past its time limit reports SESSION_EXPIRED',
+    expiredRes.data?.success === false && expiredRes.data?.code === 'SESSION_EXPIRED',
+    JSON.stringify(expiredRes.data));
+
+  // --- 28i. schema-level guarantees --------------------------------------
+  // ON DELETE RESTRICT on class_id: a class in use must not be silently dropped.
+  const restrictRes = await teacher.from('classes').delete().eq('id', treeClassId);
+  check('28i: deleting a class that still has tree sessions is RESTRICTed',
+    !!restrictRes.error, JSON.stringify(restrictRes.data));
+
+  // The UNIQUE(session_id, student_code) is what turns a resubmission into an
+  // update rather than a second fruit. Probed over a direct SQL connection:
+  // PostgREST cannot reach pg_catalog, and `authenticated` deliberately has no
+  // INSERT policy on tree_submissions (writes are RPC-only), so the insert would
+  // be rejected by RLS (42501) before the constraint was ever consulted.
+  const treeSql = (statement) => execFileSync(
+    'docker',
+    ['exec', SB_DB_CONTAINER, 'psql', '-U', 'postgres', '-d', 'postgres', '-tAc', statement],
+    { encoding: 'utf8' },
+  ).trim();
+
+  let uniqueViolation = '';
+  try {
+    treeSql(
+      `insert into public.tree_submissions
+         (session_id, student_code, student_name, answer_text, word_count, fruit_index)
+       values ('${treeSessionId}', '${TREE_MEMBERS[0].code}', 'dup probe', 'x', 1, 99)`,
+    );
+  } catch (err) {
+    uniqueViolation = String(err.stderr || err.message || '');
+  }
+  check('28i: UNIQUE(session_id, student_code) blocks a duplicate fruit row',
+    uniqueViolation.includes('23505') || uniqueViolation.includes('duplicate key'),
+    uniqueViolation.slice(-200));
+
+  // The class FK must also be RESTRICT, not CASCADE: a class in use cannot be
+  // deleted, so activity data cannot be destroyed as a side effect.
+  const fkDeleteRule = treeSql(
+    `select confdeltype from pg_constraint
+      where conrelid = 'public.tree_sessions'::regclass and contype = 'f'
+        and confrelid = 'public.classes'::regclass`,
+  );
+  // 'r' = RESTRICT, 'c' = CASCADE.
+  check('28i: tree_sessions.class_id is ON DELETE RESTRICT', fkDeleteRule === 'r', fkDeleteRule);
+
+  // --- 28j. realtime publication membership ------------------------------
+  // pg_publication_tables is a catalog view, so it is probed over SQL rather
+  // than PostgREST (which only exposes the `public` schema).
+  const inPublication = treeSql(
+    `select count(*) from pg_publication_tables
+      where pubname = 'supabase_realtime' and schemaname = 'public'
+        and tablename = 'tree_submissions'`,
+  );
+  check('28j: tree_submissions is in the supabase_realtime publication',
+    inPublication === '1', inPublication);
+
+  // Realtime filters on session_id (a non-key column) and resubmissions arrive
+  // as UPDATEs, so replica identity must be FULL or those events are dropped.
+  const replicaIdentity = treeSql(
+    `select relreplident from pg_class where oid = 'public.tree_submissions'::regclass`,
+  );
+  check('28j: tree_submissions uses replica identity FULL', replicaIdentity === 'f', replicaIdentity);
+
+  // --- 28k. cleanup the restricted class --------------------------------
+  // Sessions must go first (ON DELETE RESTRICT), then the class.
+  await teacher.from('tree_sessions').delete().eq('class_id', treeClassId);
+  const treeClassDelete = await teacher.from('classes').delete().eq('id', treeClassId);
+  check('28k: the class deletes once its tree sessions are gone',
+    !treeClassDelete.error, treeClassDelete.error?.message);
 
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);

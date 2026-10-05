@@ -29,6 +29,16 @@ begin;
 -- gen_random_uuid() (also in core PG13+, pgcrypto keeps older projects happy)
 create extension if not exists pgcrypto;
 
+-- Phase 7.1 — trigram similarity for the Tree of Knowledge de-duplication.
+-- Installed into `extensions` (Supabase's convention; pgcrypto is already there)
+-- and RELOCATED unconditionally, because `create extension if not exists` is a
+-- no-op when a prior script already installed it into another schema. Every call
+-- site below is schema-qualified (`extensions.similarity`, `extensions.gin_trgm_ops`),
+-- since the RPCs pin `search_path = public, pg_temp` and would not otherwise
+-- resolve the extension's objects.
+create extension if not exists pg_trgm with schema extensions;
+alter extension pg_trgm set schema extensions;
+
 
 -- ============================================================================
 -- SECTION A — TABLES
@@ -233,6 +243,61 @@ create table if not exists public.class_members (
 
 comment on table public.class_members is 'Roster rows for a class. `pin` NULL -> DOB (DDMM) fallback; both NULL -> no PIN required.';
 
+-- ----------------------------------------------------------------------------
+-- A.9  tree_sessions — teacher-owned "Cây tri thức" activity (Phase 7.1).
+--      One open question posed to a class; each student's accepted answer
+--      becomes a "fruit" on a shared tree. `max_similarity` is the trigram
+--      ceiling that keeps the tree growing with DISTINCT ideas.
+--
+--      class_id is ON DELETE RESTRICT (not cascade): a class roster is shared
+--      with exams, so cascading a class deletion into activity data would be
+--      surprising. The teacher deletes the session first.
+-- ----------------------------------------------------------------------------
+create table if not exists public.tree_sessions (
+    id                 uuid         primary key default gen_random_uuid(),
+    user_id            uuid         not null references auth.users (id) on delete cascade,
+    class_id           uuid         not null references public.classes (id) on delete restrict,
+    title              varchar(255) not null,
+    question_text      text         not null,
+    min_words          integer      not null default 20,
+    time_limit_minutes integer      not null default 45,
+    max_similarity     numeric(3,2) not null default 0.60,
+    tree_seed          integer      not null default floor(random() * 1000000)::integer,
+    is_active          boolean      not null default true,
+    created_at         timestamptz  not null default now(),
+    ended_at           timestamptz,
+    constraint tree_sessions_max_similarity_range
+        check (max_similarity > 0.0 and max_similarity <= 1.0),
+    constraint tree_sessions_min_words_positive check (min_words > 0),
+    constraint tree_sessions_time_limit_positive check (time_limit_minutes > 0)
+);
+
+comment on table public.tree_sessions is 'Teacher-owned "Cây tri thức" activity: one open question posed to a class (Phase 7.1).';
+comment on column public.tree_sessions.max_similarity is 'Trigram similarity ceiling. An answer at or below this is accepted; above it is rejected as duplicated.';
+comment on column public.tree_sessions.tree_seed is 'Deterministic seed so every client renders the same procedural tree.';
+
+-- ----------------------------------------------------------------------------
+-- A.10 tree_submissions — one answer per student per session ("fruit").
+--      UNIQUE(session_id, student_code) makes a resubmission an UPDATE rather
+--      than a second fruit; the RPC keeps the original fruit_index so the tree
+--      does not reshuffle when a student edits their answer.
+-- ----------------------------------------------------------------------------
+create table if not exists public.tree_submissions (
+    id           uuid         primary key default gen_random_uuid(),
+    session_id   uuid         not null references public.tree_sessions (id) on delete cascade,
+    student_code varchar(50)  not null,
+    student_name varchar(100) not null,
+    answer_text  text         not null,
+    word_count   integer      not null,
+    submitted_at timestamptz  not null default now(),
+    fruit_index  integer      not null,
+    constraint tree_submissions_session_student_uniq unique (session_id, student_code),
+    constraint tree_submissions_fruit_index_positive check (fruit_index > 0),
+    constraint tree_submissions_word_count_nonneg check (word_count >= 0)
+);
+
+comment on table public.tree_submissions is 'Student answers ("fruits") for a tree session. UNIQUE(session_id, student_code) makes resubmission an update, not a new fruit.';
+
 
 -- ============================================================================
 -- SECTION A.7 — INDEXES
@@ -249,6 +314,17 @@ create index if not exists idx_proctoring_snapshots_exam     on public.proctorin
 create index if not exists idx_classes_user_id               on public.classes (user_id);
 create index if not exists idx_class_members_class_id        on public.class_members (class_id);
 create index if not exists idx_class_members_student_code    on public.class_members (student_code);
+-- Phase 7.1 — tree activity.
+create index if not exists idx_tree_sessions_class_id         on public.tree_sessions (class_id);
+create index if not exists idx_tree_sessions_user_id          on public.tree_sessions (user_id);
+create index if not exists idx_tree_submissions_session_id    on public.tree_submissions (session_id);
+-- Orders the tree in one pass (the client sorts by fruit_index).
+create index if not exists idx_tree_submissions_session_fruit on public.tree_submissions (session_id, fruit_index);
+-- Trigram index backing similarity() lookups. The operator class lives in the
+-- `extensions` schema, so it MUST be schema-qualified: an unqualified
+-- `gin_trgm_ops` resolves against the current search_path at CREATE INDEX time.
+create index if not exists idx_tree_submissions_trgm
+    on public.tree_submissions using gin (answer_text extensions.gin_trgm_ops);
 
 
 -- ============================================================================
@@ -269,6 +345,9 @@ alter table public.proctoring_snapshots enable row level security;
 -- Phase 6.1 — independent class rosters.
 alter table public.classes             enable row level security;
 alter table public.class_members       enable row level security;
+-- Phase 7.1 — tree activity.
+alter table public.tree_sessions       enable row level security;
+alter table public.tree_submissions    enable row level security;
 
 -- --- exams: full CRUD for the owning teacher ---------------------------------
 drop policy if exists exams_owner_all on public.exams;
@@ -396,6 +475,55 @@ create policy class_members_owner_all on public.class_members
         )
     );
 
+-- --- tree_sessions / tree_submissions: "Cây tri thức" (Phase 7.1) ----------
+drop policy if exists tree_sessions_owner_all on public.tree_sessions;
+create policy tree_sessions_owner_all on public.tree_sessions
+    for all
+    to authenticated
+    using (auth.uid() = user_id)
+    with check (auth.uid() = user_id);
+
+-- Teacher review/export of the answers to their own sessions.
+drop policy if exists tree_submissions_teacher_read on public.tree_submissions;
+create policy tree_submissions_teacher_read on public.tree_submissions
+    for select
+    to authenticated
+    using (
+        exists (
+            select 1 from public.tree_sessions s
+            where s.id = tree_submissions.session_id and s.user_id = auth.uid()
+        )
+    );
+
+-- The predicate helper is defined HERE rather than in Section C because
+-- `create policy` validates its expression immediately, so a forward reference
+-- to a not-yet-created function aborts the script.
+--
+-- It MUST be SECURITY DEFINER: a policy predicate is evaluated AS THE QUERYING
+-- ROLE (`anon`), which holds NO privilege on tree_sessions (revoked below), so
+-- an inline `exists (select 1 from tree_sessions ...)` raises
+-- `permission denied for table tree_sessions` instead of returning rows.
+-- Verified locally: the inline form fails as anon, this helper succeeds.
+create or replace function public.tree_session_is_public(p_session_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+    select exists (
+        select 1 from public.tree_sessions s
+        where s.id = p_session_id
+    );
+$$;
+
+-- Students (anon) read the fruits of a session so the tree renders and stays live.
+drop policy if exists tree_submissions_public_read on public.tree_submissions;
+create policy tree_submissions_public_read on public.tree_submissions
+    for select
+    to anon, authenticated
+    using (public.tree_session_is_public(session_id));
+
 -- --- Privilege hardening -----------------------------------------------------
 -- Students (anon) must hold no direct table access whatsoever.
 -- Supabase grants ALL on public tables to anon by default; revoke it.
@@ -407,6 +535,10 @@ revoke all on public.exam_results         from anon;
 revoke all on public.proctoring_snapshots from anon;
 revoke all on public.classes              from anon;
 revoke all on public.class_members        from anon;
+-- Phase 7.1 — writes are RPC-only; reads go through the policy above.
+revoke all on public.tree_sessions        from anon;
+revoke all on public.tree_submissions     from anon;
+grant select on public.tree_submissions   to anon;
 
 
 -- ============================================================================
@@ -1819,6 +1951,132 @@ end;
 $$;
 
 
+-- ----------------------------------------------------------------------------
+-- C.16  submit_tree_answer  (student — anon, Phase 7.1)
+--       The single write path for the Tree of Knowledge. Validates the session
+--       window, enforces the minimum word count, rejects text too similar to an
+--       existing answer, then upserts and returns the fruit ordinal.
+--
+--       Returns { success: true, submission_id, fruit_index, word_count, message }
+--            or { success: false, code, ... }
+--       Codes: SESSION_NOT_FOUND / SESSION_INACTIVE / SESSION_EXPIRED /
+--              IDENTITY_REQUIRED / MIN_WORDS_NOT_MET / SIMILARITY_EXCEEDED
+--
+--       The similarity check EXCLUDES the caller's own prior submission
+--       (student_code <>), otherwise a student editing their answer would be
+--       compared against their own previous text and could never improve it.
+--
+--       similarity() is schema-qualified (`extensions.similarity`) because
+--       search_path is pinned to public,pg_temp and pg_trgm lives in `extensions`.
+-- ----------------------------------------------------------------------------
+drop function if exists public.submit_tree_answer(uuid, varchar, varchar, text);
+
+create or replace function public.submit_tree_answer(
+    p_session_id   uuid,
+    p_student_code varchar,
+    p_student_name varchar,
+    p_answer_text  text
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+    v_session           public.tree_sessions%rowtype;
+    v_clean_text        text;
+    v_word_count        integer;
+    v_max_sim           numeric := 0.0;
+    v_next_fruit_index  integer;
+    v_submission_id     uuid;
+    v_student_code      varchar(50);
+    v_student_name      varchar(100);
+begin
+    v_student_code := trim(coalesce(p_student_code, ''));
+    v_student_name := trim(coalesce(p_student_name, ''));
+
+    if p_session_id is null then
+        return jsonb_build_object('success', false, 'code', 'SESSION_NOT_FOUND', 'message', 'Phiên hoạt động không tồn tại.');
+    end if;
+    if v_student_code = '' or v_student_name = '' then
+        return jsonb_build_object('success', false, 'code', 'IDENTITY_REQUIRED', 'message', 'Thiếu thông tin học sinh.');
+    end if;
+
+    select * into v_session from public.tree_sessions where id = p_session_id;
+    if not found then
+        return jsonb_build_object('success', false, 'code', 'SESSION_NOT_FOUND', 'message', 'Phiên hoạt động không tồn tại.');
+    end if;
+
+    if v_session.is_active is not true then
+        return jsonb_build_object('success', false, 'code', 'SESSION_INACTIVE', 'message', 'Phiên hoạt động đã kết thúc.');
+    end if;
+
+    if now() > v_session.created_at + make_interval(mins => v_session.time_limit_minutes) then
+        return jsonb_build_object('success', false, 'code', 'SESSION_EXPIRED', 'message', 'Đã hết thời gian làm bài.');
+    end if;
+
+    -- Normalise all whitespace (newlines/tabs) to single spaces, then count.
+    v_clean_text := regexp_replace(trim(coalesce(p_answer_text, '')), '\s+', ' ', 'g');
+    if v_clean_text = '' then
+        v_word_count := 0;
+    else
+        v_word_count := cardinality(string_to_array(v_clean_text, ' '));
+    end if;
+
+    if v_word_count < v_session.min_words then
+        return jsonb_build_object(
+            'success',        false,
+            'code',           'MIN_WORDS_NOT_MET',
+            'current_words',  v_word_count,
+            'required_words', v_session.min_words,
+            'message',        format('Câu trả lời cần tối thiểu %s từ (bạn mới nhập %s từ).', v_session.min_words, v_word_count)
+        );
+    end if;
+
+    select coalesce(max(extensions.similarity(s.answer_text, v_clean_text)), 0.0)
+      into v_max_sim
+      from public.tree_submissions s
+     where s.session_id = p_session_id
+       and s.student_code <> v_student_code;
+
+    -- Strict `>`: a score exactly at the ceiling is permitted.
+    if v_max_sim > v_session.max_similarity then
+        return jsonb_build_object(
+            'success',            false,
+            'code',               'SIMILARITY_EXCEEDED',
+            'similarity_percent', round(v_max_sim * 100, 1),
+            'message',            format('Câu trả lời bị trùng lặp %s%% với bài đã nộp. Vui lòng tự diễn đạt lại!', round(v_max_sim * 100, 1))
+        );
+    end if;
+
+    select coalesce(max(s.fruit_index), 0) + 1
+      into v_next_fruit_index
+      from public.tree_submissions s
+     where s.session_id = p_session_id;
+
+    -- On resubmission fruit_index is NOT updated: the fruit keeps its place.
+    insert into public.tree_submissions (
+        session_id, student_code, student_name, answer_text, word_count, fruit_index
+    ) values (
+        p_session_id, v_student_code, v_student_name, v_clean_text, v_word_count, v_next_fruit_index
+    )
+    on conflict (session_id, student_code) do update
+        set answer_text  = excluded.answer_text,
+            word_count   = excluded.word_count,
+            student_name = excluded.student_name,
+            submitted_at = now()
+    returning id, fruit_index into v_submission_id, v_next_fruit_index;
+
+    return jsonb_build_object(
+        'success',       true,
+        'submission_id', v_submission_id,
+        'fruit_index',   v_next_fruit_index,
+        'word_count',    v_word_count,
+        'message',       'Đóng góp thành công! Cây tri thức đang phát triển thêm quả mới. 🌱🍎'
+    );
+end;
+$$;
+
+
 -- ============================================================================
 -- SECTION D — EXECUTE GRANTS
 -- ----------------------------------------------------------------------------
@@ -1844,6 +2102,10 @@ revoke all on function public.recalculate_exam_scores(varchar)                  
 revoke all on function public.get_practice_exam_payload(varchar, varchar, varchar)                          from public;
 -- Phase 6.3 — student-facing. Returns a sanitised roster (no pin/dob).
 revoke all on function public.get_exam_roster(varchar)                                                    from public;
+-- Phase 7.1 — student-facing write path for the tree activity.
+revoke all on function public.submit_tree_answer(uuid, varchar, varchar, text)                            from public;
+-- Phase 7.1 — RLS predicate helper, needs EXECUTE from the policy's role.
+revoke all on function public.tree_session_is_public(uuid)                                                from public;
 
 grant execute on function public.verify_and_acquire_session(varchar, varchar, varchar, varchar, text, uuid, varchar)   to anon, authenticated;
 grant execute on function public.record_student_heartbeat(varchar, varchar, uuid, integer, integer, integer, integer) to anon, authenticated;
@@ -1857,6 +2119,12 @@ grant execute on function public.get_practice_exam_payload(varchar, varchar, var
 -- Phase 6.3 — student-facing: the roster picker must work BEFORE the student has
 -- an identity, so this is anon-executable by design.
 grant execute on function public.get_exam_roster(varchar)                                                     to anon, authenticated;
+-- Phase 7.1 — student-facing. The similarity rules live inside the body, so a
+-- caller cannot bypass them by touching the table (anon holds no table rights).
+grant execute on function public.submit_tree_answer(uuid, varchar, varchar, text)                              to anon, authenticated;
+-- Phase 7.1 — required for the tree_submissions RLS policy to evaluate as anon.
+-- It leaks only a boolean.
+grant execute on function public.tree_session_is_public(uuid)                                                 to anon, authenticated;
 -- Teacher-only: never exposed to anon (ownership is enforced inside the body).
 grant execute on function public.update_exam_questions_safe(varchar, jsonb)                                    to authenticated;
 grant execute on function public.delete_exam(varchar)                                                          to authenticated;
@@ -1885,6 +2153,7 @@ grant execute on function public.import_class_to_exam(varchar, uuid[])          
 --
 --   exam_results    -> live scoreboard (INSERT on submit, UPDATE on grading)
 --   active_sessions -> live proctoring feed (INSERT/UPDATE on heartbeat)
+--   tree_submissions-> live Tree of Knowledge growth (INSERT/UPDATE on submit)
 --
 -- `add table` raises 42710 when the table is already a member, so guard it to
 -- keep the script re-runnable.
@@ -1904,6 +2173,14 @@ begin
     ) then
         alter publication supabase_realtime add table public.exam_results;
     end if;
+
+    -- Phase 7.1 — every accepted fruit must reach the whole class live.
+    if not exists (
+        select 1 from pg_publication_tables
+        where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'tree_submissions'
+    ) then
+        alter publication supabase_realtime add table public.tree_submissions;
+    end if;
 end
 $$;
 
@@ -1914,6 +2191,10 @@ $$;
 -- needs the full old row. `active_sessions` keeps exam_code inside its
 -- composite primary key and therefore needs no change.
 alter table public.exam_results replica identity full;
+
+-- Phase 7.1 — clients filter tree events by `session_id`, a non-key column, and
+-- resubmissions arrive as UPDATEs. Without `full` those edits would be dropped.
+alter table public.tree_submissions replica identity full;
 
 
 -- ============================================================================
