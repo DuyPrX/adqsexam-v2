@@ -2077,6 +2077,105 @@ end;
 $$;
 
 
+-- ----------------------------------------------------------------------------
+-- C.17  get_public_tree_session  (student — anon, Phase 7.4)
+--       Powers the student SPA's tree check-in screen: opens a session from a
+--       link (`?session=`/`?tree=`) and returns the question, the word minimum,
+--       the renderer seed and the class roster to pick a name from.
+--
+--       Returns { success: true, class_name, total_students,
+--                 session: { id, title, question_text, min_words,
+--                            time_limit_minutes, tree_seed, created_at },
+--                 candidates: [ { student_code, full_name } ] }
+--            or { success: false, code, message }
+--       Codes: SESSION_NOT_FOUND / SESSION_INACTIVE / SESSION_EXPIRED
+--
+--       `tree_seed` is NOT a credential — it is the shared input every client
+--       feeds the deterministic renderer so the whole class sees the same tree.
+--
+--       NEVER returns `pin` or `dob` (both are credentials; dob is the DDMM
+--       fallback PIN). The projection is two explicit keys, never `cm.*`.
+--
+--       Like get_exam_roster, this answers BEFORE identity is proven — the picker
+--       exists so the student can find their own name. The trade-off (a live
+--       session UUID reveals that class's names/codes, but no secret and no answer
+--       content) is documented in migration 20261005130000. Reaching `anon` at all
+--       requires a SECURITY DEFINER function: Section B revokes every table
+--       privilege from anon, so tree_sessions/class_members are unreadable directly.
+-- ----------------------------------------------------------------------------
+create or replace function public.get_public_tree_session(
+    p_session_id uuid
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+    v_session        record;
+    v_class_name     varchar;
+    v_total_students integer;
+    v_candidates     jsonb;
+begin
+    if p_session_id is null then
+        return jsonb_build_object('success', false, 'code', 'SESSION_NOT_FOUND', 'message', 'Phiên hoạt động không tồn tại.');
+    end if;
+
+    select s.id, s.title, s.question_text, s.min_words, s.time_limit_minutes,
+           s.tree_seed, s.is_active, s.created_at, s.class_id
+      into v_session
+      from public.tree_sessions s
+     where s.id = p_session_id;
+
+    if not found then
+        return jsonb_build_object('success', false, 'code', 'SESSION_NOT_FOUND', 'message', 'Phiên hoạt động không tồn tại.');
+    end if;
+
+    if v_session.is_active is not true then
+        return jsonb_build_object('success', false, 'code', 'SESSION_INACTIVE', 'message', 'Phiên hoạt động đã kết thúc.');
+    end if;
+
+    if now() > v_session.created_at + make_interval(mins => v_session.time_limit_minutes) then
+        return jsonb_build_object('success', false, 'code', 'SESSION_EXPIRED', 'message', 'Phiên hoạt động đã hết thời gian.');
+    end if;
+
+    select c.name, count(cm.id)::integer
+      into v_class_name, v_total_students
+      from public.classes c
+      left join public.class_members cm on cm.class_id = c.id
+     where c.id = v_session.class_id
+     group by c.id, c.name;
+
+    -- Two display keys ONLY: `pin`/`dob` must never leave the server here.
+    select jsonb_agg(
+               jsonb_build_object(
+                   'student_code', cm.student_code,
+                   'full_name',    cm.full_name
+               )
+               order by cm.student_code asc
+           )
+      into v_candidates
+      from public.class_members cm
+     where cm.class_id = v_session.class_id;
+
+    return jsonb_build_object(
+        'success', true,
+        'session', jsonb_build_object(
+            'id',                 v_session.id,
+            'title',              v_session.title,
+            'question_text',      v_session.question_text,
+            'min_words',          v_session.min_words,
+            'time_limit_minutes', v_session.time_limit_minutes,
+            'tree_seed',          v_session.tree_seed,
+            'created_at',         v_session.created_at
+        ),
+        'class_name', v_class_name,
+        'total_students', greatest(coalesce(v_total_students, 0), 1),
+        'candidates', coalesce(v_candidates, '[]'::jsonb)
+    );
+end;
+$$;
+
+
 -- ============================================================================
 -- SECTION D — EXECUTE GRANTS
 -- ----------------------------------------------------------------------------
@@ -2104,6 +2203,8 @@ revoke all on function public.get_practice_exam_payload(varchar, varchar, varcha
 revoke all on function public.get_exam_roster(varchar)                                                    from public;
 -- Phase 7.1 — student-facing write path for the tree activity.
 revoke all on function public.submit_tree_answer(uuid, varchar, varchar, text)                            from public;
+-- Phase 7.4 — student-facing check-in read for the tree activity.
+revoke all on function public.get_public_tree_session(uuid)                                               from public;
 -- Phase 7.1 — RLS predicate helper, needs EXECUTE from the policy's role.
 revoke all on function public.tree_session_is_public(uuid)                                                from public;
 
@@ -2122,6 +2223,10 @@ grant execute on function public.get_exam_roster(varchar)                       
 -- Phase 7.1 — student-facing. The similarity rules live inside the body, so a
 -- caller cannot bypass them by touching the table (anon holds no table rights).
 grant execute on function public.submit_tree_answer(uuid, varchar, varchar, text)                              to anon, authenticated;
+-- Phase 7.4 — student-facing check-in read: the SPA must open a session link
+-- BEFORE it has any identity, so this is anon-executable by design. It returns
+-- no credentials (never pin/dob) and no answer content.
+grant execute on function public.get_public_tree_session(uuid)                                                to anon, authenticated;
 -- Phase 7.1 — required for the tree_submissions RLS policy to evaluate as anon.
 -- It leaks only a boolean.
 grant execute on function public.tree_session_is_public(uuid)                                                 to anon, authenticated;

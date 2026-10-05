@@ -31,16 +31,21 @@ interface TreeProjectorProps {
 /**
  * Builds the URL a student scans to join.
  *
- * The student SPA is a separate origin (Cloudflare Pages) from the teacher web
- * (Vercel), so `NEXT_PUBLIC_STUDENT_APP_URL` is preferred. Falling back to the
- * current origin keeps local development working without configuring anything,
- * and the `/tree/join` path is the documented join route either way.
+ * The student SPA is a static bundle served from a directory root (Cloudflare
+ * Pages `assets.directory`), with no client-side router — so the join link must
+ * target its INDEX (`/` or `/index.html`) and carry the session as a query
+ * parameter, exactly what `loadTreeFromUrl()` reads. A path like `/tree/join`
+ * would be a 404 because there is no such document.
+ *
+ * The SPA is a separate origin from the teacher web, so
+ * `NEXT_PUBLIC_STUDENT_APP_URL` is preferred; falling back to the current origin
+ * keeps local development working without configuration.
  */
 function buildJoinUrl(sessionId: string): string {
   const base = (process.env.NEXT_PUBLIC_STUDENT_APP_URL ?? '').replace(/\/+$/, '');
-  if (base) return `${base}/tree/join?session=${sessionId}`;
-  if (typeof window !== 'undefined') return `${window.location.origin}/tree/join?session=${sessionId}`;
-  return `/tree/join?session=${sessionId}`;
+  if (base) return `${base}/?session=${sessionId}`;
+  if (typeof window !== 'undefined') return `${window.location.origin}/?session=${sessionId}`;
+  return `/?session=${sessionId}`;
 }
 
 /** Strips characters that are illegal in a filename on Windows/macOS. */

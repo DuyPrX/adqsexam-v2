@@ -209,16 +209,71 @@
     </section>
 
     <!-- ================= TREE OF KNOWLEDGE ================= -->
-    <!-- Phase 7.2 — procedural Canvas 2D preview. The container is hidden until
-         a session is loaded; `TreeRenderer` sizes its backing store from
-         `clientWidth/clientHeight`, so the element must be laid out (not
-         `display:none`) before the first render. -->
+    <!-- Phase 7.4 — student interactive view. Two mutually exclusive states:
+         `#treeCheckinForm` (opened from `?session=`/`?tree=`, before identity is
+         chosen) and `#treeWorkspace` (the split view: live canvas above, answer
+         box below). The canvas lives inside the workspace, which is hidden until
+         check-in completes — `TreeRenderer` sizes its backing store from
+         `clientWidth/clientHeight`, so the container must be LAYOUT (not
+         `display:none`) before the first render, which `showTree` guarantees by
+         showing the screen before rendering. -->
     <section id="treeScreen" class="screen tree-screen hidden" aria-labelledby="treeHeading">
       <h1 id="treeHeading" class="tree-screen__title">Cây Tri Thức</h1>
       <p id="treeSubtitle" class="tree-screen__subtitle"></p>
-      <div class="tree-screen__stage">
-        <canvas id="tree-preview-canvas" class="tree-canvas" width="800" height="600"
-                aria-label="Cây tri thức của lớp"></canvas>
+
+      <!-- ---------- State 1: check-in ---------- -->
+      <div id="treeCheckinForm" class="tree-checkin">
+        <div class="tree-checkin__card">
+          <p class="tree-checkin__eyebrow">Hoạt động của lớp</p>
+          <h2 id="treeCheckinTitle" class="tree-checkin__title"></h2>
+          <p id="treeCheckinQuestion" class="tree-checkin__question"></p>
+          <p id="treeCheckinMeta" class="tree-checkin__meta"></p>
+
+          <div class="field">
+            <label for="treeStudentSelect">Chọn tên của bạn</label>
+            <select id="treeStudentSelect" class="form-control">
+              <option value="">-- Chọn tên bạn --</option>
+            </select>
+          </div>
+
+          <p id="treeCheckinError" class="alert alert--error hidden" role="alert"></p>
+
+          <button id="btnEnterTree" type="button" class="btn btn--primary btn--block" disabled>
+            Vào tham gia 🌱
+          </button>
+        </div>
+      </div>
+
+      <!-- ---------- State 2: interactive workspace ---------- -->
+      <div id="treeWorkspace" class="tree-workspace hidden">
+        <div class="tree-workspace__status">
+          <span id="treeProgressBadge" class="tree-badge"></span>
+          <span id="treeVitalityBadge" class="tree-badge tree-badge--vitality"></span>
+        </div>
+
+        <div class="tree-screen__stage">
+          <canvas id="tree-preview-canvas" class="tree-canvas" width="800" height="600"
+                  aria-label="Cây tri thức của lớp"></canvas>
+        </div>
+
+        <p id="treeFruitInfo" class="tree-fruit-info hidden" role="status"></p>
+
+        <div class="tree-answer">
+          <label for="treeAnswerInput" class="tree-answer__label">
+            <span id="treeQuestionReminder" class="tree-answer__question"></span>
+          </label>
+          <textarea id="treeAnswerInput" class="tree-answer__input" rows="4"
+                    maxlength="2000" placeholder="Nhập suy nghĩ hoặc câu trả lời của bạn..."></textarea>
+
+          <div class="tree-answer__footer">
+            <span id="treeWordCounter" class="tree-word-counter" role="status">0 / 20 từ</span>
+            <button id="btnSubmitTreeAnswer" type="button" class="btn btn--primary" disabled>
+              Gửi câu trả lời
+            </button>
+          </div>
+
+          <p id="treeStatusMessage" class="alert hidden" role="alert"></p>
+        </div>
       </div>
     </section>
 

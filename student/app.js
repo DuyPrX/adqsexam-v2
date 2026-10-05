@@ -17,6 +17,7 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { orderPracticeQuestions, readShuffleToggle, shuffledOrder } from './practice-order.js';
 import { TreeRenderer, computeTreeState, hitTestFruits } from './tree-engine.js';
+import { countTreeWords, normalizeAnswerText, treeWordCounterLabel } from './tree-words.js';
 
 /* =====================================================================
    Constants
@@ -48,6 +49,11 @@ const RPC_MESSAGES = {
   // Phase 5.8 — practice-by-code refusals.
   PRACTICE_NOT_ALLOWED: 'Giáo viên chưa mở đề này cho chế độ luyện tập.',
   PRACTICE_EMPTY: 'Đề này chưa có câu hỏi nào để luyện tập.',
+  // Phase 7.4 — Tree of Knowledge participation.
+  SESSION_NOT_FOUND: 'Phiên hoạt động không tồn tại hoặc đã bị xoá.',
+  SESSION_INACTIVE: 'Phiên hoạt động đã kết thúc. Cảm ơn bạn đã tham gia!',
+  IDENTITY_REQUIRED: 'Vui lòng chọn tên của bạn trước khi gửi.',
+  MIN_WORDS_NOT_MET: 'Câu trả lời chưa đủ số từ tối thiểu.',
 };
 
 /* =====================================================================
@@ -147,6 +153,18 @@ const state = {
   treeRenderer: null,
   treeData: null,
   treeHighlightId: null,
+  /**
+   * Phase 7.4 — the loaded tree activity. `treeSession` holds the RPC's
+   * `session` object plus `class_name`/`total_students`; `treeSubmissions` is the
+   * live submission list (initial fetch merged with Realtime deltas).
+   */
+  treeSession: null,
+  treeSubmissions: [],
+  treeMembers: [],
+  treeIdentity: null,       // { student_code, full_name } once checked in
+  treeChannel: null,
+  /** True once the student has submitted; enables the "update answer" flow. */
+  treeSubmitted: false,
 };
 
 /* =====================================================================
@@ -2141,11 +2159,16 @@ function bindRosterControls() {
 }
 
 /* =====================================================================
-   Tree of Knowledge screen (Phase 7.2)
+   Tree of Knowledge screen (Phase 7.2 renderer / Phase 7.4 interaction)
    =====================================================================
    Thin DOM shell over the dependency-free engine. The engine owns all geometry
    and drawing; this layer only (a) computes the state from session data, (b)
-   owns the renderer lifecycle, and (c) maps pointer events onto the canvas.
+   owns the renderer lifecycle, (c) maps pointer events onto the canvas, and
+   (d) drives the check-in -> workspace -> submit flow.
+
+   The screen has TWO mutually exclusive states, toggled by `setTreeView`:
+     #treeCheckinForm — pick your name from the class roster
+     #treeWorkspace   — live canvas + answer box
    ===================================================================== */
 
 /** Lazily created renderer for #tree-preview-canvas. */
@@ -2175,6 +2198,18 @@ function pointerToCanvas(event) {
   };
 }
 
+/** Renders the currently selected fruit into #treeFruitInfo (or hides it). */
+function showFruitInfo(fruit) {
+  const node = $('treeFruitInfo');
+  if (!node) return;
+  if (!fruit) { hide(node); node.textContent = ''; return; }
+
+  const mine = state.treeIdentity && fruit.student_code === state.treeIdentity.student_code;
+  const who = mine ? `Quả của bạn (#${fruit.fruit_index})` : `${fruit.student_name} (#${fruit.fruit_index})`;
+  node.textContent = `${who} — ${fruit.word_count} từ`;
+  show(node);
+}
+
 /** Highlights the fruit under the cursor and exposes its data as a tooltip. */
 function onTreePointerMove(event) {
   const renderer = state.treeRenderer;
@@ -2192,6 +2227,7 @@ function onTreePointerMove(event) {
   canvas.title = hit
     ? `${hit.student_name} (${hit.student_code}) — ${hit.word_count} từ`
     : '';
+  showFruitInfo(hit);
   renderer.setHighlight(nextId);
 }
 
@@ -2203,13 +2239,14 @@ function onTreePointerDown(event) {
   if (!point) return;
   const hit = hitTestFruits(renderer.fruitAnchors, point.x, point.y);
   state.treeHighlightId = hit ? hit.id : null;
+  showFruitInfo(hit);
   renderer.setHighlight(state.treeHighlightId);
 }
 
 /**
- * Renders a tree session.
+ * Renders a tree session and updates the participation/vitality badges.
  *
- * @param {object} session  `{ seed, totalStudents, timeLimitMinutes, createdAt }`
+ * @param {object} session  Normalised: `{ seed, totalStudents, timeLimitMinutes, createdAt }`.
  * @param {object[]} submissions  Rows from `tree_submissions`.
  * @param {boolean} animate Whether to start the idle breeze.
  */
@@ -2229,10 +2266,17 @@ function renderTree(session, submissions, animate) {
 
   const subtitle = $('treeSubtitle');
   if (subtitle) {
+    subtitle.textContent = `Lớp ${session.className || ''}`.trim();
+  }
+
+  const progressBadge = $('treeProgressBadge');
+  if (progressBadge) {
     const percent = Math.round(treeData.participation * 100);
-    subtitle.textContent =
-      `${treeData.stageLabel} — ${treeData.k}/${treeData.n} học sinh tham gia (${percent}%)`
-      + ` · Sức sống ${Math.round(treeData.vitality * 100)}%`;
+    progressBadge.textContent = `🌿 ${treeData.k}/${treeData.n} bạn đã nộp (${percent}%)`;
+  }
+  const vitalityBadge = $('treeVitalityBadge');
+  if (vitalityBadge) {
+    vitalityBadge.textContent = `Sức sống: ${Math.round(treeData.vitality * 100)}%`;
   }
 
   if (animate === false) {
@@ -2251,6 +2295,369 @@ function showTree(session, submissions, animate) {
   return renderTree(session, submissions, animate);
 }
 
+/** Toggles between the check-in card and the interactive workspace. */
+function setTreeView(view) {
+  if (view === 'workspace') {
+    hide($('treeCheckinForm'));
+    show($('treeWorkspace'));
+  } else {
+    show($('treeCheckinForm'));
+    hide($('treeWorkspace'));
+  }
+}
+
+/** Non-blocking status banner inside the workspace. */
+function treeStatus(message, kind) {
+  const node = $('treeStatusMessage');
+  if (!node) return;
+  node.className = 'alert hidden';
+  if (!message) { node.textContent = ''; return; }
+  node.classList.remove('hidden');
+  if (kind) node.classList.add(`alert--${kind}`);
+  node.textContent = message;
+}
+
+/** Error banner inside the check-in card. */
+function treeCheckinError(message) {
+  const node = $('treeCheckinError');
+  if (!node) return;
+  if (!message) { hide(node); node.textContent = ''; return; }
+  node.textContent = message;
+  show(node);
+}
+
+/**
+ * Phase 7.4 — opens a tree activity from `?session=`/`?tree=`.
+ *
+ * Fired-and-forgotten from `boot()` (like `prefillFromUrl`): the RPC drives the
+ * whole tree screen, so `boot()` continues wiring the exam form meanwhile. A
+ * failure is contained here and never blocks the exam flow.
+ */
+function loadTreeFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const sessionId = params.get('session') || params.get('tree');
+  if (!sessionId) return false;
+  loadTreeActivity(sessionId);
+  return true;
+}
+
+/**
+ * Loads a tree session and shows the check-in screen.
+ *
+ * Steps: (1) fetch the sanitised session payload, (2) show the question and the
+ * candidate list, (3) pre-fetch existing submissions so the tree is already
+ * populated before Realtime connects, (4) subscribe for live growth.
+ */
+async function loadTreeActivity(sessionId) {
+  // A URL is never trusted: the RPC takes a uuid, so anything else would be a
+  // wasted round-trip and an opaque PostgREST cast error.
+  if (!isUuid(sessionId)) {
+    showTreeError('Liên kết tham gia không hợp lệ.');
+    return;
+  }
+
+  show($('treeScreen'));
+  setTreeView('checkin');
+  treeCheckinError('');
+  $('treeCheckinTitle').textContent = 'Đang tải hoạt động…';
+  $('treeCheckinQuestion').textContent = '';
+  $('treeCheckinMeta').textContent = '';
+
+  const result = await callRpc('get_public_tree_session', { p_session_id: sessionId });
+
+  if (!result.ok) {
+    showTreeError('Không kết nối được máy chủ. Vui lòng thử lại.');
+    return;
+  }
+
+  const payload = result.data || {};
+  if (payload.success !== true) {
+    showTreeError(rpcMessage(payload.code, payload.message));
+    return;
+  }
+
+  const session = payload.session || {};
+  state.treeSession = {
+    id: session.id,
+    title: session.title || 'Cây Tri Thức',
+    questionText: session.question_text || '',
+    minWords: Number(session.min_words) || 1,
+    timeLimitMinutes: Number(session.time_limit_minutes) || 0,
+    seed: Number(session.tree_seed) || 0,
+    createdAt: session.created_at,
+    className: payload.class_name || '',
+    totalStudents: Math.max(Number(payload.total_students) || 0, 1),
+  };
+  state.treeMembers = Array.isArray(payload.candidates) ? payload.candidates : [];
+  state.treeSubmissions = [];
+  state.treeIdentity = null;
+  state.treeSubmitted = false;
+
+  // Check-in copy.
+  $('treeCheckinTitle').textContent = state.treeSession.title;
+  $('treeCheckinQuestion').textContent = state.treeSession.questionText;
+  $('treeCheckinMeta').textContent =
+    `${state.treeSession.className} · Tối thiểu ${state.treeSession.minWords} từ`
+    + ` · Thời gian ${state.treeSession.timeLimitMinutes} phút`;
+  populateTreeStudentSelect();
+  $('treeAnswerInput').value = '';
+
+  // Pre-fetch so the canvas is already correct before Realtime connects (the
+  // subscription only carries deltas — a student joining mid-lesson would
+  // otherwise see an empty tree until the next submission).
+  await loadTreeSubmissions(sessionId);
+  subscribeTreeChannel(sessionId);
+
+  // Re-render even while still on the check-in card: it is behind the card, but
+  // showing it means entering the workspace needs no second fetch.
+  showTree(state.treeSession, state.treeSubmissions, true);
+}
+
+/** Replaces the check-in view with a fatal error message. */
+function showTreeError(message) {
+  setTreeView('checkin');
+  $('treeCheckinTitle').textContent = 'Không thể tham gia';
+  $('treeCheckinQuestion').textContent = '';
+  $('treeCheckinMeta').textContent = '';
+  clear($('treeStudentSelect'));
+  $('treeStudentSelect').appendChild(el('option', { text: '-- Chọn tên bạn --', attrs: { value: '' } }));
+  $('btnEnterTree').disabled = true;
+  treeCheckinError(message);
+}
+
+/** Fills #treeStudentSelect with the roster candidates. */
+function populateTreeStudentSelect() {
+  const select = $('treeStudentSelect');
+  clear(select);
+  select.appendChild(el('option', { text: '-- Chọn tên bạn --', attrs: { value: '' } }));
+  state.treeMembers.forEach((member) => {
+    select.appendChild(el('option', {
+      text: member.full_name,
+      attrs: { value: member.student_code },
+    }));
+  });
+  $('btnEnterTree').disabled = true;
+}
+
+/** Fetches the session's submissions into `state.treeSubmissions`. */
+async function loadTreeSubmissions(sessionId) {
+  const { data, error } = await state.supabase
+    .from('tree_submissions')
+    .select('id, session_id, student_code, student_name, answer_text, word_count, submitted_at, fruit_index')
+    .eq('session_id', sessionId)
+    .order('fruit_index', { ascending: true });
+
+  if (error) {
+    console.error('tree_submissions fetch failed', error);
+    return;
+  }
+  state.treeSubmissions = Array.isArray(data) ? data : [];
+}
+
+/**
+ * Subscribes to Realtime on `tree_submissions` (D2).
+ *
+ * Every accepted answer is broadcast, so the whole class watches the tree grow.
+ * The filter is server-side (`session_id=eq`), but rows are still re-checked
+ * client-side: with a replica-identity fallback an UPDATE record can arrive
+ * without the filterable column, and a stale channel from a previous session
+ * must never leak a fruit into this one.
+ */
+function subscribeTreeChannel(sessionId) {
+  unsubscribeTreeChannel();
+
+  const channel = state.supabase
+    .channel(`tree-student-${sessionId}`)
+    .on('postgres_changes', {
+      event: '*',
+      schema: 'public',
+      table: 'tree_submissions',
+      filter: `session_id=eq.${sessionId}`,
+    }, handleRealtimeSubmission)
+    .subscribe();
+
+  state.treeChannel = channel;
+}
+
+function unsubscribeTreeChannel() {
+  if (state.treeChannel && state.supabase) {
+    state.supabase.removeChannel(state.treeChannel);
+  }
+  state.treeChannel = null;
+}
+
+/** Merges one Realtime payload and repaints the canvas immediately. */
+function handleRealtimeSubmission(payload) {
+  const session = state.treeSession;
+  if (!session) return;
+
+  const eventType = payload.eventType;
+
+  if (eventType === 'DELETE') {
+    const removedId = payload.old && payload.old.id;
+    if (!removedId) return;
+    state.treeSubmissions = state.treeSubmissions.filter((row) => row.id !== removedId);
+  } else {
+    const row = payload.new;
+    if (!row || !row.id) return;
+    // Guard against an unfiltered/fallback record for another session.
+    if (row.session_id !== session.id) return;
+
+    const index = state.treeSubmissions.findIndex((existing) => existing.id === row.id);
+    if (index === -1) {
+      // New fruit; keep fruit_index order so the tree's layout matches every
+      // other client's (the engine sorts internally, but the cache stays tidy).
+      const next = state.treeSubmissions.slice();
+      next.push(row);
+      next.sort((a, b) => (a.fruit_index || 0) - (b.fruit_index || 0));
+      state.treeSubmissions = next;
+    } else {
+      const next = state.treeSubmissions.slice();
+      next[index] = row;
+      state.treeSubmissions = next;
+    }
+  }
+
+  renderTree(session, state.treeSubmissions, true);
+}
+
+/** Recomputes the counter and the submit button's enabled state. */
+function updateTreeWordCounter() {
+  const session = state.treeSession;
+  if (!session) return;
+
+  const words = countTreeWords($('treeAnswerInput').value);
+  const counter = $('treeWordCounter');
+  counter.textContent = treeWordCounterLabel(words, session.minWords);
+  counter.classList.toggle('is-met', words >= session.minWords);
+  counter.classList.toggle('is-short', words > 0 && words < session.minWords);
+
+  $('btnSubmitTreeAnswer').disabled = words < session.minWords;
+}
+
+/** Check-in: pick a name, then enter the workspace. */
+function enterTreeWorkspace() {
+  const studentCode = $('treeStudentSelect').value;
+  const session = state.treeSession;
+  if (!session) return;
+
+  const member = state.treeMembers.find((m) => m.student_code === studentCode);
+  if (!member) { treeCheckinError('Vui lòng chọn tên của bạn trong danh sách.'); return; }
+
+  state.treeIdentity = { student_code: member.student_code, full_name: member.full_name };
+  treeCheckinError('');
+  setTreeView('workspace');
+
+  // The canvas was hidden until now, so its CSS box had no size. Re-render AFTER
+  // the workspace is visible so `resize()` reads a real clientHeight.
+  renderTree(session, state.treeSubmissions, true);
+
+  const reminder = $('treeQuestionReminder');
+  if (reminder) reminder.textContent = session.questionText;
+
+  // Mark the student's own fruit once it exists (they may be re-joining).
+  const mine = state.treeSubmissions.find(
+    (row) => row.student_code === member.student_code,
+  );
+  if (mine) {
+    state.treeSubmitted = true;
+    $('treeAnswerInput').value = mine.answer_text || '';
+    state.treeHighlightId = mine.id;
+    state.treeRenderer.setHighlight(mine.id);
+  }
+
+  updateTreeWordCounter();
+  $('treeAnswerInput').focus();
+}
+
+/**
+ * Submits (or updates) the student's answer.
+ *
+ * On `SIMILARITY_EXCEEDED` the textarea is deliberately NOT cleared — the whole
+ * point is for the student to rephrase what they just wrote. On success the
+ * student's own fruit is highlighted so they can find it on a crowded tree.
+ */
+async function submitTreeAnswer() {
+  const session = state.treeSession;
+  const identity = state.treeIdentity;
+  if (!session || !identity) return;
+
+  const answerText = normalizeAnswerText($('treeAnswerInput').value);
+  const words = countTreeWords(answerText);
+  if (words < session.minWords) {
+    updateTreeWordCounter();
+    return;
+  }
+
+  const button = $('btnSubmitTreeAnswer');
+  button.disabled = true;
+  treeStatus('Đang gửi câu trả lời…', 'info');
+
+  const result = await callRpc('submit_tree_answer', {
+    p_session_id: session.id,
+    p_student_code: identity.student_code,
+    p_student_name: identity.full_name,
+    p_answer_text: answerText,
+  });
+
+  if (!result.ok) {
+    treeStatus('Không gửi được câu trả lời. Vui lòng kiểm tra kết nối và thử lại.', 'error');
+    button.disabled = false;
+    return;
+  }
+
+  const payload = result.data || {};
+
+  if (payload.success !== true) {
+    if (payload.code === 'SIMILARITY_EXCEEDED') {
+      const percent = payload.similarity_percent;
+      // Keep the textarea intact so the student can rephrase the SAME text.
+      treeStatus(
+        `⚠️ Câu trả lời của bạn trùng ${percent}% với một bài đã nộp. `
+        + 'Hãy diễn đạt lại theo cách của riêng bạn rồi gửi lại nhé!',
+        'warning',
+      );
+    } else if (payload.code === 'MIN_WORDS_NOT_MET') {
+      treeStatus(
+        `Câu trả lời cần tối thiểu ${session.minWords} từ (bạn mới nhập ${payload.current_words} từ).`,
+        'warning',
+      );
+    } else {
+      treeStatus(rpcMessage(payload.code, payload.message), 'error');
+    }
+    button.disabled = false;
+    return;
+  }
+
+  // --- success ------------------------------------------------------------
+  state.treeSubmitted = true;
+  const submissionId = payload.submission_id;
+  state.treeHighlightId = submissionId;
+
+  // The Realtime echo normally arrives within ~200ms. Refresh from the RPC's own
+  // response first so the student sees their fruit immediately even if the
+  // socket is slow — the merge by id makes the later echo a no-op.
+  await loadTreeSubmissions(session.id);
+  renderTree(session, state.treeSubmissions, true);
+  state.treeRenderer.setHighlight(submissionId);
+
+  treeStatus('🌱 Quả của bạn đã xuất hiện trên cây! Bạn có thể sửa và gửi lại trước khi hết giờ.', 'success');
+  button.disabled = false;
+  $('treeAnswerInput').focus();
+}
+
+/** Wires the tree screen's controls. Called once from `boot()`. */
+function bindTreeControls() {
+  $('treeStudentSelect').addEventListener('change', () => {
+    $('btnEnterTree').disabled = !$('treeStudentSelect').value;
+    treeCheckinError('');
+  });
+  $('btnEnterTree').addEventListener('click', enterTreeWorkspace);
+  $('treeAnswerInput').addEventListener('input', updateTreeWordCounter);
+  $('btnSubmitTreeAnswer').addEventListener('click', submitTreeAnswer);
+}
+
+
 async function boot() {
   initTheme();
 
@@ -2264,6 +2671,9 @@ async function boot() {
 
   $('loginForm').addEventListener('submit', handleLoginSubmit);
   bindRosterControls();
+  // Phase 7.4 — tree participation controls. Wired before the URL check so a
+  // bad link can still leave the student with a working (disabled) form.
+  bindTreeControls();
 
   // Phase 7.2 — re-measure on rotation/resize; the canvas is sized from its
   // CSS box, which does not reflow the backing store on its own.
@@ -2293,6 +2703,12 @@ async function boot() {
   $('certCloseBtn').addEventListener('click', closeCertificate);
   $('certPrintBtn').addEventListener('click', () => window.print());
   document.addEventListener('keydown', onKeyDown);
+
+  // Phase 7.4 — an explicit tree link wins over both the login form and a
+  // resumable exam: opening `?session=` IS the student's intent, and resuming
+  // would immediately hide the tree screen. The stored exam session is left
+  // untouched, so dropping the query string resumes it.
+  if (loadTreeFromUrl()) return;
 
   const resumed = await tryResumeSession();
   if (!resumed) {

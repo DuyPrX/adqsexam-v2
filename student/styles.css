@@ -223,6 +223,80 @@ body {
 }
 .tree-canvas { display: block; width: 100%; height: 100%; }
 
+/* ---------- Tree check-in (Phase 7.4) ---------- */
+.tree-checkin { display: flex; justify-content: center; padding: 8px 0; }
+.tree-checkin__card {
+  width: 100%; max-width: 520px;
+  display: grid; gap: 14px;
+  padding: 20px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.tree-checkin__eyebrow {
+  margin: 0; font-size: 12px; font-weight: 700; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--accent-text);
+}
+.tree-checkin__title { margin: 0; font-size: 19px; color: var(--text); }
+.tree-checkin__question {
+  margin: 0; padding: 12px 14px; border-radius: var(--radius-sm);
+  background: var(--surface-2); border: 1px solid var(--border);
+  font-size: 15px; font-weight: 600; line-height: 1.6; color: var(--text);
+  white-space: pre-wrap;
+}
+.tree-checkin__meta { margin: 0; font-size: 13px; color: var(--text-muted); }
+
+/* ---------- Tree interactive workspace (Phase 7.4) ---------- */
+.tree-workspace { display: flex; flex-direction: column; gap: 12px; }
+.tree-workspace__status { display: flex; flex-wrap: wrap; gap: 8px; }
+.tree-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 11px; border-radius: 999px;
+  font-size: 12.5px; font-weight: 700;
+  background: var(--accent-weak); color: var(--accent-text);
+}
+.tree-badge--vitality { background: var(--ok-weak); color: var(--ok); }
+
+/* The stage is sticky on a tall screen so the tree stays visible while the
+   student types, but collapses to a comfortable 35vh on mobile where a sticky
+   header would eat the whole viewport. */
+.tree-workspace .tree-screen__stage { aspect-ratio: auto; height: 35vh; min-height: 200px; }
+@media (min-width: 720px) {
+  .tree-workspace .tree-screen__stage {
+    position: sticky; top: 12px; z-index: 5;
+    height: 46vh; max-height: 520px;
+  }
+}
+
+.tree-fruit-info {
+  margin: 0; padding: 10px 12px; border-radius: var(--radius-sm);
+  background: var(--warn-weak); border: 1px solid var(--warn);
+  font-size: 13px; font-weight: 600; color: var(--warn);
+}
+
+.tree-answer {
+  display: grid; gap: 10px;
+  padding: 16px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.tree-answer__question { font-size: 13.5px; font-weight: 700; color: var(--text-muted); }
+.tree-answer__input {
+  width: 100%; padding: 11px 13px; resize: vertical;
+  font: inherit; font-size: 14.5px; line-height: 1.6;
+  color: var(--text); background: var(--surface);
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+}
+.tree-answer__input:focus { outline: none; border-color: var(--accent); box-shadow: var(--focus); }
+.tree-answer__input::placeholder { color: var(--text-faint); }
+.tree-answer__footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
+
+/* The counter turns amber at the threshold and green once met, so "can I submit
+   yet?" is answerable without reading the numbers. */
+.tree-word-counter {
+  font-size: 13px; font-weight: 700; color: var(--text-muted);
+  transition: color .2s ease;
+}
+.tree-word-counter.is-met { color: var(--ok); }
+.tree-word-counter.is-short { color: var(--warn); }
+
 /* ---------- practice options (Phase 5.9) ---------- */
 /* A whole-row <label> keeps the box and text clickable as one target and, being
    a flex row, stays aligned on both desktop and narrow mobile viewports. */

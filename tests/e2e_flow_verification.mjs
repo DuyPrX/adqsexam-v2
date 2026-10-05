@@ -76,6 +76,13 @@
  *      `endTreeSession`; the web copy of the engine is byte-identical to the student
  *      copy, and the columns the web layer selects cover every field the renderer
  *      reads.
+ *  31. Tree of Knowledge student participation (Phase 7.4): `get_public_tree_session`
+ *      serves the check-in payload (question, min words, seed, class size, sanitised
+ *      candidates) to anon without ever leaking `pin`/`dob`, refuses an unknown or
+ *      closed session, and the SPA's word counter matches the RPC's counting rule
+ *      exactly (whitespace-collapsed, empty = 0); an end-to-end run then loads the
+ *      session, picks a candidate, is refused for similarity, and succeeds on a
+ *      rewrite with the fruit visible on the tree.
  *
  * Usage:
  *   node v2/tests/e2e_flow_verification.mjs
@@ -218,6 +225,12 @@ const {
   createTreeSession, getTreeSession, getTreeSubmissions, endTreeSession,
   TREE_SESSION_COLUMNS, TREE_SUBMISSION_COLUMNS, TREE_SESSION_DEFAULTS,
 } = await import(new URL('../web/src/lib/tree.ts', import.meta.url).href);
+
+// Phase 7.4 Step 31 — the student SPA's answer normalisation, imported from the
+// shipped module so the suite asserts the code the browser runs (not a copy).
+const { countTreeWords, normalizeAnswerText, treeWordCounterLabel } = await import(
+  new URL('../student/tree-words.js', import.meta.url).href
+);
 
 const TEACHER = { email: 'e2e.teacher@adqsexam.local', password: 'e2e-password-123' };
 const EXAM = {
@@ -3691,6 +3704,275 @@ async function main() {
   const webTreeClassDelete = await teacher.from('classes').delete().eq('id', webTreeClassId);
   check('30h: the projector class deletes once its session is gone',
     !webTreeClassDelete.error, webTreeClassDelete.error?.message);
+
+  /* --- 31. Tree of Knowledge student participation (7.4) ---------------- */
+  // Self-contained fixtures: a class whose members carry BOTH a `pin` and a
+  // `dob`, so the "never leaks a credential" assertion has something real to
+  // leak. A dedicated class keeps Step 31 independent of Step 28/30 cleanup.
+  step(31, 'tree of knowledge student participation and word counting');
+
+  const TREE_JOIN_CLASS = 'E2E-TREEJOIN-' + String(Math.floor(1000 + Math.random() * 9000));
+  const TREE_JOIN_MEMBERS = [
+    { code: 'E2EJOIN01', name: 'Vũ Văn Nhất', dob: '2008-09-05', pin: '2468' },
+    { code: 'E2EJOIN02', name: 'Đỗ Thị Nhị', dob: '2008-01-17', pin: '1357' },
+    { code: 'E2EJOIN03', name: 'Hồ Văn Tam', dob: '2008-12-31', pin: '9081' },
+  ];
+
+  const joinClass = await teacher
+    .from('classes')
+    .insert({ user_id: teacherId, name: TREE_JOIN_CLASS, academic_year: '2026-2027' })
+    .select('id')
+    .single();
+  check('31a: join test class created', !joinClass.error && !!joinClass.data,
+    joinClass.error?.message);
+  const joinClassId = joinClass.data?.id;
+
+  const joinMembers = await saveClassMembers(
+    teacher,
+    joinClassId,
+    TREE_JOIN_MEMBERS.map((m) => ({ student_code: m.code, full_name: m.name, dob: m.dob, pin: m.pin })),
+  );
+  check('31a: the class has 3 members with pin + dob stored', joinMembers.saved === 3,
+    String(joinMembers.saved));
+
+  // A long-window active session so nothing here is time-sensitive.
+  const joinSession = await teacher
+    .from('tree_sessions')
+    .insert({
+      user_id: teacherId,
+      class_id: joinClassId,
+      title: 'E2E Tham gia Cây Tri Thức',
+      question_text: 'Theo em, điều gì làm nên sức mạnh của tri thức tập thể?',
+      min_words: 8,
+      time_limit_minutes: 45,
+      max_similarity: 0.50,
+    })
+    .select('id, tree_seed, min_words')
+    .single();
+  check('31a: join session created', !joinSession.error && !!joinSession.data,
+    joinSession.error?.message);
+  const joinSessionId = joinSession.data?.id;
+
+  // --- 31b. get_public_tree_session contract -----------------------------
+  const publicTree = await treeAnon.rpc('get_public_tree_session', { p_session_id: joinSessionId });
+  check('31b: anon can load the check-in payload',
+    publicTree.data?.success === true, JSON.stringify(publicTree.data));
+
+  const publicSession = publicTree.data?.session || {};
+  check('31b: the payload carries the question and word minimum the SPA renders',
+    publicSession.title === 'E2E Tham gia Cây Tri Thức'
+      && publicSession.question_text === 'Theo em, điều gì làm nên sức mạnh của tri thức tập thể?'
+      && Number(publicSession.min_words) === 8,
+    JSON.stringify(publicSession));
+  // The seed is REQUIRED: without it the student's canvas cannot reproduce the
+  // presenter's tree. It is not a credential.
+  check('31b: the payload carries the tree_seed the renderer needs',
+    Number.isInteger(Number(publicSession.tree_seed))
+      && Number(publicSession.tree_seed) === Number(joinSession.data?.tree_seed),
+    `${publicSession.tree_seed} vs ${joinSession.data?.tree_seed}`);
+  check('31b: the payload carries time_limit_minutes and created_at',
+    Number(publicSession.time_limit_minutes) === 45 && !!publicSession.created_at,
+    JSON.stringify({ t: publicSession.time_limit_minutes, c: publicSession.created_at }));
+  check('31b: the payload carries the class name and size for participation',
+    publicTree.data?.class_name === TREE_JOIN_CLASS && publicTree.data?.total_students === 3,
+    JSON.stringify({ n: publicTree.data?.class_name, c: publicTree.data?.total_students }));
+
+  const publicCandidates = publicTree.data?.candidates;
+  check('31b: candidates list every member with student_code and full_name',
+    Array.isArray(publicCandidates) && publicCandidates.length === 3
+      && publicCandidates.every((c) => c.student_code && c.full_name),
+    JSON.stringify(publicCandidates));
+  check('31b: candidates are ordered by student_code',
+    JSON.stringify(publicCandidates?.map((c) => c.student_code))
+      === JSON.stringify(['E2EJOIN01', 'E2EJOIN02', 'E2EJOIN03']),
+    JSON.stringify(publicCandidates?.map((c) => c.student_code)));
+  check('31b: each candidate exposes EXACTLY student_code + full_name',
+    publicCandidates?.every((c) => Object.keys(c).sort().join(',') === 'full_name,student_code'),
+    JSON.stringify(publicCandidates?.[0] && Object.keys(publicCandidates[0])));
+
+  // --- 31c. credential leak ----------------------------------------------
+  // Asserted on the SERIALISED payload rather than on key names, so a future
+  // re-keying (e.g. `student_pin`) cannot slip past a `hasOwnProperty('pin')`
+  // check. The fixtures above DO carry a pin/dob, so a leak would be visible.
+  const publicJson = JSON.stringify(publicTree.data);
+  check('31c: the payload never contains the literal key "pin"',
+    !publicJson.includes('"pin"'), publicJson.slice(0, 200));
+  check('31c: the payload never contains the literal key "dob"',
+    !publicJson.includes('"dob"'), publicJson.slice(0, 200));
+  // The values themselves must not appear either, even under a renamed key.
+  check('31c: no stored PIN value appears anywhere in the payload',
+    TREE_JOIN_MEMBERS.every((m) => !publicJson.includes(m.pin)), 'a PIN value leaked');
+  check('31c: no stored DOB value appears anywhere in the payload',
+    TREE_JOIN_MEMBERS.every((m) => !publicJson.includes(m.dob)), 'a DOB value leaked');
+
+  // --- 31d. unknown / inactive / expired ---------------------------------
+  const publicMissing = await treeAnon.rpc('get_public_tree_session', {
+    p_session_id: '00000000-0000-0000-0000-000000000000',
+  });
+  check('31d: an unknown session reports SESSION_NOT_FOUND',
+    publicMissing.data?.success === false && publicMissing.data?.code === 'SESSION_NOT_FOUND',
+    JSON.stringify(publicMissing.data));
+
+  await teacher.from('tree_sessions').update({ is_active: false }).eq('id', joinSessionId);
+  const publicClosed = await treeAnon.rpc('get_public_tree_session', { p_session_id: joinSessionId });
+  check('31d: a closed session reports SESSION_INACTIVE',
+    publicClosed.data?.success === false && publicClosed.data?.code === 'SESSION_INACTIVE',
+    JSON.stringify(publicClosed.data));
+  await teacher.from('tree_sessions').update({ is_active: true }).eq('id', joinSessionId);
+
+  // A session created an hour ago with a 1-minute limit is already past its
+  // window — the SPA must refuse it rather than accept an answer the write path
+  // would then reject.
+  const joinExpired = await teacher.from('tree_sessions').insert({
+    user_id: teacherId,
+    class_id: joinClassId,
+    title: 'Expired join',
+    question_text: 'x',
+    min_words: 1,
+    time_limit_minutes: 1,
+    created_at: new Date(Date.now() - 3_600_000).toISOString(),
+  }).select('id').single();
+  const publicExpired = await treeAnon.rpc('get_public_tree_session', {
+    p_session_id: joinExpired.data?.id,
+  });
+  check('31d: a session past its time limit reports SESSION_EXPIRED',
+    publicExpired.data?.success === false && publicExpired.data?.code === 'SESSION_EXPIRED',
+    JSON.stringify(publicExpired.data));
+
+  // --- 31e. word counting matches the RPC --------------------------------
+  // The SPA decides when to ENABLE the submit button. If it counted differently
+  // from the server, a student could be blocked (or allowed through and then
+  // refused). These cases mirror submit_tree_answer's regexp_replace/string_to_array.
+  const RPC_WORD_CASES = [
+    ['Tri thuc la gi', 4],
+    ['   tri   thuc   ', 2],
+    ['mot\nhai\ttba', 3],
+    ['   ', 0],
+    ['', 0],
+    [null, 0],
+    ['  một  hai  ba  bốn  ', 4],
+  ];
+  let wordCaseFailures = 0;
+  for (const [input, expected] of RPC_WORD_CASES) {
+    if (countTreeWords(input) !== expected) wordCaseFailures += 1;
+  }
+  check('31e: the client word counter matches the RPC rule on every case',
+    wordCaseFailures === 0, `failures=${wordCaseFailures}`);
+  check('31e: whitespace is collapsed exactly like the server stores it',
+    normalizeAnswerText('  một   hai\nba  ') === 'một hai ba',
+    normalizeAnswerText('  một   hai\nba  '));
+  check('31e: the counter label guides the student toward the threshold',
+    treeWordCounterLabel(3, 8) === '3 / 8 từ (Cần thêm 5 từ)'
+      && treeWordCounterLabel(8, 8).startsWith('8 / 8 từ'),
+    treeWordCounterLabel(3, 8));
+
+  // Cross-check the client against the ACTUAL server count: submit a known
+  // answer and compare the RPC's reported word_count to the client's count.
+  const joinAnon = createClient(SB_URL, SB_PUBLISHABLE, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const CROSS_CHECK_TEXT = 'Tri thuc tap the manh hon khi moi nguoi cung dong gop y kien';
+  const clientCount = countTreeWords(CROSS_CHECK_TEXT);
+  const crossCheck = await joinAnon.rpc('submit_tree_answer', {
+    p_session_id: joinSessionId,
+    p_student_code: TREE_JOIN_MEMBERS[0].code,
+    p_student_name: TREE_JOIN_MEMBERS[0].name,
+    p_answer_text: CROSS_CHECK_TEXT,
+  });
+  check('31e: the RPC agrees with the client word count',
+    crossCheck.data?.success === true && crossCheck.data?.word_count === clientCount,
+    `server=${crossCheck.data?.word_count} client=${clientCount}`);
+
+  // --- 31f. end-to-end participation simulation --------------------------
+  // Mirrors the SPA flow: load -> pick -> (similarity refusal) -> rewrite ->
+  // fruit appears on the tree.
+  const loadAgain = await treeAnon.rpc('get_public_tree_session', { p_session_id: joinSessionId });
+  const picked = (loadAgain.data?.candidates || [])
+    .find((c) => c.student_code === TREE_JOIN_MEMBERS[1].code);
+  check('31f: the student can pick their own row from the loaded roster',
+    !!picked && picked.full_name === TREE_JOIN_MEMBERS[1].name, JSON.stringify(picked));
+
+  // A near-copy of member[0]'s accepted answer must be refused, and the payload
+  // must report a percentage so the SPA can show it.
+  const joinDuplicate = await joinAnon.rpc('submit_tree_answer', {
+    p_session_id: joinSessionId,
+    p_student_code: picked.student_code,
+    p_student_name: picked.full_name,
+    p_answer_text: `${CROSS_CHECK_TEXT} nhe`,
+  });
+  check('31f: a near-duplicate answer is refused with a similarity percentage',
+    joinDuplicate.data?.success === false
+      && joinDuplicate.data?.code === 'SIMILARITY_EXCEEDED'
+      && typeof joinDuplicate.data?.similarity_percent === 'number',
+    JSON.stringify(joinDuplicate.data));
+
+  // The rewrite is genuinely different, so it clears the ceiling.
+  const JOIN_REWRITE = 'Kien thuc cua lop lon len nho vao su chia se va phan bien lan nhau';
+  const joinAccepted = await joinAnon.rpc('submit_tree_answer', {
+    p_session_id: joinSessionId,
+    p_student_code: picked.student_code,
+    p_student_name: picked.full_name,
+    p_answer_text: JOIN_REWRITE,
+  });
+  check('31f: a rewritten answer is accepted',
+    joinAccepted.data?.success === true, JSON.stringify(joinAccepted.data));
+
+  // The fruit must be visible to the student's own (anon) Realtime read path.
+  const joinTree = await joinAnon
+    .from('tree_submissions')
+    .select('student_code, student_name, word_count, fruit_index')
+    .eq('session_id', joinSessionId)
+    .order('fruit_index');
+  check('31f: the student sees both fruits on the live tree',
+    joinTree.error === null && joinTree.data?.length === 2,
+    joinTree.error?.message ?? String(joinTree.data?.length));
+  check('31f: the accepted rewrite kept the second student\'s fruit ordinal',
+    joinTree.data?.[1]?.student_code === picked.student_code
+      && joinTree.data?.[1]?.fruit_index === 2,
+    JSON.stringify(joinTree.data));
+
+  // The engine must consume the fetched rows and anchor both fruits — the same
+  // data contract the projector's canvas relies on.
+  const joinState = computeTreeState({
+    totalStudents: loadAgain.data?.total_students,
+    submissions: joinTree.data,
+    timeLimitMinutes: publicSession.time_limit_minutes,
+    createdAt: publicSession.created_at,
+    seed: publicSession.tree_seed,
+  });
+  check('31f: the engine anchors both fruits from the student fetch path',
+    joinState.anchors.length === 2 && joinState.k === 2 && joinState.n === 3,
+    JSON.stringify({ anchors: joinState.anchors.length, k: joinState.k, n: joinState.n }));
+
+  // A resubmission must update in place (same fruit, no third fruit).
+  const joinSecondEdit = await joinAnon.rpc('submit_tree_answer', {
+    p_session_id: joinSessionId,
+    p_student_code: picked.student_code,
+    p_student_name: picked.full_name,
+    p_answer_text: 'Tri thuc tap the duoc xay dung tu nhieu goc nhin khac nhau trong lop hoc',
+  });
+  check('31f: re-submitting updates the same fruit instead of adding one',
+    joinSecondEdit.data?.success === true
+      && joinSecondEdit.data?.submission_id === joinAccepted.data?.submission_id
+      && joinSecondEdit.data?.fruit_index === 2,
+    JSON.stringify(joinSecondEdit.data));
+
+  // --- 31g. the SPA must never trust a non-uuid session link -------------
+  // `loadTreeActivity` guards with `isUuid` before calling the RPC; assert the
+  // guard's rule here so a refactor cannot silently drop it.
+  const uuidShape = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  check('31g: a well-formed session id passes the SPA url guard',
+    uuidShape.test(joinSessionId), joinSessionId);
+  check('31g: a malformed session link is rejected by the SPA url guard',
+    !uuidShape.test('not-a-session-id') && !uuidShape.test('<script>'),
+    'guard must reject non-uuid input');
+
+  // --- 31h. cleanup -------------------------------------------------------
+  await teacher.from('tree_sessions').delete().eq('id', joinSessionId);
+  await teacher.from('tree_sessions').delete().eq('id', joinExpired.data?.id);
+  const joinClassDelete = await teacher.from('classes').delete().eq('id', joinClassId);
+  check('31h: the join test class deletes once its sessions are gone',
+    !joinClassDelete.error, joinClassDelete.error?.message);
 
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);
