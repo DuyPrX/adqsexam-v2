@@ -55,6 +55,13 @@ create table if not exists public.exams (
     -- official sitting never hands its answer keys to the student runtime; the
     -- teacher must explicitly enable practice.
     allow_practice   boolean      not null default false,
+    -- PIN policy (Phase 6.1): NONE | GLOBAL | INDIVIDUAL.
+    -- INDIVIDUAL is the default because it is the strict mode; it still degrades
+    -- to "pass" for a roster carrying neither pin nor dob, so pre-existing exams
+    -- keep working. See verify_and_acquire_session() step 3.b.
+    pin_mode         varchar(20)  not null default 'INDIVIDUAL',
+    -- Shared PIN, used only when pin_mode = 'GLOBAL'.
+    global_pin       varchar(50),
     created_at       timestamptz  not null default now()
 );
 
@@ -66,6 +73,15 @@ alter table public.exams add column if not exists deleted_at timestamptz;
 -- NOT NULL DEFAULT false is load-bearing: an exam that predates this column must
 -- stay locked down rather than silently becoming practiceable.
 alter table public.exams add column if not exists allow_practice boolean not null default false;
+-- Phase 6.1 PIN policy. NOT NULL DEFAULT 'INDIVIDUAL' is load-bearing for the
+-- same reason: a NULL pin_mode would make the branch logic in
+-- verify_and_acquire_session() fall through to "no verification at all".
+alter table public.exams add column if not exists pin_mode   varchar(20) not null default 'INDIVIDUAL';
+alter table public.exams add column if not exists global_pin varchar(50);
+-- `add constraint` is not re-runnable, so drop before adding.
+alter table public.exams drop constraint if exists chk_pin_mode;
+alter table public.exams add constraint chk_pin_mode
+    check (pin_mode in ('NONE', 'GLOBAL', 'INDIVIDUAL'));
 
 comment on table public.exams is 'Teacher-owned exam metadata. Multi-tenant via user_id + RLS.';
 
@@ -114,9 +130,17 @@ create table if not exists public.students (
     full_name    varchar(150) not null,
     class_name   varchar(50) not null,
     exam_code    varchar(6)  not null references public.exams (code) on delete cascade,
+    -- PIN secret (Phase 6.1). `pin` wins; `dob` is the DDMM fallback; both NULL
+    -- keeps a legacy row working (no PIN required) under pin_mode = INDIVIDUAL.
+    dob          date,
+    pin          varchar(50),
     created_at   timestamptz not null default now(),
     constraint students_code_exam_uniq unique (student_code, exam_code)
 );
+
+-- Idempotency for databases created before Phase 6.1.
+alter table public.students add column if not exists dob date;
+alter table public.students add column if not exists pin varchar(50);
 
 comment on table public.students is 'Per-exam candidate whitelist used by verify_and_acquire_session().';
 
@@ -175,6 +199,40 @@ create table if not exists public.proctoring_snapshots (
 
 comment on table public.proctoring_snapshots is 'Append-only proctoring captures. Written via record_proctoring_snapshot(); read by the owning teacher.';
 
+-- ----------------------------------------------------------------------------
+-- A.7  classes — teacher-owned roster container, independent of any exam
+--      (Phase 6.1). A class is maintained once and imported into as many exams
+--      as needed via import_class_to_exam().
+-- ----------------------------------------------------------------------------
+create table if not exists public.classes (
+    id            uuid         primary key default gen_random_uuid(),
+    user_id       uuid         not null references auth.users (id) on delete cascade,
+    name          varchar(100) not null,
+    academic_year varchar(20)  default '2026-2027',
+    created_at    timestamptz  default now(),
+    updated_at    timestamptz  default now(),
+    constraint classes_user_name_uniq unique (user_id, name)
+);
+
+comment on table public.classes is 'Teacher-owned class roster container (Phase 6.1). Imported into exams via import_class_to_exam().';
+
+-- ----------------------------------------------------------------------------
+-- A.8  class_members — the students belonging to a class (Phase 6.1).
+--      `pin` NULL -> DOB (DDMM) fallback; both NULL -> no PIN required.
+-- ----------------------------------------------------------------------------
+create table if not exists public.class_members (
+    id           uuid         primary key default gen_random_uuid(),
+    class_id     uuid         not null references public.classes (id) on delete cascade,
+    student_code varchar(50)  not null,
+    full_name    varchar(100) not null,
+    dob          date,
+    pin          varchar(50),
+    created_at   timestamptz  default now(),
+    constraint class_members_class_code_uniq unique (class_id, student_code)
+);
+
+comment on table public.class_members is 'Roster rows for a class. `pin` NULL -> DOB (DDMM) fallback; both NULL -> no PIN required.';
+
 
 -- ============================================================================
 -- SECTION A.7 — INDEXES
@@ -187,6 +245,10 @@ create index if not exists idx_active_sessions_exam_code     on public.active_se
 create index if not exists idx_active_sessions_heartbeat     on public.active_sessions (last_heartbeat);
 create index if not exists idx_exam_results_exam_code        on public.exam_results (exam_code);
 create index if not exists idx_proctoring_snapshots_exam     on public.proctoring_snapshots (exam_code, student_code);
+-- Phase 6.1 — RLS predicates and the roster join both filter on these.
+create index if not exists idx_classes_user_id               on public.classes (user_id);
+create index if not exists idx_class_members_class_id        on public.class_members (class_id);
+create index if not exists idx_class_members_student_code    on public.class_members (student_code);
 
 
 -- ============================================================================
@@ -204,6 +266,9 @@ alter table public.students             enable row level security;
 alter table public.active_sessions      enable row level security;
 alter table public.exam_results         enable row level security;
 alter table public.proctoring_snapshots enable row level security;
+-- Phase 6.1 — independent class rosters.
+alter table public.classes             enable row level security;
+alter table public.class_members       enable row level security;
 
 -- --- exams: full CRUD for the owning teacher ---------------------------------
 drop policy if exists exams_owner_all on public.exams;
@@ -304,6 +369,33 @@ create policy proctoring_snapshots_teacher_read on public.proctoring_snapshots
         )
     );
 
+-- --- classes / class_members: full CRUD for the owning teacher (Phase 6.1) ---
+drop policy if exists classes_owner_all on public.classes;
+create policy classes_owner_all on public.classes
+    for all
+    to authenticated
+    using (auth.uid() = user_id)
+    with check (auth.uid() = user_id);
+
+-- Membership is scoped through the parent class, mirroring how `students` is
+-- scoped through its exam.
+drop policy if exists class_members_owner_all on public.class_members;
+create policy class_members_owner_all on public.class_members
+    for all
+    to authenticated
+    using (
+        exists (
+            select 1 from public.classes c
+            where c.id = class_members.class_id and c.user_id = auth.uid()
+        )
+    )
+    with check (
+        exists (
+            select 1 from public.classes c
+            where c.id = class_members.class_id and c.user_id = auth.uid()
+        )
+    );
+
 -- --- Privilege hardening -----------------------------------------------------
 -- Students (anon) must hold no direct table access whatsoever.
 -- Supabase grants ALL on public tables to anon by default; revoke it.
@@ -313,6 +405,8 @@ revoke all on public.students             from anon;
 revoke all on public.active_sessions      from anon;
 revoke all on public.exam_results         from anon;
 revoke all on public.proctoring_snapshots from anon;
+revoke all on public.classes              from anon;
+revoke all on public.class_members        from anon;
 
 
 -- ============================================================================
@@ -324,7 +418,8 @@ revoke all on public.proctoring_snapshots from anon;
 
 -- ----------------------------------------------------------------------------
 -- C.1  verify_and_acquire_session
---      Whitelist verification + scheduling window + single-device lock + reload.
+--      Whitelist verification + PIN policy + scheduling window + single-device
+--      lock + reload tolerance.
 --      Returns: { success, session_token, message }
 --        SESSION_ACQUIRED        -> brand new session
 --        SESSION_RESUMED         -> same device reloaded (token matched)
@@ -333,14 +428,27 @@ revoke all on public.proctoring_snapshots from anon;
 --        EXAM_NOT_STARTED        -> now() is before starts_at
 --        EXAM_EXPIRED            -> now() is after ends_at
 --        EXAM_NOT_FOUND          -> exam is in the Trash (deleted_at set) or gone
+--        INVALID_PIN             -> pin_mode policy not satisfied (Phase 6.1)
+--
+--      Phase 6.1 adds `p_pin` and the three-mode PIN gate (step 3.b below).
+--
+--      NOTE ON THE SIGNATURE: the 6-argument version is DROPPED first. Adding a
+--      parameter to a function does NOT replace it — `create or replace` matches
+--      on the signature — so without the drop the old PIN-LESS overload would
+--      survive as a complete bypass (and a call matching both would even raise
+--      "is not unique"). Verified on PG15: both definitions survive a bare
+--      create-or-replace.
 -- ----------------------------------------------------------------------------
+drop function if exists public.verify_and_acquire_session(varchar, varchar, varchar, varchar, text, uuid);
+
 create or replace function public.verify_and_acquire_session(
     p_exam_code      varchar,
     p_student_code   varchar,
     p_full_name      varchar,
     p_class_name     varchar,
     p_device_info    text    default null,
-    p_existing_token uuid    default null
+    p_existing_token uuid    default null,
+    p_pin            varchar default null
 ) returns jsonb
 language plpgsql
 security definer
@@ -392,6 +500,50 @@ begin
        or lower(trim(v_student.class_name)) <> lower(trim(coalesce(p_class_name, ''))) then
         return jsonb_build_object('success', false, 'message', 'IDENTITY_MISMATCH');
     end if;
+
+    -- 3.b PIN gate (Phase 6.1). Placed AFTER identity so a wrong PIN can never
+    --     touch the session lock or the results table, and BEFORE the
+    --     duplicate-submission probe so a failed attempt is side-effect free.
+    --
+    --     Comparison uses `is distinct from` (null-safe): the naive
+    --     `trim(p_pin) = trim(global_pin)` evaluates to NULL when the teacher
+    --     selected GLOBAL but left global_pin unset, and the enclosing IF would
+    --     fall through — silently admitting EVERY candidate. An exam credential
+    --     must fail closed.
+    if v_exam.pin_mode = 'GLOBAL' then
+        if trim(coalesce(p_pin, '')) is distinct from trim(v_exam.global_pin) then
+            return jsonb_build_object(
+                'success', false,
+                'code',    'INVALID_PIN',
+                'message', 'Mã PIN hoặc ngày sinh (DDMM) không chính xác.'
+            );
+        end if;
+
+    elsif v_exam.pin_mode = 'INDIVIDUAL' then
+        if v_student.pin is not null and trim(v_student.pin) <> '' then
+            -- Per-student PIN takes precedence over DOB.
+            if trim(coalesce(p_pin, '')) is distinct from trim(v_student.pin) then
+                return jsonb_build_object(
+                    'success', false,
+                    'code',    'INVALID_PIN',
+                    'message', 'Mã PIN hoặc ngày sinh (DDMM) không chính xác.'
+                );
+            end if;
+
+        elsif v_student.dob is not null then
+            -- DOB fallback: DDMM, e.g. 2008-09-05 -> '0509'.
+            if trim(coalesce(p_pin, '')) is distinct from to_char(v_student.dob, 'DDMM') then
+                return jsonb_build_object(
+                    'success', false,
+                    'code',    'INVALID_PIN',
+                    'message', 'Mã PIN hoặc ngày sinh (DDMM) không chính xác.'
+                );
+            end if;
+        end if;
+        -- Neither pin nor dob set -> legacy/minimal row -> no PIN required.
+    end if;
+    -- pin_mode = 'NONE' -> no verification. The chk_pin_mode CHECK guarantees
+    -- pin_mode is one of the three, so no ELSE branch is reachable.
 
     -- 4. One submission per candidate, ever.
     if exists (
@@ -1522,12 +1674,80 @@ end;
 $$;
 
 
+-- ----------------------------------------------------------------------------
+-- C.14  import_class_to_exam  (teacher — authenticated, Phase 6.1)
+--       Copies one or more class rosters into an exam's `students` whitelist.
+--
+--       Re-importing the same class REFRESHES name/class/dob/pin rather than
+--       failing, so a teacher who fixes a typo in a class roster can simply
+--       re-import. Returns the number of rows inserted/updated.
+--
+--       SECURITY DEFINER with an explicit ownership check: auth.uid() reads the
+--       JWT (not the SQL role), so it still resolves to the calling teacher even
+--       though the body runs as the function owner.
+--
+--       Signalling: unlike the other RPCs here this RETURNS integer and RAISES
+--       on failure, by contract (a batch import is all-or-nothing for the UI).
+-- ----------------------------------------------------------------------------
+create or replace function public.import_class_to_exam(
+    p_exam_code varchar,
+    p_class_ids uuid[]
+) returns integer
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+    v_exam_id        uuid;
+    v_inserted_count integer;
+begin
+    -- 1. The caller must own this exam and it must not be trashed.
+    select e.id into v_exam_id
+      from public.exams e
+     where e.code = upper(trim(p_exam_code))
+       and e.user_id = auth.uid()
+       and e.deleted_at is null;
+    if v_exam_id is null then
+        raise exception 'UNAUTHORIZED_OR_EXAM_NOT_FOUND';
+    end if;
+
+    -- 2. Import. ON CONFLICT targets students_code_exam_uniq.
+    --    The join to `classes` re-checks ownership, so a class id belonging to
+    --    another teacher contributes nothing even if it was passed in.
+    insert into public.students (exam_code, student_code, full_name, class_name, dob, pin)
+    select
+        upper(trim(p_exam_code)),
+        cm.student_code,
+        cm.full_name,
+        c.name,
+        cm.dob,
+        cm.pin
+      from public.class_members cm
+      join public.classes c on c.id = cm.class_id
+     where cm.class_id = any(p_class_ids)
+       and c.user_id = auth.uid()
+    on conflict (exam_code, student_code) do update
+       set full_name  = excluded.full_name,
+           class_name = excluded.class_name,
+           dob        = excluded.dob,
+           pin        = excluded.pin;
+
+    get diagnostics v_inserted_count = row_count;
+    return coalesce(v_inserted_count, 0);
+end;
+$$;
+
+
 -- ============================================================================
 -- SECTION D — EXECUTE GRANTS
 -- ----------------------------------------------------------------------------
 -- RPCs are the ONLY surface exposed to students (anon). Tables stay revoked.
 -- ============================================================================
-revoke all on function public.verify_and_acquire_session(varchar, varchar, varchar, varchar, text, uuid)   from public;
+-- Phase 6.1: the 6-arg signature was DROPPED and replaced by the 7-arg one that
+-- adds p_pin. These lines must use the NEW signature — `revoke ... on function`
+-- raises "function ... does not exist" for a stale one, which would abort this
+-- entire script.
+revoke all on function public.verify_and_acquire_session(varchar, varchar, varchar, varchar, text, uuid, varchar)   from public;
 revoke all on function public.record_student_heartbeat(varchar, varchar, uuid, integer, integer, integer, integer) from public;
 revoke all on function public.get_student_exam_payload(varchar, uuid)                                      from public;
 revoke all on function public.submit_exam_result(varchar, varchar, uuid, jsonb, jsonb)                     from public;
@@ -1542,7 +1762,7 @@ revoke all on function public.purge_expired_exams()                             
 revoke all on function public.recalculate_exam_scores(varchar)                                             from public;
 revoke all on function public.get_practice_exam_payload(varchar, varchar, varchar)                          from public;
 
-grant execute on function public.verify_and_acquire_session(varchar, varchar, varchar, varchar, text, uuid)   to anon, authenticated;
+grant execute on function public.verify_and_acquire_session(varchar, varchar, varchar, varchar, text, uuid, varchar)   to anon, authenticated;
 grant execute on function public.record_student_heartbeat(varchar, varchar, uuid, integer, integer, integer, integer) to anon, authenticated;
 grant execute on function public.get_student_exam_payload(varchar, uuid)                                      to anon, authenticated;
 grant execute on function public.submit_exam_result(varchar, varchar, uuid, jsonb, jsonb)                     to anon, authenticated;
@@ -1557,6 +1777,13 @@ grant execute on function public.delete_exam(varchar)                           
 grant execute on function public.restore_exam(varchar)                                                         to authenticated;
 grant execute on function public.purge_expired_exams()                                                         to authenticated;
 grant execute on function public.recalculate_exam_scores(varchar)                                              to authenticated;
+-- Phase 6.1 — teacher-only. The explicit `from anon` revoke is REQUIRED:
+-- Supabase's database default privileges grant EXECUTE to `anon` directly, and an
+-- explicit grant survives `revoke ... from public` (verified locally: after a
+-- PUBLIC revoke, has_function_privilege('anon', ...) was still true).
+revoke all on function public.import_class_to_exam(varchar, uuid[])                                          from public;
+revoke all on function public.import_class_to_exam(varchar, uuid[])                                          from anon;
+grant execute on function public.import_class_to_exam(varchar, uuid[])                                       to authenticated;
 -- Internal helper: called only from other SECURITY DEFINER functions, never
 -- directly by a client (no EXECUTE grant to anon/authenticated).
 

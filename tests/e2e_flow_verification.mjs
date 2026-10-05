@@ -255,6 +255,27 @@ const PRACTICE_FULL_SCORE = 3; // 1.0 + 1.0 + 1.0
 // If the client failed to re-map, every answer would land on the wrong question.
 const SHUFFLE_ORDER = [2, 0, 1];
 
+// Phase 6.1 — class roster management + flexible PIN authentication.
+// One class, three members covering every INDIVIDUAL sub-case:
+//   E2EPIN01 -> custom PIN (must win over any DOB)
+//   E2EPIN02 -> no PIN, DOB 2008-09-05 -> '0509' fallback
+//   E2EPIN03 -> neither -> no PIN required (the legacy-row compatibility case)
+const PIN_EXAM = {
+  code: 'PIN' + String(Math.floor(100 + Math.random() * 900)),
+  title: 'E2E PIN Auth',
+  duration: 30,
+};
+const PIN_CLASS = {
+  name: 'E2E-PIN-' + String(Math.floor(1000 + Math.random() * 9000)),
+  academicYear: '2026-2027',
+};
+const PIN_MEMBER_CUSTOM = { code: 'E2EPIN01', fullName: 'Ngô Có Pin', dob: '2007-01-02', pin: 'CUSTOM9' };
+const PIN_MEMBER_DOB    = { code: 'E2EPIN02', fullName: 'Lý Ngày Sinh', dob: '2008-09-05', pin: null };
+const PIN_MEMBER_PLAIN  = { code: 'E2EPIN03', fullName: 'Trần Không Pin', dob: null, pin: null };
+const PIN_GLOBAL_VALUE  = 'SHARED1';
+// The DOB fallback is DDMM, so 2008-09-05 -> '0509'.
+const PIN_DOB_EXPECTED  = '0509';
+
 /* ---------------------------------------------------------------- harness */
 
 let passed = 0;
@@ -2100,6 +2121,208 @@ async function main() {
   check('a single question survives the shuffle',
     orderPracticeQuestions([practiceFixture[0]], true)[0].correctAnswer === 0);
 
+  /* --- 25. Class rosters + flexible PIN auth (Phase 6.1) ---------------- */
+  step(25, 'class roster import and NONE / GLOBAL / INDIVIDUAL PIN enforcement');
+
+  await teacher.from('exams').delete().eq('code', PIN_EXAM.code);
+
+  // --- 25a. class + member CRUD (teacher owns both) ----------------------
+  const classInsert = await teacher
+    .from('classes')
+    .insert({ user_id: teacherId, name: PIN_CLASS.name, academic_year: PIN_CLASS.academicYear })
+    .select('id, name, academic_year')
+    .single();
+  check('class created', !classInsert.error && !!classInsert.data, classInsert.error?.message);
+  const classId = classInsert.data?.id;
+
+  const memberRows = [
+    { class_id: classId, student_code: PIN_MEMBER_CUSTOM.code, full_name: PIN_MEMBER_CUSTOM.fullName, dob: PIN_MEMBER_CUSTOM.dob, pin: PIN_MEMBER_CUSTOM.pin },
+    { class_id: classId, student_code: PIN_MEMBER_DOB.code,    full_name: PIN_MEMBER_DOB.fullName,    dob: PIN_MEMBER_DOB.dob,    pin: PIN_MEMBER_DOB.pin },
+    { class_id: classId, student_code: PIN_MEMBER_PLAIN.code,  full_name: PIN_MEMBER_PLAIN.fullName,  dob: PIN_MEMBER_PLAIN.dob,  pin: PIN_MEMBER_PLAIN.pin },
+  ];
+  const membersInsert = await teacher.from('class_members').insert(memberRows).select('id, student_code, dob, pin');
+  check('3 class members created', !membersInsert.error && membersInsert.data?.length === 3,
+    membersInsert.error?.message ?? String(membersInsert.data?.length));
+  check('a member stores its custom PIN',
+    membersInsert.data?.find((m) => m.student_code === PIN_MEMBER_CUSTOM.code)?.pin === PIN_MEMBER_CUSTOM.pin,
+    JSON.stringify(membersInsert.data?.find((m) => m.student_code === PIN_MEMBER_CUSTOM.code)));
+  check('a member stores its DOB as a date',
+    membersInsert.data?.find((m) => m.student_code === PIN_MEMBER_DOB.code)?.dob === PIN_MEMBER_DOB.dob,
+    JSON.stringify(membersInsert.data?.find((m) => m.student_code === PIN_MEMBER_DOB.code)?.dob));
+  check('a member may have neither PIN nor DOB',
+    membersInsert.data?.find((m) => m.student_code === PIN_MEMBER_PLAIN.code)?.pin === null
+      && membersInsert.data?.find((m) => m.student_code === PIN_MEMBER_PLAIN.code)?.dob === null);
+
+  // The unique constraint must stop a duplicate roster row.
+  const dupMember = await teacher.from('class_members').insert({
+    class_id: classId, student_code: PIN_MEMBER_CUSTOM.code,
+    full_name: PIN_MEMBER_CUSTOM.fullName,
+  });
+  check('duplicate (class_id, student_code) is rejected', !!dupMember.error,
+    dupMember.error?.code);
+
+  // --- 25b. import_class_to_exam populates the exam whitelist ------------
+  const examInsert25 = await teacher
+    .from('exams')
+    .insert({ user_id: teacherId, code: PIN_EXAM.code, title: PIN_EXAM.title, duration_minutes: PIN_EXAM.duration })
+    .select('id, pin_mode')
+    .single();
+  check('PIN exam created', !examInsert25.error && !!examInsert25.data, examInsert25.error?.message);
+  check('pin_mode defaults to INDIVIDUAL', examInsert25.data?.pin_mode === 'INDIVIDUAL',
+    String(examInsert25.data?.pin_mode));
+
+  const importResult = await teacher.rpc('import_class_to_exam', {
+    p_exam_code: PIN_EXAM.code,
+    p_class_ids: [classId],
+  });
+  check('import_class_to_exam succeeded', !importResult.error, importResult.error?.message);
+  check('import reported 3 rows', Number(importResult.data) === 3, String(importResult.data));
+
+  const importedStudents = await teacher
+    .from('students')
+    .select('student_code, full_name, class_name, dob, pin')
+    .eq('exam_code', PIN_EXAM.code)
+    .order('student_code');
+  check('3 students landed on the exam roster', importedStudents.data?.length === 3,
+    String(importedStudents.data?.length));
+  check('imported rows carry the class name',
+    importedStudents.data?.every((s) => s.class_name === PIN_CLASS.name),
+    JSON.stringify(importedStudents.data?.map((s) => s.class_name)));
+  check('imported rows carry dob + pin',
+    importedStudents.data?.find((s) => s.student_code === PIN_MEMBER_CUSTOM.code)?.pin === PIN_MEMBER_CUSTOM.pin
+      && importedStudents.data?.find((s) => s.student_code === PIN_MEMBER_DOB.code)?.dob === PIN_MEMBER_DOB.dob,
+    JSON.stringify(importedStudents.data));
+
+  // Re-import must REFRESH, not duplicate or fail.
+  const reImport = await teacher.rpc('import_class_to_exam', {
+    p_exam_code: PIN_EXAM.code,
+    p_class_ids: [classId],
+  });
+  check('re-import is idempotent (3 rows still)', !reImport.error && Number(reImport.data) === 3,
+    reImport.error?.message ?? String(reImport.data));
+  const afterReImport = await teacher
+    .from('students').select('student_code').eq('exam_code', PIN_EXAM.code);
+  check('re-import did not duplicate roster rows', afterReImport.data?.length === 3,
+    String(afterReImport.data?.length));
+
+  // Import must refuse an exam the caller does not own.
+  await teacher.from('exams').update({ deleted_at: new Date().toISOString() }).eq('code', PIN_EXAM.code);
+  const importTrashed = await teacher.rpc('import_class_to_exam', {
+    p_exam_code: PIN_EXAM.code, p_class_ids: [classId],
+  });
+  check('import refuses a trashed exam', !!importTrashed.error
+    && String(importTrashed.error.message).includes('UNAUTHORIZED_OR_EXAM_NOT_FOUND'),
+    importTrashed.error?.message);
+  await teacher.from('exams').update({ deleted_at: null }).eq('code', PIN_EXAM.code);
+
+  const importUnknown = await teacher.rpc('import_class_to_exam', {
+    p_exam_code: 'NOPE99', p_class_ids: [classId],
+  });
+  check('import refuses an unknown exam', !!importUnknown.error
+    && String(importUnknown.error.message).includes('UNAUTHORIZED_OR_EXAM_NOT_FOUND'),
+    importUnknown.error?.message);
+
+  // --- 25c. PIN matrix ---------------------------------------------------
+  // The single-device lock (60s) would otherwise make a second attempt for the
+  // SAME student return SESSION_ACTIVE_ELSEWHERE and mask the PIN result, so
+  // each attempt starts from a clean session row. The lock itself is already
+  // covered by Steps 4/9; here we isolate the PIN gate.
+  const adminClient = createClient(SB_URL, SB_SECRET, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const tryLogin = async (student, pin, extra = {}) => {
+    await adminClient.from('active_sessions').delete()
+      .eq('exam_code', PIN_EXAM.code).eq('student_code', student.code);
+    return createClient(SB_URL, SB_PUBLISHABLE, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    }).rpc('verify_and_acquire_session', {
+      p_exam_code: PIN_EXAM.code,
+      p_student_code: student.code,
+      p_full_name: student.fullName,
+      p_class_name: PIN_CLASS.name,
+      p_device_info: 'e2e-pin/1.0',
+      p_existing_token: null,
+      p_pin: pin,
+      ...extra,
+    });
+  };
+
+  // INDIVIDUAL + custom PIN.
+  const wrongPin = await tryLogin(PIN_MEMBER_CUSTOM, 'WRONG');
+  check('INDIVIDUAL: a wrong custom PIN is refused', wrongPin.data?.success === false,
+    JSON.stringify(wrongPin.data));
+  check('INDIVIDUAL: a wrong custom PIN reports code INVALID_PIN',
+    wrongPin.data?.code === 'INVALID_PIN', String(wrongPin.data?.code));
+  check('INDIVIDUAL: the refusal message is the Vietnamese PIN copy',
+    String(wrongPin.data?.message).includes('Mã PIN'), String(wrongPin.data?.message));
+
+  const rightPin = await tryLogin(PIN_MEMBER_CUSTOM, PIN_MEMBER_CUSTOM.pin);
+  check('INDIVIDUAL: the correct custom PIN is accepted', rightPin.data?.success === true,
+    JSON.stringify(rightPin.data));
+  check('INDIVIDUAL: the correct PIN issues a session token', !!rightPin.data?.session_token);
+
+  // INDIVIDUAL + DOB fallback (no PIN set).
+  const wrongDob = await tryLogin(PIN_MEMBER_DOB, '9999');
+  check('INDIVIDUAL/DOB: a wrong DDMM is refused', wrongDob.data?.success === false
+    && wrongDob.data?.code === 'INVALID_PIN', JSON.stringify(wrongDob.data));
+  const rightDob = await tryLogin(PIN_MEMBER_DOB, PIN_DOB_EXPECTED);
+  check('INDIVIDUAL/DOB: the DDMM fallback (0509) is accepted', rightDob.data?.success === true,
+    JSON.stringify(rightDob.data));
+  // A custom PIN must WIN over DOB: the member's DOB digits are NOT accepted.
+  const dobInsteadOfPin = await tryLogin(PIN_MEMBER_CUSTOM, '0201');
+  check('INDIVIDUAL: DOB is rejected when a custom PIN exists',
+    dobInsteadOfPin.data?.success === false && dobInsteadOfPin.data?.code === 'INVALID_PIN',
+    JSON.stringify(dobInsteadOfPin.data));
+
+  // INDIVIDUAL + neither secret -> no PIN required (legacy compatibility).
+  const noSecret = await tryLogin(PIN_MEMBER_PLAIN, '');
+  check('INDIVIDUAL: no pin/dob means no PIN is required', noSecret.data?.success === true,
+    JSON.stringify(noSecret.data));
+
+  // GLOBAL.
+  await teacher.from('exams').update({ pin_mode: 'GLOBAL', global_pin: PIN_GLOBAL_VALUE }).eq('code', PIN_EXAM.code);
+  const globalWrong = await tryLogin(PIN_MEMBER_PLAIN, 'NOPE');
+  check('GLOBAL: a wrong shared PIN is refused', globalWrong.data?.success === false
+    && globalWrong.data?.code === 'INVALID_PIN', JSON.stringify(globalWrong.data));
+  // The member's own custom PIN must NOT work in GLOBAL mode — only the shared one.
+  const globalMemberPin = await tryLogin(PIN_MEMBER_CUSTOM, PIN_MEMBER_CUSTOM.pin);
+  check('GLOBAL: an individual PIN does not satisfy the shared policy',
+    globalMemberPin.data?.success === false, JSON.stringify(globalMemberPin.data));
+  const globalRight = await tryLogin(PIN_MEMBER_PLAIN, PIN_GLOBAL_VALUE);
+  check('GLOBAL: the shared PIN is accepted', globalRight.data?.success === true,
+    JSON.stringify(globalRight.data));
+
+  // GLOBAL with an unset global_pin must FAIL CLOSED (the null-safe comparison).
+  await teacher.from('exams').update({ global_pin: null }).eq('code', PIN_EXAM.code);
+  const globalUnset = await tryLogin(PIN_MEMBER_PLAIN, '');
+  check('GLOBAL: an unset shared PIN fails closed (no silent admission)',
+    globalUnset.data?.success === false && globalUnset.data?.code === 'INVALID_PIN',
+    JSON.stringify(globalUnset.data));
+
+  // NONE.
+  await teacher.from('exams').update({ pin_mode: 'NONE' }).eq('code', PIN_EXAM.code);
+  const noneEmpty = await tryLogin(PIN_MEMBER_CUSTOM, '');
+  check('NONE: an empty PIN is accepted', noneEmpty.data?.success === true, JSON.stringify(noneEmpty.data));
+  const noneGarbage = await tryLogin(PIN_MEMBER_DOB, 'literally-anything');
+  check('NONE: any PIN value is accepted (verification skipped)',
+    noneGarbage.data?.success === true, JSON.stringify(noneGarbage.data));
+
+  // The CHECK constraint must reject an invalid mode.
+  const badMode = await teacher.from('exams').update({ pin_mode: 'BOGUS' }).eq('code', PIN_EXAM.code);
+  check('an invalid pin_mode is rejected by chk_pin_mode', !!badMode.error,
+    badMode.error?.message ?? 'no error raised');
+
+  // --- 25d. the old 6-arg signature must be GONE (PIN-bypass regression) --
+  // If `create or replace` had left the PIN-less overload in place, a caller
+  // could simply omit p_pin and bypass the policy entirely.
+  await teacher.from('exams').update({ pin_mode: 'INDIVIDUAL', global_pin: null }).eq('code', PIN_EXAM.code);
+  const legacyCall = await tryLogin(PIN_MEMBER_CUSTOM, null);
+  // PostgREST resolves the 7-arg function via its defaults, so p_pin is NULL ->
+  // the INDIVIDUAL policy must still refuse (the member has a custom PIN).
+  check('omitting p_pin does NOT bypass the INDIVIDUAL policy',
+    legacyCall.data?.success === false && legacyCall.data?.code === 'INVALID_PIN',
+    JSON.stringify(legacyCall.data));
+
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);
   await teacher.from('exams').delete().eq('code', EXAM.code); // cascades
@@ -2108,6 +2331,9 @@ async function main() {
   await teacher.from('exams').delete().eq('code', HARD_DEL_EXAM.code);
   await teacher.from('exams').delete().eq('code', SOFT_DEL_EXAM.code);
   await teacher.from('exams').delete().eq('code', PRACTICE_EXAM.code);
+  await teacher.from('exams').delete().eq('code', PIN_EXAM.code);
+  // The class outlives its exams; delete it explicitly (members cascade).
+  await teacher.from('classes').delete().eq('id', classId);
 
   console.log(`\n${'='.repeat(74)}`);
   console.log(`RESULT: ${passed} passed, ${failed} failed`);
