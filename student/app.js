@@ -16,6 +16,7 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { orderPracticeQuestions, readShuffleToggle, shuffledOrder } from './practice-order.js';
+import { TreeRenderer, computeTreeState, hitTestFruits } from './tree-engine.js';
 
 /* =====================================================================
    Constants
@@ -142,6 +143,10 @@ const state = {
   rosterPinMode: null,
   /** Guards against out-of-order responses when the student retypes the code. */
   rosterRequestId: 0,
+  /** Phase 7.2 — Tree of Knowledge screen state. */
+  treeRenderer: null,
+  treeData: null,
+  treeHighlightId: null,
 };
 
 /* =====================================================================
@@ -2135,6 +2140,117 @@ function bindRosterControls() {
   $('student-select').addEventListener('change', onStudentSelected);
 }
 
+/* =====================================================================
+   Tree of Knowledge screen (Phase 7.2)
+   =====================================================================
+   Thin DOM shell over the dependency-free engine. The engine owns all geometry
+   and drawing; this layer only (a) computes the state from session data, (b)
+   owns the renderer lifecycle, and (c) maps pointer events onto the canvas.
+   ===================================================================== */
+
+/** Lazily created renderer for #tree-preview-canvas. */
+function treeRenderer() {
+  if (!state.treeRenderer) {
+    const canvas = $('tree-preview-canvas');
+    if (!canvas) return null;
+    state.treeRenderer = new TreeRenderer(canvas);
+    canvas.addEventListener('pointermove', onTreePointerMove);
+    canvas.addEventListener('pointerdown', onTreePointerDown);
+  }
+  return state.treeRenderer;
+}
+
+/** Converts a pointer event into canvas-local CSS pixels. */
+function pointerToCanvas(event) {
+  const canvas = $('tree-preview-canvas');
+  if (!canvas) return null;
+  const rect = canvas.getBoundingClientRect();
+  // The backing store may be scaled by devicePixelRatio, but the renderer draws
+  // in CSS pixels, so normalise against the CSS box rather than canvas.width.
+  const scaleX = rect.width ? canvas.clientWidth / rect.width : 1;
+  const scaleY = rect.height ? canvas.clientHeight / rect.height : 1;
+  return {
+    x: (event.clientX - rect.left) * scaleX,
+    y: (event.clientY - rect.top) * scaleY,
+  };
+}
+
+/** Highlights the fruit under the cursor and exposes its data as a tooltip. */
+function onTreePointerMove(event) {
+  const renderer = state.treeRenderer;
+  const canvas = $('tree-preview-canvas');
+  if (!renderer || !canvas) return;
+
+  const point = pointerToCanvas(event);
+  const hit = point ? hitTestFruits(renderer.fruitAnchors, point.x, point.y) : null;
+
+  canvas.style.cursor = hit ? 'pointer' : 'default';
+  const nextId = hit ? hit.id : null;
+  if (nextId === state.treeHighlightId) return;
+
+  state.treeHighlightId = nextId;
+  canvas.title = hit
+    ? `${hit.student_name} (${hit.student_code}) — ${hit.word_count} từ`
+    : '';
+  renderer.setHighlight(nextId);
+}
+
+/** Tapping a fruit toggles a persistent highlight (mobile has no hover). */
+function onTreePointerDown(event) {
+  const renderer = state.treeRenderer;
+  if (!renderer) return;
+  const point = pointerToCanvas(event);
+  if (!point) return;
+  const hit = hitTestFruits(renderer.fruitAnchors, point.x, point.y);
+  state.treeHighlightId = hit ? hit.id : null;
+  renderer.setHighlight(state.treeHighlightId);
+}
+
+/**
+ * Renders a tree session.
+ *
+ * @param {object} session  `{ seed, totalStudents, timeLimitMinutes, createdAt }`
+ * @param {object[]} submissions  Rows from `tree_submissions`.
+ * @param {boolean} animate Whether to start the idle breeze.
+ */
+function renderTree(session, submissions, animate) {
+  const renderer = treeRenderer();
+  if (!renderer || !session) return null;
+
+  const treeData = computeTreeState({
+    totalStudents: session.totalStudents,
+    submissions,
+    timeLimitMinutes: session.timeLimitMinutes,
+    createdAt: session.createdAt,
+    seed: session.seed,
+  });
+
+  state.treeData = treeData;
+
+  const subtitle = $('treeSubtitle');
+  if (subtitle) {
+    const percent = Math.round(treeData.participation * 100);
+    subtitle.textContent =
+      `${treeData.stageLabel} — ${treeData.k}/${treeData.n} học sinh tham gia (${percent}%)`
+      + ` · Sức sống ${Math.round(treeData.vitality * 100)}%`;
+  }
+
+  if (animate === false) {
+    renderer.render(treeData);
+  } else {
+    renderer.startAnimation(treeData);
+  }
+  return treeData;
+}
+
+/** Shows the tree screen and renders into it. */
+function showTree(session, submissions, animate) {
+  show($('treeScreen'));
+  // The renderer measures clientWidth/clientHeight, which is 0 while the section
+  // is display:none — so the first render must happen AFTER the screen is shown.
+  return renderTree(session, submissions, animate);
+}
+
 async function boot() {
   initTheme();
 
@@ -2148,6 +2264,12 @@ async function boot() {
 
   $('loginForm').addEventListener('submit', handleLoginSubmit);
   bindRosterControls();
+
+  // Phase 7.2 — re-measure on rotation/resize; the canvas is sized from its
+  // CSS box, which does not reflow the backing store on its own.
+  window.addEventListener('resize', () => {
+    if (state.treeData && state.treeRenderer) state.treeRenderer.render(state.treeData);
+  });
   $('practiceForm').addEventListener('submit', handlePracticeSubmit);
   $('tabOfficial').addEventListener('click', () => selectModeTab('official'));
   $('tabPractice').addEventListener('click', () => selectModeTab('practice'));

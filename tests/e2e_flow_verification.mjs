@@ -63,6 +63,13 @@
  *      and updates in place on resubmission; anon can read the tree through the
  *      SECURITY DEFINER RLS predicate but not tree_sessions itself; the class FK
  *      is RESTRICT; and tree_submissions is in the realtime publication.
+ *  29. Tree of Knowledge renderer (Phase 7.2): the procedural engine is strictly
+ *      deterministic on `tree_seed` (identical inputs -> byte-identical anchors and
+ *      palette, a different seed -> different anchors), maps participation onto the
+ *      five growth stages (P=0 -> seed, P=1.0 -> maximum recursion depth), places one
+ *      non-overlapping in-bounds fruit anchor per submission on any canvas, and
+ *      derives vitality from the mean submission latency (fast -> bright, at the
+ *      limit -> dull).
  *
  * Usage:
  *   node v2/tests/e2e_flow_verification.mjs
@@ -149,6 +156,15 @@ const { generateExamVariants } = await import(
 const { shuffledOrder, orderPracticeQuestions, readShuffleToggle } = await import(
   new URL('../student/practice-order.js', import.meta.url).href
 );
+
+// Phase 7.2 Step 29 — the Tree of Knowledge engine. `computeTreeState()` and the
+// pixel-layout/hit-test helpers are pure and DOM-free, so the suite exercises the
+// SAME module the student SPA ships. `TreeRenderer` is additionally driven through
+// a stub 2D context to prove `resize()` / `render()` / `getFruitAt()` work headless.
+const {
+  computeTreeState, createPRNG, layoutFruitAnchors, hitTestFruits,
+  themeForSeed, themeIndexForSeed, MAX_BRANCH_DEPTH, TREE_STAGES,
+} = await import(new URL('../student/tree-engine.js', import.meta.url).href);
 
 // Phase 5.5 Step 15 exercises the timezone helpers. `date.ts` has no imports of
 // its own, so it loads directly through the same extension-resolving hook.
@@ -3219,6 +3235,225 @@ async function main() {
   const treeClassDelete = await teacher.from('classes').delete().eq('id', treeClassId);
   check('28k: the class deletes once its tree sessions are gone',
     !treeClassDelete.error, treeClassDelete.error?.message);
+
+  /* --- 29. Tree of Knowledge procedural renderer (7.2) ------------------ */
+  // Pure engine checks: no DB, no DOM. `computeTreeState` must be a function of
+  // (seed, data) alone — same inputs -> byte-identical geometry, and the whole
+  // state must be free of clock/`Math.random` leakage.
+  step(29, 'tree of knowledge procedural renderer');
+
+  const TREE_EPOCH = Date.parse('2026-10-05T08:00:00Z');
+  const treeIso = (ms) => new Date(ms).toISOString();
+  /** Builds `count` submissions whose answers all land at `minutesEach`. */
+  const treeSubs = (count, minutesEach) => Array.from({ length: count }, (_, i) => ({
+    id: `sub-${i + 1}`,
+    student_code: `HS${String(i + 1).padStart(2, '0')}`,
+    student_name: `Học sinh ${i + 1}`,
+    word_count: 15 + (i % 5) * 3,
+    fruit_index: i + 1,
+    submitted_at: treeIso(TREE_EPOCH + minutesEach * 60_000),
+  }));
+  const treeBase = {
+    totalStudents: 10,
+    timeLimitMinutes: 45,
+    createdAt: treeIso(TREE_EPOCH),
+  };
+  /** Smallest edge-to-edge clearance between any two laid-out fruits. */
+  const minPairGap = (layout) => {
+    let gap = Infinity;
+    for (let i = 0; i < layout.length; i += 1) {
+      for (let j = i + 1; j < layout.length; j += 1) {
+        const dx = layout[j].x - layout[i].x;
+        const dy = layout[j].y - layout[i].y;
+        const d = Math.sqrt(dx * dx + dy * dy) - (layout[i].pixelRadius + layout[j].pixelRadius);
+        if (d < gap) gap = d;
+      }
+    }
+    return gap;
+  };
+
+  // --- 29a. determinism --------------------------------------------------
+  const treeStateA = computeTreeState({ ...treeBase, seed: 123456, submissions: treeSubs(6, 4) });
+  const treeStateB = computeTreeState({ ...treeBase, seed: 123456, submissions: treeSubs(6, 4) });
+  check('29a: identical seed + submissions yield a deeply equal state',
+    JSON.stringify(treeStateA) === JSON.stringify(treeStateB));
+  check('29a: identical inputs yield byte-identical fruit anchors [nx, ny, radius]',
+    JSON.stringify(treeStateA.anchors.map((x) => [x.nx, x.ny, x.radius]))
+      === JSON.stringify(treeStateB.anchors.map((x) => [x.nx, x.ny, x.radius])));
+  check('29a: identical inputs yield the same palette',
+    treeStateA.themeIndex === treeStateB.themeIndex
+      && treeStateA.theme.name === treeStateB.theme.name,
+    `${treeStateA.theme.name} vs ${treeStateB.theme.name}`);
+
+  const treeStateC = computeTreeState({ ...treeBase, seed: 123457, submissions: treeSubs(6, 4) });
+  check('29a: a different seed yields different anchor positions',
+    JSON.stringify(treeStateA.anchors.map((x) => [x.nx, x.ny]))
+      !== JSON.stringify(treeStateC.anchors.map((x) => [x.nx, x.ny])));
+
+  // The array's incidental order must not affect geometry: anchors are sorted by
+  // (fruit_index, student_code) before placement, so a reshuffled input is stable.
+  const treeShuffled = treeSubs(6, 4).reverse();
+  check('29a: anchor placement is independent of submission array order',
+    JSON.stringify(computeTreeState({ ...treeBase, seed: 123456, submissions: treeShuffled }).anchors)
+      === JSON.stringify(treeStateA.anchors));
+
+  // The PRNG spec pins `seed 0` onto the 123456 fallback (a DB default of
+  // `floor(random()*1000000)` can legitimately produce 0).
+  check('29a: createPRNG(0) falls back to the 123456 stream',
+    createPRNG(0)() === createPRNG(123456)());
+
+  // --- 29b. growth boundaries --------------------------------------------
+  const treeAt = (k, n, seed = 42) =>
+    computeTreeState({ ...treeBase, totalStudents: n, seed, submissions: treeSubs(k, 4) });
+
+  const treeSeedStage = treeAt(0, 10);
+  check('29b: P = 0 yields the seed stage with zero branch recursion',
+    treeSeedStage.participation === 0 && treeSeedStage.stage === 'seed'
+      && treeSeedStage.maxDepth === 0,
+    JSON.stringify({ p: treeSeedStage.participation, stage: treeSeedStage.stage, d: treeSeedStage.maxDepth }));
+
+  const treeFullStage = treeAt(10, 10);
+  check('29b: P = 1.0 yields the mature stage at the maximum recursion depth',
+    treeFullStage.participation === 1 && treeFullStage.stage === 'mature'
+      && treeFullStage.maxDepth === MAX_BRANCH_DEPTH,
+    JSON.stringify({ p: treeFullStage.participation, stage: treeFullStage.stage, d: treeFullStage.maxDepth }));
+
+  // Every interior boundary must land on the documented stage.
+  check('29b: interior participation boundaries map to sprout / sapling / maturing',
+    treeAt(1, 10).stage === 'sprout' && treeAt(1, 10).maxDepth === 1
+      && treeAt(2, 10).stage === 'sapling' && treeAt(2, 10).maxDepth === 3
+      && treeAt(5, 10).stage === 'maturing' && treeAt(5, 10).maxDepth === 5,
+    [treeAt(1, 10).stage, treeAt(2, 10).stage, treeAt(5, 10).stage].join(','));
+
+  check('29b: stage ladder deepens monotonically toward MAX_BRANCH_DEPTH',
+    TREE_STAGES.every((s, i) => i === 0 || s.maxDepth >= TREE_STAGES[i - 1].maxDepth)
+      && TREE_STAGES[TREE_STAGES.length - 1].maxDepth === MAX_BRANCH_DEPTH,
+    String(MAX_BRANCH_DEPTH));
+
+  // N = 0 must not divide by zero; the denominator is floored at 1.
+  const treeEmpty = computeTreeState({ ...treeBase, totalStudents: 0, seed: 1, submissions: [] });
+  check('29b: totalStudents = 0 is floored to 1 (no division by zero)',
+    treeEmpty.n === 1 && treeEmpty.participation === 0, JSON.stringify({ n: treeEmpty.n }));
+
+  // --- 29c. hitbox integrity ---------------------------------------------
+  // Every submission must produce exactly one anchor, inside the canvas bounding
+  // box, non-overlapping (positive clearance) even for a dense roster or a big class.
+  const treeHitboxCases = [
+    [30, 30, 320, 480],
+    [40, 45, 360, 640],
+    [12, 12, 2000, 1200],
+    [1, 1, 300, 300],
+  ];
+  let treeHitboxFailures = 0;
+  let treeWorstGap = Infinity;
+  for (const [k, n, w, h] of treeHitboxCases) {
+    const state = computeTreeState({ ...treeBase, totalStudents: n, seed: 777, submissions: treeSubs(k, 3) });
+    const layout = layoutFruitAnchors(state.anchors, w, h);
+    const inBounds = layout.every((p) => p.x - p.pixelRadius >= -0.001 && p.x + p.pixelRadius <= w + 0.001
+      && p.y - p.pixelRadius >= -0.001 && p.y + p.pixelRadius <= h + 0.001);
+    const normalisedInBounds = state.anchors.every((p) => p.nx - p.radius >= 0 && p.nx + p.radius <= 1
+      && p.ny - p.radius >= 0 && p.ny + p.radius <= 1);
+    const gap = minPairGap(layout);
+    if (gap < treeWorstGap) treeWorstGap = gap;
+    if (layout.length !== k || !inBounds || !normalisedInBounds || !(gap > 0)) treeHitboxFailures += 1;
+  }
+  check('29c: every submission yields exactly one anchor',
+    treeHitboxFailures === 0, `failures=${treeHitboxFailures}`);
+  check('29c: anchors stay inside the canvas bounding box at any canvas size',
+    treeHitboxFailures === 0, `failures=${treeHitboxFailures}`);
+  check('29c: no two fruit anchors overlap (strictly positive clearance)',
+    treeHitboxFailures === 0 && treeWorstGap > 0,
+    `worst gap = ${treeWorstGap.toExponential(3)}px`);
+
+  const treeAnchorsK = computeTreeState({ ...treeBase, seed: 55, submissions: treeSubs(5, 4) });
+  check('29c: anchors carry one identity per submission, sans duplicates',
+    treeAnchorsK.anchors.length === 5
+      && new Set(treeAnchorsK.anchors.map((x) => x.student_code)).size === 5,
+    String(treeAnchorsK.anchors.length));
+
+  // --- 29d. vitality decay ------------------------------------------------
+  // V = clamp(1 - (avgSubmissionTime / maxSeconds) * 0.6, 0.2, 1.0).
+  const treeVitalityAt = (minutes) =>
+    computeTreeState({ ...treeBase, seed: 9, submissions: treeSubs(8, minutes) }).vitality;
+
+  check('29d: k = 0 defaults to full vitality (no evidence to judge)',
+    computeTreeState({ ...treeBase, seed: 9, submissions: [] }).vitality === 1.0);
+  check('29d: prompt submissions (avg 5m of 45m) keep V >= 0.8',
+    treeVitalityAt(5) >= 0.8, treeVitalityAt(5).toFixed(4));
+  check('29d: submissions at the 45m limit drop V <= 0.4',
+    treeVitalityAt(45) <= 0.4, treeVitalityAt(45).toFixed(4));
+  check('29d: vitality never falls below the 0.2 floor',
+    treeVitalityAt(120) === 0.2, treeVitalityAt(120).toFixed(4));
+  check('29d: vitality degrades monotonically as submissions arrive later',
+    treeVitalityAt(5) > treeVitalityAt(15) && treeVitalityAt(15) > treeVitalityAt(30)
+      && treeVitalityAt(30) > treeVitalityAt(45),
+    [5, 15, 30, 45].map((m) => treeVitalityAt(m).toFixed(4)).join(' > '));
+
+  // --- 29e. palettes / archetypes ----------------------------------------
+  check('29e: the archetype is seed % 4 across all four themes and cycles',
+    themeIndexForSeed(0) === 0 && themeIndexForSeed(1) === 1
+      && themeIndexForSeed(2) === 2 && themeIndexForSeed(3) === 3
+      && themeIndexForSeed(4) === 0 && themeIndexForSeed(7) === 3,
+    [0, 1, 2, 3, 4, 7].map((s) => themeIndexForSeed(s)).join(','));
+  check('29e: a negative seed still selects a valid archetype',
+    themeIndexForSeed(-1) === 3 && themeForSeed(-1).index === 3, String(themeIndexForSeed(-1)));
+  check('29e: the four archetypes carry distinct palettes',
+    new Set([0, 1, 2, 3].map((i) => themeForSeed(i).fruit)).size === 4);
+
+  // --- 29f. TreeRenderer against a stub canvas ----------------------------
+  // A minimal Canvas 2D stand-in records the calls the renderer makes, so the
+  // real `resize()` / `render()` / `getFruitAt()` paths are exercised headless.
+  const treeGradient = () => ({ addColorStop() {} });
+  const treeCalls = { arc: 0, fill: 0, stroke: 0, fillRect: 0 };
+  const treeCtx = {
+    setTransform() {}, clearRect() {}, fillRect() { treeCalls.fillRect += 1; },
+    beginPath() {}, moveTo() {}, lineTo() {}, ellipse() {}, arc() { treeCalls.arc += 1; },
+    fill() { treeCalls.fill += 1; }, stroke() { treeCalls.stroke += 1; },
+    createLinearGradient: treeGradient, createRadialGradient: treeGradient,
+  };
+  const treeCanvasStub = {
+    width: 0, height: 0, clientWidth: 600, clientHeight: 450,
+    getContext: () => treeCtx,
+  };
+  const { TreeRenderer } = await import(new URL('../student/tree-engine.js', import.meta.url).href);
+  const treeRenderer = new TreeRenderer(treeCanvasStub);
+
+  const treeSized = treeRenderer.resize();
+  check('29f: resize() fits the backing store to the CSS box',
+    treeCanvasStub.width === 600 && treeCanvasStub.height === 450
+      && treeSized.width === 600 && treeSized.height === 450,
+    JSON.stringify(treeSized));
+
+  treeRenderer.render(treeStateA);
+  check('29f: render() caches one hitbox per fruit',
+    treeRenderer.fruitAnchors.length === treeStateA.anchors.length
+      && treeCalls.arc > 0 && treeCalls.fill > 0,
+    `anchors=${treeRenderer.fruitAnchors.length} arc=${treeCalls.arc}`);
+  check('29f: render() draws the tree (branches, foliage and fruits)',
+    treeCalls.stroke > 0 && treeCalls.fillRect > 0,
+    JSON.stringify(treeCalls));
+
+  const treeTarget = treeRenderer.fruitAnchors[2];
+  const treeHit = treeRenderer.getFruitAt(treeTarget.x, treeTarget.y);
+  check('29f: getFruitAt() resolves the fruit under a point',
+    !!treeHit && treeHit.student_code === treeStateA.anchors[2].student_code,
+    treeHit?.student_code);
+  check('29f: getFruitAt() returns null off-canvas',
+    treeRenderer.getFruitAt(-50, -50) === null);
+  check('29f: hitTestFruits agrees with the renderer cache',
+    hitTestFruits(treeRenderer.fruitAnchors, treeTarget.x, treeTarget.y)?.student_code
+      === treeHit?.student_code);
+
+  // Seed stage draws the mound + seed only, so there are no fruits to tap.
+  treeRenderer.render(treeSeedStage);
+  check('29f: the seed stage exposes no fruit hitboxes',
+    treeRenderer.fruitAnchors.length === 0, String(treeRenderer.fruitAnchors.length));
+
+  // Animation must degrade gracefully where requestAnimationFrame is absent (Node).
+  treeRenderer.startAnimation(treeStateA);
+  treeRenderer.stopAnimation();
+  check('29f: startAnimation/stopAnimation no-op safely without requestAnimationFrame',
+    treeRenderer.animFrameId === null);
 
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);

@@ -208,6 +208,20 @@
       </div>
     </section>
 
+    <!-- ================= TREE OF KNOWLEDGE ================= -->
+    <!-- Phase 7.2 — procedural Canvas 2D preview. The container is hidden until
+         a session is loaded; `TreeRenderer` sizes its backing store from
+         `clientWidth/clientHeight`, so the element must be laid out (not
+         `display:none`) before the first render. -->
+    <section id="treeScreen" class="screen tree-screen hidden" aria-labelledby="treeHeading">
+      <h1 id="treeHeading" class="tree-screen__title">Cây Tri Thức</h1>
+      <p id="treeSubtitle" class="tree-screen__subtitle"></p>
+      <div class="tree-screen__stage">
+        <canvas id="tree-preview-canvas" class="tree-canvas" width="800" height="600"
+                aria-label="Cây tri thức của lớp"></canvas>
+      </div>
+    </section>
+
     <!-- ================= RESULT ================= -->
     <section id="resultScreen" class="screen result hidden" aria-labelledby="resultHeading">
       <div class="result__ring-wrap">
