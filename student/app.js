@@ -70,7 +70,7 @@ function resolveWorkerBaseUrl() {
 
   // Unconfigured non-local deployment: surface a clear message instead of
   // letting the request fail as an opaque 404 against the static host.
-  return '';
+  return 'https://docx-extractor-v2.haleduy01.workers.dev';
 }
 
 /** Server RPC result codes -> Vietnamese copy shown to the student. */
