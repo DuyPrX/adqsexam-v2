@@ -127,6 +127,53 @@ export interface ClassMemberInput {
   pin: string | null;
 }
 
+/**
+ * A row of `public.tree_sessions` — one "Cây tri thức" activity (Phase 7.1).
+ *
+ * `tree_seed` is the whole reason the tree needs no stored geometry: every
+ * client feeds it to the Phase 7.2 engine and independently derives the exact
+ * same tree.
+ */
+export interface TreeSessionRow {
+  id: string;
+  user_id: string;
+  class_id: string;
+  title: string;
+  question_text: string;
+  min_words: number;
+  time_limit_minutes: number;
+  max_similarity: number;
+  tree_seed: number;
+  is_active: boolean;
+  created_at: string;
+  ended_at: string | null;
+}
+
+/**
+ * A row of `public.tree_submissions` — one student answer ("fruit").
+ *
+ * `submitted_at` is what the engine's vitality term averages over, and
+ * `word_count` scales the fruit's radius, so all three of the engine's inputs
+ * come straight off this row.
+ */
+export interface TreeSubmissionRow {
+  id: string;
+  session_id: string;
+  student_code: string;
+  student_name: string;
+  answer_text: string;
+  word_count: number;
+  submitted_at: string;
+  fruit_index: number;
+}
+
+/** A tree session plus the class context the projector needs (Phase 7.3). */
+export interface TreeSessionDetail extends TreeSessionRow {
+  class_name: string;
+  /** Class size `N` — the participation denominator. */
+  total_students: number;
+}
+
 export interface QuestionBankRow {
   id: string;
   user_id: string;

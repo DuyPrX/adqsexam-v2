@@ -23,6 +23,7 @@ import { parseStudentRosterFile } from '@/lib/excel';
 import { downloadStudentCsvTemplate } from '@/lib/studentTemplate';
 import type { ClassMemberInput, ClassMemberRow, ClassRow } from '@/lib/types';
 import { cn } from '@/lib/utils';
+import { CreateTreeSessionModal } from '@/components/tree/CreateTreeSessionModal';
 
 interface ClassRosterManagerProps {
   initialClasses: ClassRow[];
@@ -42,6 +43,8 @@ export function ClassRosterManager({ initialClasses }: ClassRosterManagerProps) 
   const [members, setMembers] = useState<ClassMemberRow[] | null>(null);
   const [isLoadingMembers, setIsLoadingMembers] = useState(false);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
+  /** Class whose Tree of Knowledge session is being launched (Phase 7.3). */
+  const [treeClass, setTreeClass] = useState<ClassRow | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyMemberId, setBusyMemberId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -216,6 +219,13 @@ export function ClassRosterManager({ initialClasses }: ClassRosterManagerProps) 
               <div className="flex items-center gap-2">
                 <button
                   type="button"
+                  onClick={() => setTreeClass(selected)}
+                  className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white transition hover:bg-emerald-500"
+                >
+                  🌱 Bắt đầu Cây Tri Thức
+                </button>
+                <button
+                  type="button"
                   onClick={() => downloadStudentCsvTemplate(selected.name)}
                   className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
                 >
@@ -311,6 +321,10 @@ export function ClassRosterManager({ initialClasses }: ClassRosterManagerProps) 
             void selectClass(created.id);
           }}
         />
+      )}
+
+      {treeClass && (
+        <CreateTreeSessionModal klass={treeClass} onClose={() => setTreeClass(null)} />
       )}
     </div>
   );

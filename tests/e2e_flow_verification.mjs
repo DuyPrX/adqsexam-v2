@@ -70,6 +70,12 @@
  *      non-overlapping in-bounds fruit anchor per submission on any canvas, and
  *      derives vitality from the mean submission latency (fast -> bright, at the
  *      limit -> dull).
+ *  30. Tree of Knowledge projector (Phase 7.3): the teacher-web data layer creates a
+ *      session with a server-minted `tree_seed`, loads it with the class size `N` the
+ *      participation ratio divides by, round-trips its submissions, and closes it via
+ *      `endTreeSession`; the web copy of the engine is byte-identical to the student
+ *      copy, and the columns the web layer selects cover every field the renderer
+ *      reads.
  *
  * Usage:
  *   node v2/tests/e2e_flow_verification.mjs
@@ -206,6 +212,12 @@ const { importClassToExam, saveClassMembers, listClasses } = await import(
 const { parseStudentRosterFile } = await import(
   new URL('../web/src/lib/excel.ts', import.meta.url).href
 );
+
+// Phase 7.3 Step 30 — the teacher-web Tree of Knowledge data layer.
+const {
+  createTreeSession, getTreeSession, getTreeSubmissions, endTreeSession,
+  TREE_SESSION_COLUMNS, TREE_SUBMISSION_COLUMNS, TREE_SESSION_DEFAULTS,
+} = await import(new URL('../web/src/lib/tree.ts', import.meta.url).href);
 
 const TEACHER = { email: 'e2e.teacher@adqsexam.local', password: 'e2e-password-123' };
 const EXAM = {
@@ -3454,6 +3466,231 @@ async function main() {
   treeRenderer.stopAnimation();
   check('29f: startAnimation/stopAnimation no-op safely without requestAnimationFrame',
     treeRenderer.animFrameId === null);
+
+  /* --- 30. Tree of Knowledge teacher data layer (7.3) ------------------- */
+  // The teacher-web persistence path, exercised through the SAME modules the
+  // projector imports (not a copy). A dedicated class keeps this step
+  // self-contained so it cannot be broken by an earlier step's cleanup order.
+  step(30, 'tree of knowledge teacher data layer and engine contract');
+
+  const TREE_WEB_CLASS = 'E2E-TREEWEB-' + String(Math.floor(1000 + Math.random() * 9000));
+  const TREE_WEB_MEMBERS = [
+    { code: 'E2EWEB01', name: 'Đinh Văn Một' },
+    { code: 'E2EWEB02', name: 'Bùi Thị Hai' },
+    { code: 'E2EWEB03', name: 'Dương Văn Ba' },
+  ];
+
+  const webTreeClass = await teacher
+    .from('classes')
+    .insert({ user_id: teacherId, name: TREE_WEB_CLASS, academic_year: '2026-2027' })
+    .select('id, name')
+    .single();
+  check('30a: projector test class created', !webTreeClass.error && !!webTreeClass.data,
+    webTreeClass.error?.message);
+  const webTreeClassId = webTreeClass.data?.id;
+
+  const webTreeMembers = await saveClassMembers(
+    teacher,
+    webTreeClassId,
+    TREE_WEB_MEMBERS.map((m) => ({ student_code: m.code, full_name: m.name, dob: null, pin: null })),
+  );
+  check('30a: the projector class has 3 members', webTreeMembers.saved === 3,
+    String(webTreeMembers.saved));
+
+  // --- 30b. createTreeSession --------------------------------------------
+  const createdSession = await createTreeSession(teacher, {
+    class_id: webTreeClassId,
+    title: 'E2E Cây Tri Thức (projector)',
+    question_text: 'Theo em, tri thức là gì và nó được hình thành như thế nào?',
+    min_words: 15,
+    time_limit_minutes: 45,
+    max_similarity: 0.65,
+  });
+  check('30b: createTreeSession inserts a session', !!createdSession?.id, JSON.stringify(createdSession));
+  check('30b: the configured thresholds round-trip',
+    createdSession?.min_words === 15
+      && createdSession?.time_limit_minutes === 45
+      && Number(createdSession?.max_similarity) === 0.65,
+    JSON.stringify({
+      min_words: createdSession?.min_words,
+      time_limit_minutes: createdSession?.time_limit_minutes,
+      max_similarity: createdSession?.max_similarity,
+    }));
+  check('30b: a new session is active with no ended_at',
+    createdSession?.is_active === true && createdSession?.ended_at === null,
+    JSON.stringify({ is_active: createdSession?.is_active, ended_at: createdSession?.ended_at }));
+  // The seed MUST be minted server-side: two sessions created in the same
+  // millisecond would collide on a client-generated seed and render identically.
+  check('30b: tree_seed was minted server-side as a non-null integer',
+    Number.isInteger(Number(createdSession?.tree_seed)) && createdSession?.tree_seed !== null,
+    String(createdSession?.tree_seed));
+
+  const webTreeSessionId = createdSession.id;
+
+  // A rejection path: an invalid similarity ceiling is caught client-side with a
+  // usable message rather than surfacing as an opaque CHECK-constraint error.
+  let ceilingRejected = '';
+  try {
+    await createTreeSession(teacher, {
+      class_id: webTreeClassId,
+      title: 'Bad ceiling',
+      question_text: 'x',
+      min_words: 10,
+      time_limit_minutes: 45,
+      max_similarity: 0,
+    });
+  } catch (err) {
+    ceilingRejected = String(err?.message ?? err);
+  }
+  check('30b: a max_similarity outside (0,1] is rejected with a teacher-readable message',
+    ceilingRejected.includes('Ngưỡng trùng lặp'), ceilingRejected);
+
+  // --- 30c. getTreeSession ------------------------------------------------
+  const loadedSession = await getTreeSession(teacher, webTreeSessionId);
+  check('30c: getTreeSession loads the session with its class name',
+    loadedSession?.id === webTreeSessionId && loadedSession?.class_name === TREE_WEB_CLASS,
+    JSON.stringify({ id: loadedSession?.id, class_name: loadedSession?.class_name }));
+  // `N` is the participation denominator, so it must arrive with the session —
+  // a projector that had to fetch it separately would paint an incomplete tree.
+  check('30c: getTreeSession returns the class member count as total_students',
+    loadedSession?.total_students === 3, String(loadedSession?.total_students));
+  check('30c: an unknown session id yields null rather than throwing',
+    (await getTreeSession(teacher, '00000000-0000-0000-0000-000000000000')) === null);
+
+  // --- 30d. submissions round-trip ---------------------------------------
+  // Two distinct answers (16 words each, over the 15-word minimum) so the
+  // similarity ceiling (65%) accepts both.
+  const webAnswers = [
+    { member: TREE_WEB_MEMBERS[0], text: 'Tri thuc duoc hinh thanh tu qua trinh hoc tap va trai nghiem song moi ngay' },
+    { member: TREE_WEB_MEMBERS[1], text: 'Moi nguoi tim thay tri thuc qua sach vo ban be va thuc te cong viec' },
+  ];
+  for (const answer of webAnswers) {
+    const submitted = await teacher.rpc('submit_tree_answer', {
+      p_session_id: webTreeSessionId,
+      p_student_code: answer.member.code,
+      p_student_name: answer.member.name,
+      p_answer_text: answer.text,
+    });
+    check(`30d: ${answer.member.code} submitted successfully`,
+      submitted.data?.success === true, JSON.stringify(submitted.data));
+  }
+
+  const webSubmissions = await getTreeSubmissions(teacher, webTreeSessionId);
+  check('30d: getTreeSubmissions returns one row per submission, ordered by fruit_index',
+    webSubmissions.length === 2
+      && webSubmissions[0].fruit_index === 1
+      && webSubmissions[1].fruit_index === 2,
+    JSON.stringify(webSubmissions.map((row) => row.fruit_index)));
+  check('30d: each submission carries the identity and word count the renderer needs',
+    webSubmissions.every((row) => row.student_code && row.student_name && row.word_count > 0),
+    JSON.stringify(webSubmissions.map((row) => [row.student_code, row.word_count])));
+  check('30d: getTreeSubmissions excludes another session\'s rows',
+    (await getTreeSubmissions(teacher, '00000000-0000-0000-0000-000000000000')).length === 0);
+
+  // --- 30e. data contract with the renderer ------------------------------
+  // The fetched rows are fed STRAIGHT into the engine with no mapping step: if
+  // the web `TreeSubmissionRow` shape ever drifted from what the renderer reads,
+  // the anchors would come back empty or nameless and this fails.
+  const contractState = computeTreeState({
+    totalStudents: loadedSession.total_students,
+    submissions: webSubmissions,
+    timeLimitMinutes: loadedSession.time_limit_minutes,
+    createdAt: loadedSession.created_at,
+    seed: loadedSession.tree_seed,
+  });
+  check('30e: the engine accepts the web rows unchanged and anchors every one',
+    contractState.anchors.length === webSubmissions.length
+      && contractState.anchors.every((anchor) => anchor.student_code && anchor.radius > 0),
+    JSON.stringify(contractState.anchors.map((a) => a.student_code)));
+  check('30e: participation derives from the fetched class size',
+    contractState.k === 2 && contractState.n === 3
+      && Math.abs(contractState.participation - 2 / 3) < 1e-9,
+    JSON.stringify({ k: contractState.k, n: contractState.n, p: contractState.participation }));
+  check('30e: vitality is a value the projector can display',
+    contractState.vitality >= 0.2 && contractState.vitality <= 1.0,
+    contractState.vitality.toFixed(4));
+
+  // The renderer reads a fixed set of fields; the selected column list must
+  // cover every one of them, or a field would silently arrive `undefined` while
+  // TypeScript still believed the row had the old shape.
+  const sessionColumns = TREE_SESSION_COLUMNS.split(',').map((column) => column.trim());
+  check('30e: TREE_SESSION_COLUMNS covers every field the renderer reads',
+    ['id', 'class_id', 'title', 'question_text', 'min_words', 'time_limit_minutes',
+     'max_similarity', 'tree_seed', 'is_active', 'created_at', 'ended_at']
+      .every((column) => sessionColumns.includes(column)),
+    TREE_SESSION_COLUMNS);
+  const submissionColumns = TREE_SUBMISSION_COLUMNS.split(',').map((column) => column.trim());
+  check('30e: TREE_SUBMISSION_COLUMNS covers every field the renderer reads',
+    ['id', 'session_id', 'student_code', 'student_name', 'answer_text', 'word_count',
+     'submitted_at', 'fruit_index']
+      .every((column) => submissionColumns.includes(column)),
+    TREE_SUBMISSION_COLUMNS);
+
+  // Same deterministic state in the browser and in the suite, because both load
+  // the SAME seed-driven engine. A different seed must move the anchors.
+  const reState = computeTreeState({
+    totalStudents: 3,
+    submissions: webSubmissions,
+    timeLimitMinutes: loadedSession.time_limit_minutes,
+    createdAt: loadedSession.created_at,
+    seed: loadedSession.tree_seed,
+  });
+  check('30e: the projector state is reproducible from the stored seed',
+    JSON.stringify(reState.anchors) === JSON.stringify(contractState.anchors));
+  check('30e: a different seed would render a different tree',
+    JSON.stringify(computeTreeState({
+      totalStudents: 3,
+      submissions: webSubmissions,
+      timeLimitMinutes: loadedSession.time_limit_minutes,
+      createdAt: loadedSession.created_at,
+      seed: loadedSession.tree_seed + 1,
+    }).anchors) !== JSON.stringify(contractState.anchors));
+
+  // --- 30f. the web engine copy must not drift from the student copy -----
+  // The projector imports its own copy so Next.js can bundle it; the student
+  // SPA imports the original. A divergence would make the classroom projector
+  // and the students' phones disagree about the tree.
+  const studentEngineSource = readFileSync(new URL('../student/tree-engine.js', import.meta.url), 'utf8');
+  const webEngineSource = readFileSync(new URL('../web/src/lib/tree-engine.js', import.meta.url), 'utf8');
+  check('30f: the web engine copy is byte-identical to the student engine',
+    studentEngineSource === webEngineSource,
+    `student=${studentEngineSource.length}B web=${webEngineSource.length}B`);
+
+  // --- 30g. endTreeSession ------------------------------------------------
+  const ended = await endTreeSession(teacher, webTreeSessionId);
+  check('30g: endTreeSession marks the session inactive and stamps ended_at',
+    ended.is_active === false && !!ended.ended_at,
+    JSON.stringify({ is_active: ended.is_active, ended_at: ended.ended_at }));
+
+  const reloaded = await getTreeSession(teacher, webTreeSessionId);
+  check('30g: the closed state persists on reload', reloaded?.is_active === false);
+
+  // A closed session must stop accepting answers — this is the whole point of
+  // the button, and it is enforced server-side by submit_tree_answer.
+  const afterClose = await teacher.rpc('submit_tree_answer', {
+    p_session_id: webTreeSessionId,
+    p_student_code: TREE_WEB_MEMBERS[2].code,
+    p_student_name: TREE_WEB_MEMBERS[2].name,
+    p_answer_text: 'Mot cau tra loi hoan toan khac biet va khong trung voi ai ca',
+  });
+  check('30g: a closed session rejects further submissions',
+    afterClose.data?.success === false && afterClose.data?.code === 'SESSION_INACTIVE',
+    JSON.stringify(afterClose.data));
+
+  let missingEnd = '';
+  try {
+    await endTreeSession(teacher, '00000000-0000-0000-0000-000000000000');
+  } catch (err) {
+    missingEnd = String(err?.message ?? err);
+  }
+  check('30g: ending an unknown session reports a clear error',
+    missingEnd.includes('Không tìm thấy'), missingEnd);
+
+  // --- 30h. cleanup -------------------------------------------------------
+  await teacher.from('tree_sessions').delete().eq('id', webTreeSessionId);
+  const webTreeClassDelete = await teacher.from('classes').delete().eq('id', webTreeClassId);
+  check('30h: the projector class deletes once its session is gone',
+    !webTreeClassDelete.error, webTreeClassDelete.error?.message);
 
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);
