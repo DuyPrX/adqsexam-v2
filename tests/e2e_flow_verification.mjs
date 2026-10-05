@@ -103,6 +103,14 @@
  *      Bézier teardrops) on a curve-capable stub and caches one hitbox per
  *      submission at bloom; and the projector/SPA copy has been renamed from
  *      "Quả" to "Giọt sương tri thức" / "dưỡng chất".
+ *  34. Procedural Web Audio (Phase 8.3): `tree-audio.js` exports the full surface and
+ *      defaults to unmuted; the mute flag round-trips through `localStorage` and is
+ *      restored on a fresh import; a mock `AudioContext` proves the dewdrop renders
+ *      one oscillator + gain with exponential frequency/gain ramps and no NaN, that
+ *      vitality raises the pitch, and that the fanfare renders six notes staggered
+ *      120ms apart; mute silences everything and a suspended context refuses to play
+ *      until `resumeAudioContext()`; the engine no-ops with no `window`; and the
+ *      projector + SPA are wired to it (mute toggle, submit chime, bloom fanfare).
  *
  * Usage:
  *   node v2/tests/e2e_flow_verification.mjs
@@ -4547,6 +4555,280 @@ async function main() {
   check('33e: no stale "Quả của bạn" / "Quả #" copy remains in the SPA or projector',
     !studentAppSource.includes('Quả của bạn') && !projectorSource.includes('Quả #'),
     'stale fruit copy remains');
+
+  /* --- 34. Procedural Web Audio effects (8.3) -------------------------- */
+  // The audio module is DOM-free at import time EXCEPT the guarded `localStorage`
+  // read, so a mock `window`/`localStorage`/`AudioContext` must be installed
+  // BEFORE importing it — that is exactly what the guards exist for. Two imports
+  // with distinct query strings give a fresh module instance per boot case.
+  step(34, 'tree of knowledge procedural audio, mute persistence, and synthesis');
+
+  const makeMockStorage = (initial = {}) => {
+    const store = new Map(Object.entries(initial));
+    return {
+      getItem: (key) => (store.has(key) ? store.get(key) : null),
+      setItem: (key, value) => { store.set(key, String(value)); },
+      removeItem: (key) => { store.delete(key); },
+      _dump: () => Object.fromEntries(store),
+    };
+  };
+
+  // A recording mock AudioContext. Every node method the engine calls is
+  // captured, and each numeric argument is checked for NaN/Infinity so a broken
+  // envelope or a bad ramp target fails the test rather than silently passing.
+  const createMockAudio = () => {
+    const calls = {
+      oscillators: [], gains: [], ramps: [], starts: [], stops: [], resumes: 0, connects: 0,
+    };
+    const badNumbers = [];
+    const noteNumber = (value, where) => {
+      const n = Number(value);
+      if (!Number.isFinite(n)) badNumbers.push(`${where}=${value}`);
+      return n;
+    };
+
+    const makeParam = (kind, node) => ({
+      setValueAtTime(value, time) {
+        noteNumber(value, `${kind}.setValueAtTime.value`);
+        noteNumber(time, `${kind}.setValueAtTime.time`);
+        calls.ramps.push({ kind, type: 'set', value });
+        return this;
+      },
+      exponentialRampToValueAtTime(value, time) {
+        noteNumber(value, `${kind}.exp.value`);
+        noteNumber(time, `${kind}.exp.time`);
+        if (value === 0) badNumbers.push(`${kind}.exp.target=0`);
+        calls.ramps.push({ kind, type: 'exp', value });
+        return this;
+      },
+      linearRampToValueAtTime(value, time) {
+        noteNumber(value, `${kind}.linear.value`);
+        noteNumber(time, `${kind}.linear.time`);
+        return this;
+      },
+    });
+
+    const makeOscillator = () => {
+      const osc = {
+        type: 'sine',
+        frequency: makeParam('frequency', null),
+        connect(dest) { calls.connects += 1; return dest; },
+        start(time) { noteNumber(time, 'osc.start'); calls.starts.push(time); },
+        stop(time) { noteNumber(time, 'osc.stop'); calls.stops.push(time); },
+        disconnect() {},
+      };
+      calls.oscillators.push(osc);
+      return osc;
+    };
+
+    const makeGain = () => {
+      const gain = {
+        gain: makeParam('gain', null),
+        connect(dest) { calls.connects += 1; return dest; },
+        disconnect() {},
+      };
+      calls.gains.push(gain);
+      return gain;
+    };
+
+    const ctx = {
+      state: 'running',
+      currentTime: 1.5,
+      destination: { id: 'dest' },
+      createOscillator: makeOscillator,
+      createGain: makeGain,
+      async resume() { calls.resumes += 1; this.state = 'running'; },
+      async suspend() { this.state = 'suspended'; },
+    };
+    return { ctx, calls, badNumbers };
+  };
+
+  const installAudioGlobals = (storage) => {
+    const { ctx, calls, badNumbers } = createMockAudio();
+    globalThis.localStorage = storage;
+    globalThis.window = {
+      localStorage: storage,
+      AudioContext: function MockAudioContext() { return ctx; },
+    };
+    return { ctx, calls, badNumbers };
+  };
+
+  const clearAudioGlobals = () => {
+    delete globalThis.window;
+    delete globalThis.localStorage;
+  };
+
+  // --- 34a. export surface ----------------------------------------------
+  const bootStorage = makeMockStorage(); // no persisted flag -> unmuted default
+  installAudioGlobals(bootStorage);
+  const audio = await import(new URL('../student/tree-audio.js?case=default', import.meta.url).href);
+
+  check('34a: tree-audio.js exports the full procedural surface',
+    typeof audio.isAudioMuted === 'function'
+      && typeof audio.setAudioMuted === 'function'
+      && typeof audio.toggleAudioMute === 'function'
+      && typeof audio.resumeAudioContext === 'function'
+      && typeof audio.playDewdropSound === 'function'
+      && typeof audio.playBloomFanfare === 'function',
+    Object.keys(audio).join(','));
+
+  check('34a: a fresh install defaults to unmuted',
+    audio.isAudioMuted() === false, String(audio.isAudioMuted()));
+
+  // --- 34b. mute persistence --------------------------------------------
+  check('34b: setAudioMuted(true) reports and stores the new state',
+    audio.setAudioMuted(true) === true && bootStorage.getItem('adqs_tree_muted') === 'true',
+    JSON.stringify(bootStorage._dump()));
+
+  check('34b: toggleAudioMute() flips back to unmuted and persists "false"',
+    audio.toggleAudioMute() === false && audio.isAudioMuted() === false
+      && bootStorage.getItem('adqs_tree_muted') === 'false',
+    JSON.stringify(bootStorage._dump()));
+
+  // A second instance must honour a pre-existing persisted flag — this is the
+  // reload path a teacher relies on.
+  const mutedStorage = makeMockStorage({ adqs_tree_muted: 'true' });
+  installAudioGlobals(mutedStorage);
+  const audioMuted = await import(new URL('../student/tree-audio.js?case=muted', import.meta.url).href);
+  check('34b: a reload restores the persisted muted state',
+    audioMuted.isAudioMuted() === true, String(audioMuted.isAudioMuted()));
+
+  // --- 34c. dewdrop synthesis -------------------------------------------
+  // Re-install a clean, UNMUTED context for the synthesis assertions.
+  const synthStorage = makeMockStorage();
+  const synth = installAudioGlobals(synthStorage);
+  const audio2 = await import(new URL('../student/tree-audio.js?case=synth', import.meta.url).href);
+
+  let dewdropError = '';
+  try {
+    audio2.playDewdropSound(1.0);
+  } catch (err) {
+    dewdropError = String(err?.message ?? err);
+  }
+  check('34c: playDewdropSound synthesizes one oscillator + gain without throwing',
+    dewdropError === '' && synth.calls.oscillators.length === 1 && synth.calls.gains.length === 1,
+    `${dewdropError} osc=${synth.calls.oscillators.length} gain=${synth.calls.gains.length}`);
+  check('34c: the dewdrop gain envelope uses exponential ramps (attack + decay)',
+    synth.calls.ramps.filter((r) => r.kind === 'gain' && r.type === 'exp').length === 2,
+    JSON.stringify(synth.calls.ramps.filter((r) => r.kind === 'gain')));
+  check('34c: the dewdrop frequency chirp uses exponential ramps',
+    synth.calls.ramps.filter((r) => r.kind === 'frequency' && r.type === 'exp').length === 2,
+    JSON.stringify(synth.calls.ramps.filter((r) => r.kind === 'frequency')));
+  check('34c: the oscillator is started and stopped',
+    synth.calls.starts.length === 1 && synth.calls.stops.length === 1,
+    `start=${synth.calls.starts.length} stop=${synth.calls.stops.length}`);
+  check('34c: no NaN/Infinity reached any audio parameter',
+    synth.badNumbers.length === 0, synth.badNumbers.join(','));
+
+  // Vitality must actually change the pitch — a brighter tree, a brighter drop.
+  const freqAt = (vitality) => {
+    const local = installAudioGlobals(makeMockStorage());
+    // The already-imported module captures its context lazily on first play, so
+    // re-import a fresh instance bound to this context.
+    return import(new URL(`../student/tree-audio.js?v=${vitality}`, import.meta.url).href)
+      .then((mod) => {
+        mod.playDewdropSound(vitality);
+        const first = local.calls.ramps.find((r) => r.kind === 'frequency' && r.type === 'set');
+        return first ? first.value : NaN;
+      });
+  };
+  const lowPitch = await freqAt(0.2);
+  const highPitch = await freqAt(1.0);
+  check('34c: vitality raises the dewdrop base pitch',
+    Number.isFinite(lowPitch) && Number.isFinite(highPitch) && highPitch > lowPitch,
+    `low=${lowPitch} high=${highPitch}`);
+
+  // --- 34d. bloom fanfare -------------------------------------------------
+  const fanfareStorage = makeMockStorage();
+  const fanfare = installAudioGlobals(fanfareStorage);
+  const audio3 = await import(new URL('../student/tree-audio.js?case=fanfare', import.meta.url).href);
+
+  let fanfareError = '';
+  try {
+    audio3.playBloomFanfare();
+  } catch (err) {
+    fanfareError = String(err?.message ?? err);
+  }
+  check('34d: playBloomFanfare synthesizes a six-note arpeggio without throwing',
+    fanfareError === '' && fanfare.calls.oscillators.length === 6 && fanfare.calls.gains.length === 6,
+    `${fanfareError} osc=${fanfare.calls.oscillators.length}`);
+  check('34d: the six notes are staggered 120ms apart',
+    fanfare.calls.starts.length === 6
+      && fanfare.calls.starts.every((t, i) => i === 0 || Math.abs((t - fanfare.calls.starts[i - 1]) - 0.12) < 1e-9),
+    JSON.stringify(fanfare.calls.starts));
+  check('34d: the fanfare uses a long bell decay (≈1.2s per note)',
+    fanfare.calls.ramps.filter((r) => r.kind === 'gain' && r.type === 'exp').length === 12,
+    String(fanfare.calls.ramps.filter((r) => r.kind === 'gain').length));
+  check('34d: no NaN/Infinity reached the fanfare parameters',
+    fanfare.badNumbers.length === 0, fanfare.badNumbers.join(','));
+
+  // --- 34e. mute suppresses playback; resume honours the Autoplay Policy ----
+  const silentStorage = makeMockStorage();
+  const silent = installAudioGlobals(silentStorage);
+  const audio4 = await import(new URL('../student/tree-audio.js?case=silent', import.meta.url).href);
+  audio4.setAudioMuted(true);
+  audio4.playDewdropSound(1.0);
+  audio4.playBloomFanfare();
+  check('34e: a muted engine synthesizes nothing',
+    silent.calls.oscillators.length === 0 && silent.calls.gains.length === 0,
+    `osc=${silent.calls.oscillators.length}`);
+  audio4.setAudioMuted(false);
+
+  // A suspended context must be resumed, and playback must not fire until it is.
+  silent.ctx.state = 'suspended';
+  const beforeResume = silent.calls.oscillators.length;
+  audio4.playDewdropSound(1.0);
+  check('34e: a suspended context refuses to play until resumed',
+    silent.calls.oscillators.length === beforeResume,
+    String(silent.calls.oscillators.length - beforeResume));
+  await audio4.resumeAudioContext();
+  check('34e: resumeAudioContext() resumes the context',
+    silent.ctx.state === 'running' && silent.calls.resumes === 1,
+    `state=${silent.ctx.state} resumes=${silent.calls.resumes}`);
+  audio4.playDewdropSound(1.0);
+  check('34e: playback works after the gesture-driven resume',
+    silent.calls.oscillators.length === beforeResume + 1,
+    String(silent.calls.oscillators.length - beforeResume));
+
+  // --- 34f. no-ops safely with no Web Audio host -------------------------
+  // This is the SSR / unsupported-browser path: the helpers must return quietly
+  // rather than throwing a ReferenceError.
+  clearAudioGlobals();
+  let headlessError = '';
+  try {
+    audio4.playDewdropSound(1.0);
+    audio4.playBloomFanfare();
+    const ctx = await audio4.resumeAudioContext();
+    if (ctx !== null) headlessError = 'expected a null context';
+  } catch (err) {
+    headlessError = String(err?.message ?? err);
+  }
+  check('34f: the engine no-ops without a window/AudioContext',
+    headlessError === '', headlessError);
+
+  // --- 34g. projector + SPA wiring --------------------------------------
+  const projectorAudioSrc = readFileSync(
+    new URL('../web/src/components/tree/TreeProjector.tsx', import.meta.url), 'utf8');
+  const studentAudioSrc = readFileSync(new URL('../student/app.js', import.meta.url), 'utf8');
+  const studentHtmlAudio = readFileSync(new URL('../student/index.html', import.meta.url), 'utf8');
+
+  check('34g: the projector imports and calls the audio engine',
+    projectorAudioSrc.includes("from '@/lib/tree-audio'")
+      && projectorAudioSrc.includes('playDewdropSound(')
+      && projectorAudioSrc.includes('playBloomFanfare(')
+      && projectorAudioSrc.includes('resumeAudioContext('),
+    'projector audio wiring missing');
+  check('34g: the projector ships a mute toggle bound to the persisted flag',
+    projectorAudioSrc.includes('toggleAudioMute()') && projectorAudioSrc.includes('isAudioMuted()')
+      && projectorAudioSrc.includes('🔇') && projectorAudioSrc.includes('🔊'),
+    'mute toggle missing');
+  check('34g: the SPA imports the audio engine and chimes on submit',
+    studentAudioSrc.includes("from './tree-audio.js'")
+      && studentAudioSrc.includes('playDewdropSound(')
+      && studentAudioSrc.includes('playBloomFanfare('),
+    'SPA audio wiring missing');
+  check('34g: the SPA workspace header exposes the audio toggle button',
+    studentHtmlAudio.includes('id="btnTreeAudioToggle"'), 'toggle button missing');
 
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);

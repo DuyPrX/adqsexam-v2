@@ -17,7 +17,17 @@ import type { RealtimeChannel, RealtimePostgresChangesPayload } from '@supabase/
 import { createClient } from '@/lib/supabase/client';
 import { PersistenceError } from '@/lib/exams';
 import { endTreeSession } from '@/lib/tree';
-import type { LayoutFruitAnchor } from '@/lib/tree-engine';
+import {
+  computeTreeState,
+  type LayoutFruitAnchor,
+} from '@/lib/tree-engine';
+import {
+  isAudioMuted,
+  playBloomFanfare,
+  playDewdropSound,
+  resumeAudioContext,
+  toggleAudioMute,
+} from '@/lib/tree-audio';
 import type { TreeSessionDetail, TreeSubmissionRow } from '@/lib/types';
 import { TreeCanvas, type TreeCanvasHandle } from './TreeCanvas';
 import { TreeQrCode } from './TreeQrCode';
@@ -83,7 +93,27 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
   const [showAnswer, setShowAnswer] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isEnding, setIsEnding] = useState(false);
+  const [muted, setMuted] = useState(false);
   const canvasRef = useRef<TreeCanvasHandle>(null);
+
+  // Phase 8.3 — sound is opt-out and its state lives in localStorage, but the
+  // value can only be read on the client, so it is synced after mount rather
+  // than in the initializer (which would desync SSR and hydration).
+  useEffect(() => {
+    setMuted(isAudioMuted());
+  }, []);
+
+  // Autoplay Policy: an AudioContext starts suspended and may only be resumed
+  // from a user gesture. One capture-phase listener unlocks it on the first
+  // click anywhere, then removes itself.
+  useEffect(() => {
+    const unlock = () => {
+      void resumeAudioContext();
+      window.removeEventListener('pointerdown', unlock, true);
+    };
+    window.addEventListener('pointerdown', unlock, true);
+    return () => window.removeEventListener('pointerdown', unlock, true);
+  }, []);
 
   const joinUrl = useMemo(() => buildJoinUrl(session.id), [session.id]);
 
@@ -158,6 +188,56 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
   // Phase 8.2 — the whole-class flourish. The engine keys it off participation
   // reaching 1.0, which is exactly `k >= totalStudents`.
   const isFlourished = k >= totalStudents;
+
+  // Phase 8.3 — vitality modulates the dewdrop chime's brightness. Derived the
+  // same way TreeCanvas derives it (same pure engine, same inputs), so the
+  // sound always matches the tree on screen.
+  const vitality = useMemo(
+    () =>
+      computeTreeState({
+        totalStudents,
+        submissions,
+        timeLimitMinutes: session.time_limit_minutes,
+        createdAt: session.created_at,
+        seed: session.tree_seed,
+      }).vitality,
+    [totalStudents, submissions, session.time_limit_minutes, session.created_at, session.tree_seed],
+  );
+
+  // Sound is edge-triggered, not level-triggered: a chirp per NEW submission and
+  // a fanfare on the single false→true flourish transition. Comparing against a
+  // ref (rather than driving an effect off `submissions.length`) means an UPDATE
+  // echo or a re-render can never replay a sound.
+  const previousCountRef = useRef(submissions.length);
+  const wasFlourishedRef = useRef(isFlourished);
+  const vitalityRef = useRef(vitality);
+  vitalityRef.current = vitality;
+
+  useEffect(() => {
+    const previousCount = previousCountRef.current;
+    previousCountRef.current = k;
+
+    if (k > previousCount) {
+      const newRows = k - previousCount;
+      for (let i = 0; i < newRows; i += 1) {
+        playDewdropSound(vitalityRef.current);
+      }
+    }
+  }, [k]);
+
+  useEffect(() => {
+    if (isFlourished && !wasFlourishedRef.current) {
+      playBloomFanfare();
+    }
+    wasFlourishedRef.current = isFlourished;
+  }, [isFlourished]);
+
+  const handleToggleMute = useCallback(() => {
+    // Resume first: the toggle button is itself a gesture, so this is the
+    // natural place to satisfy the Autoplay Policy before flipping the flag.
+    void resumeAudioContext();
+    setMuted(toggleAudioMute());
+  }, []);
 
   // The pinned fruit wins over the transient hover, so a click "sticks" while
   // the pointer moves off to read the preview.
@@ -295,6 +375,16 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
                 : 'Hoạt động đã kết thúc.'}
             </p>
           )}
+
+          <button
+            type="button"
+            onClick={handleToggleMute}
+            title={muted ? 'Bật âm thanh' : 'Tắt âm thanh'}
+            aria-pressed={!muted}
+            className="flex w-full items-center justify-center gap-2 rounded-lg border border-slate-700 px-4 py-2.5 text-sm font-semibold text-slate-100 transition hover:bg-slate-800"
+          >
+            {muted ? '🔇 Đã tắt âm' : '🔊 Âm thanh'}
+          </button>
 
           <button
             type="button"

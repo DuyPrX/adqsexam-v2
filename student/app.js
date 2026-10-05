@@ -18,6 +18,9 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { orderPracticeQuestions, readShuffleToggle, shuffledOrder } from './practice-order.js';
 import { TreeRenderer, computeTreeState, hitTestFruits } from './tree-engine.js';
 import { countTreeWords, normalizeAnswerText, treeWordCounterLabel } from './tree-words.js';
+import {
+  isAudioMuted, playBloomFanfare, playDewdropSound, resumeAudioContext, toggleAudioMute,
+} from './tree-audio.js';
 
 /* =====================================================================
    Constants
@@ -211,6 +214,12 @@ const state = {
   treeChannel: null,
   /** True once the student has submitted; enables the "update answer" flow. */
   treeSubmitted: false,
+  /**
+   * Phase 8.3 — edge guards for the procedural audio. `treeFlourished` latches
+   * the P = 1.0 fanfare so a re-render (or a later submission in a class that
+   * somehow exceeds N) cannot replay the celebration.
+   */
+  treeFlourished: false,
 };
 
 /* =====================================================================
@@ -2485,6 +2494,14 @@ function renderTree(session, submissions, animate) {
   } else {
     renderer.startAnimation(treeData);
   }
+
+  // Phase 8.3 — chime the ONE moment the class completes the tree. Latched via
+  // `state.treeFlourished` so a repaint or a later event cannot replay it.
+  if (treeData.isFlourished && !state.treeFlourished) {
+    state.treeFlourished = true;
+    playBloomFanfare();
+  }
+
   return treeData;
 }
 
@@ -2598,6 +2615,9 @@ async function loadTreeActivity(sessionId) {
   state.treeSubmissions = [];
   state.treeIdentity = null;
   state.treeSubmitted = false;
+  // Phase 8.3 — the session was just (re)loaded, so the fanfare latch must start
+  // fresh; otherwise a previously-flourished class would never celebrate again.
+  state.treeFlourished = false;
 
   // Check-in copy.
   $('treeCheckinTitle').textContent = state.treeSession.title;
@@ -2799,6 +2819,11 @@ async function submitTreeAnswer() {
   button.disabled = true;
   treeStatus('Đang gửi câu trả lời…', 'info');
 
+  // Phase 8.3 — this click is a user gesture, so it is the point at which the
+  // AudioContext may be resumed (Autoplay Policy). Awaited BEFORE the RPC so the
+  // success chime is unlocked by the time it fires.
+  await resumeAudioContext();
+
   const result = await callRpc('submit_tree_answer', {
     p_session_id: session.id,
     p_student_code: identity.student_code,
@@ -2847,6 +2872,11 @@ async function submitTreeAnswer() {
   renderTree(session, state.treeSubmissions, true);
   state.treeRenderer.setHighlight(submissionId);
 
+  // Phase 8.3 — a local chime confirms the answer was accepted, independent of
+  // the Realtime echo (which may arrive a moment later or not at all on a weak
+  // connection). Vitality is read off the just-rendered state so it matches.
+  playDewdropSound(state.treeData ? state.treeData.vitality : 1);
+
   treeStatus('🌱 Giọt sương tri thức của bạn đã hòa vào cây! Bạn có thể sửa và gửi lại trước khi hết giờ.', 'success');
   button.disabled = false;
   $('treeAnswerInput').focus();
@@ -2861,6 +2891,33 @@ function bindTreeControls() {
   $('btnEnterTree').addEventListener('click', enterTreeWorkspace);
   $('treeAnswerInput').addEventListener('input', updateTreeWordCounter);
   $('btnSubmitTreeAnswer').addEventListener('click', submitTreeAnswer);
+
+  // Phase 8.3 — audio toggle. The click both resumes the AudioContext (Autoplay
+  // Policy) and flips the persisted mute flag; the label reflects the new state.
+  const audioButton = $('btnTreeAudioToggle');
+  if (audioButton) {
+    syncTreeAudioToggle(audioButton);
+    audioButton.addEventListener('click', () => {
+      void resumeAudioContext();
+      toggleAudioMute();
+      syncTreeAudioToggle(audioButton);
+    });
+  }
+
+  // The very first tap anywhere in the tree view also unlocks audio, so a
+  // student who never touches the toggle still hears the class tree grow.
+  document.addEventListener('pointerdown', () => { void resumeAudioContext(); }, {
+    capture: true,
+    once: true,
+  });
+}
+
+/** Reflects the persisted mute state on the toggle button. */
+function syncTreeAudioToggle(button) {
+  const muted = isAudioMuted();
+  button.textContent = muted ? '🔇' : '🔊';
+  button.setAttribute('aria-pressed', String(!muted));
+  button.title = muted ? 'Bật âm thanh' : 'Tắt âm thanh';
 }
 
 

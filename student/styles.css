@@ -259,6 +259,9 @@ body {
 
 /* ---------- Tree interactive workspace (Phase 7.4) ---------- */
 .tree-workspace { display: flex; flex-direction: column; gap: 12px; }
+.tree-workspace__header {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
 .tree-workspace__status { display: flex; flex-wrap: wrap; gap: 8px; }
 .tree-badge {
   display: inline-flex; align-items: center; gap: 6px;
@@ -267,6 +270,18 @@ body {
   background: var(--accent-weak); color: var(--accent-text);
 }
 .tree-badge--vitality { background: var(--ok-weak); color: var(--ok); }
+
+/* Phase 8.3 — compact audio toggle that sits in the workspace header. */
+.btn-icon-muted {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; padding: 0; flex-shrink: 0;
+  font-size: 16px; line-height: 1;
+  background: var(--surface); color: var(--text-muted);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  cursor: pointer; transition: background .15s, color .15s, border-color .15s;
+}
+.btn-icon-muted:hover { background: var(--surface-2); color: var(--text); border-color: var(--border-strong); }
+.btn-icon-muted[aria-pressed="false"] { opacity: .6; }
 
 /* The stage is sticky on a tall screen so the tree stays visible while the
    student types, but collapses to a comfortable 35vh on mobile where a sticky
