@@ -83,6 +83,26 @@
  *      exactly (whitespace-collapsed, empty = 0); an end-to-end run then loads the
  *      session, picks a candidate, is refused for similarity, and succeeds on a
  *      rewrite with the fruit visible on the tree.
+ *  32. Exam candidates + flexible identity (Phase 8.1): the three re-signatured RPCs
+ *      exist as a SINGLE non-overloaded signature each and are anon-callable;
+ *      `get_exam_roster(p_for_practice := true)` returns the roster of a
+ *      practice-enabled exam that is CLOSED for the official sitting (while the
+ *      official call still refuses it, a trashed exam stays invisible, and `pin`/`dob`
+ *      never leak); `get_practice_exam_payload` authorises by `(full_name,
+ *      class_name)` with no `student_code`; `verify_student_practice` does the same
+ *      for the personal-.docx path; the teacher-web candidate CRUD helpers round-trip
+ *      (auto-generated code, friendly duplicate error, explicit-null clears, refused
+ *      delete once a result exists); and the shipped SPA exposes no visible
+ *      student-code input while declaring both top-level views.
+ *  33. Organic redesign (Phase 8.2): the web engine copy is still byte-identical to the
+ *      student copy; `computeTreeState` maps P = 0 / 0.10 / 0.30 / 0.70 / 1.0 onto
+ *      SEED / SPROUT / SAPLING / MATURING / BLOOM with `isFlourished` true only at
+ *      P = 1.0; the renamed `layoutDewdropAnchors` / `hitTestDewdrops` behave
+ *      identically to their fruit aliases and keep a dense 48-dewdrop canopy
+ *      overlap-free; `TreeRenderer` draws all five stages (curved branches +
+ *      Bézier teardrops) on a curve-capable stub and caches one hitbox per
+ *      submission at bloom; and the projector/SPA copy has been renamed from
+ *      "Quả" to "Giọt sương tri thức" / "dưỡng chất".
  *
  * Usage:
  *   node v2/tests/e2e_flow_verification.mjs
@@ -176,7 +196,8 @@ const { shuffledOrder, orderPracticeQuestions, readShuffleToggle } = await impor
 // a stub 2D context to prove `resize()` / `render()` / `getFruitAt()` work headless.
 const {
   computeTreeState, createPRNG, layoutFruitAnchors, hitTestFruits,
-  themeForSeed, themeIndexForSeed, MAX_BRANCH_DEPTH, TREE_STAGES,
+  layoutDewdropAnchors, hitTestDewdrops,
+  themeForSeed, themeIndexForSeed, MAX_BRANCH_DEPTH, TREE_STAGES, STAGE_LADDER,
 } = await import(new URL('../student/tree-engine.js', import.meta.url).href);
 
 // Phase 5.5 Step 15 exercises the timezone helpers. `date.ts` has no imports of
@@ -231,6 +252,11 @@ const {
 const { countTreeWords, normalizeAnswerText, treeWordCounterLabel } = await import(
   new URL('../student/tree-words.js', import.meta.url).href
 );
+
+// Phase 8.1 Step 32 — the teacher-web candidate CRUD (per-exam whitelist).
+const {
+  listExamCandidates, addExamCandidate, updateExamCandidate, deleteExamCandidate,
+} = await import(new URL('../web/src/lib/candidates.ts', import.meta.url).href);
 
 const TEACHER = { email: 'e2e.teacher@adqsexam.local', password: 'e2e-password-123' };
 const EXAM = {
@@ -864,12 +890,16 @@ async function main() {
   check('failing result reports NOT_PASSED',
     failingVerify.data?.message === 'NOT_PASSED', String(failingVerify.data?.message));
 
-  /* --- 11. Authorized self-practice gate (Phase 5.2) -------------------- */
+  /* --- 11. Authorized self-practice gate (Phase 5.2 / 8.1) -------------- */
+  // Phase 8.1 widened the signature to (p_class_name, p_full_name,
+  // p_student_code DEFAULT NULL) so the personal-.docx path can authorise
+  // without a student code. Both paths are exercised here; Step 32 covers the
+  // dedicated practice exam.
   step(11, 'Self-practice authorization via verify_student_practice');
 
   const practiceOk = await student.rpc('verify_student_practice', {
-    p_student_code: STUDENT.code,
     p_class_name: STUDENT.className,
+    p_full_name: STUDENT.fullName,
   });
   check('practice RPC reachable by anon', !practiceOk.error, JSON.stringify(practiceOk.error));
   check('whitelisted student is authorized', practiceOk.data?.authorized === true,
@@ -877,18 +907,27 @@ async function main() {
   check('authorized response returns the canonical name',
     practiceOk.data?.student_name === STUDENT.fullName, String(practiceOk.data?.student_name));
 
+  // The same identity, resolved by student_code instead of the name.
+  const practiceByCode = await student.rpc('verify_student_practice', {
+    p_class_name: STUDENT.className,
+    p_full_name: STUDENT.fullName,
+    p_student_code: STUDENT.code,
+  });
+  check('authorising by student_code still works', practiceByCode.data?.authorized === true,
+    JSON.stringify(practiceByCode.data));
+
   // Case- and whitespace-insensitive, mirroring verify_and_acquire_session().
   const practiceLoose = await student.rpc('verify_student_practice', {
-    p_student_code: `  ${STUDENT.code.toLowerCase()} `,
     p_class_name: ` ${STUDENT.className.toLowerCase()}  `,
+    p_full_name: `  ${STUDENT.fullName.toUpperCase()} `,
   });
   check('match is case/whitespace-insensitive', practiceLoose.data?.authorized === true,
     JSON.stringify(practiceLoose.data));
 
   // Not on any roster.
   const practiceBad = await student.rpc('verify_student_practice', {
-    p_student_code: 'KHONG-CO',
     p_class_name: '99ZZ',
+    p_full_name: 'Không Có Thật',
   });
   check('unknown student is rejected', practiceBad.data?.authorized === false,
     JSON.stringify(practiceBad.data));
@@ -896,18 +935,18 @@ async function main() {
     typeof practiceBad.data?.message === 'string' && practiceBad.data.message.length > 0,
     String(practiceBad.data?.message));
 
-  // Right student code, wrong class -> still rejected (both fields must match).
+  // Right student name, wrong class -> still rejected (both fields must match).
   const practiceWrongClass = await student.rpc('verify_student_practice', {
-    p_student_code: STUDENT.code,
     p_class_name: '99ZZ',
+    p_full_name: STUDENT.fullName,
   });
   check('mismatched class is rejected', practiceWrongClass.data?.authorized === false,
     JSON.stringify(practiceWrongClass.data));
 
   // Empty input is rejected without touching the table.
   const practiceEmpty = await student.rpc('verify_student_practice', {
-    p_student_code: '',
     p_class_name: '',
+    p_full_name: '',
   });
   check('empty credentials are rejected', practiceEmpty.data?.authorized === false,
     JSON.stringify(practiceEmpty.data));
@@ -3338,21 +3377,22 @@ async function main() {
     JSON.stringify({ p: treeSeedStage.participation, stage: treeSeedStage.stage, d: treeSeedStage.maxDepth }));
 
   const treeFullStage = treeAt(10, 10);
-  check('29b: P = 1.0 yields the mature stage at the maximum recursion depth',
-    treeFullStage.participation === 1 && treeFullStage.stage === 'mature'
+  check('29b: P = 1.0 yields the bloom stage at the maximum recursion depth',
+    treeFullStage.participation === 1 && treeFullStage.stage === 'bloom'
       && treeFullStage.maxDepth === MAX_BRANCH_DEPTH,
     JSON.stringify({ p: treeFullStage.participation, stage: treeFullStage.stage, d: treeFullStage.maxDepth }));
 
-  // Every interior boundary must land on the documented stage.
+  // Every interior boundary must land on the documented stage. Note the Phase
+  // 8.2 ladder widens SAPLING's ceiling to 0.50, so MATURING is probed at 0.7.
   check('29b: interior participation boundaries map to sprout / sapling / maturing',
     treeAt(1, 10).stage === 'sprout' && treeAt(1, 10).maxDepth === 1
-      && treeAt(2, 10).stage === 'sapling' && treeAt(2, 10).maxDepth === 3
-      && treeAt(5, 10).stage === 'maturing' && treeAt(5, 10).maxDepth === 5,
-    [treeAt(1, 10).stage, treeAt(2, 10).stage, treeAt(5, 10).stage].join(','));
+      && treeAt(3, 10).stage === 'sapling' && treeAt(3, 10).maxDepth === 3
+      && treeAt(7, 10).stage === 'maturing' && treeAt(7, 10).maxDepth === 5,
+    [treeAt(1, 10).stage, treeAt(3, 10).stage, treeAt(7, 10).stage].join(','));
 
   check('29b: stage ladder deepens monotonically toward MAX_BRANCH_DEPTH',
-    TREE_STAGES.every((s, i) => i === 0 || s.maxDepth >= TREE_STAGES[i - 1].maxDepth)
-      && TREE_STAGES[TREE_STAGES.length - 1].maxDepth === MAX_BRANCH_DEPTH,
+    STAGE_LADDER.every((s, i) => i === 0 || s.maxDepth >= STAGE_LADDER[i - 1].maxDepth)
+      && STAGE_LADDER[STAGE_LADDER.length - 1].maxDepth === MAX_BRANCH_DEPTH,
     String(MAX_BRANCH_DEPTH));
 
   // N = 0 must not divide by zero; the denominator is floored at 1.
@@ -3973,6 +4013,540 @@ async function main() {
   const joinClassDelete = await teacher.from('classes').delete().eq('id', joinClassId);
   check('31h: the join test class deletes once its sessions are gone',
     !joinClassDelete.error, joinClassDelete.error?.message);
+
+  /* --- 32. Exam candidates + flexible identity (8.1) -------------------- */
+  // Three concerns share one step because they only make sense together:
+  //   32a  the three re-signatured RPCs are SINGLE, non-overloaded, anon-callable
+  //   32b  get_exam_roster(..., true) serves a practice-enabled CLOSED exam
+  //   32c  get_practice_exam_payload authorises by (full_name, class_name)
+  //   32d  the teacher-web candidate CRUD helpers round-trip
+  //   32e  the shipped SPA has no visible student-code input anywhere
+  step(32, 'exam candidates, practice roster on closed exams, flexible identity');
+
+  const step32Sql = (statement) => execFileSync(
+    'docker',
+    ['exec', SB_DB_CONTAINER, 'psql', '-U', 'postgres', '-d', 'postgres', '-tAc', statement],
+    { encoding: 'utf8' },
+  ).trim();
+
+  // --- 32a. signature discipline -----------------------------------------
+  // `create or replace` matches on the ARGUMENT SIGNATURE, so a re-signatured
+  // function that is not DROPped first survives as a second overload and every
+  // matching call then fails with "function is not unique". Assert exactly ONE
+  // public signature per name, and that anon may execute each new one.
+  const procCount = (name) => Number(step32Sql(
+    `select count(*) from pg_proc p join pg_namespace n on n.oid = p.pronamespace `
+    + `where n.nspname = 'public' and p.proname = '${name}'`,
+  ));
+  check('32a: get_exam_roster has exactly one signature',
+    procCount('get_exam_roster') === 1, String(procCount('get_exam_roster')));
+  check('32a: get_practice_exam_payload has exactly one signature',
+    procCount('get_practice_exam_payload') === 1, String(procCount('get_practice_exam_payload')));
+  check('32a: verify_student_practice has exactly one signature',
+    procCount('verify_student_practice') === 1, String(procCount('verify_student_practice')));
+
+  const anonCanExecute = (signature) => step32Sql(
+    `select has_function_privilege('anon', 'public.${signature}'::regprocedure, 'execute')`,
+  ) === 't';
+  check('32a: anon may execute get_exam_roster(varchar, boolean)',
+    anonCanExecute('get_exam_roster(varchar, boolean)'));
+  check('32a: anon may execute get_practice_exam_payload(varchar, varchar, varchar, varchar)',
+    anonCanExecute('get_practice_exam_payload(varchar, varchar, varchar, varchar)'));
+  check('32a: anon may execute verify_student_practice(varchar, varchar, varchar)',
+    anonCanExecute('verify_student_practice(varchar, varchar, varchar)'));
+
+  // --- fixtures: a practice-enabled exam that is CLOSED ------------------
+  const CAN_EXAM = {
+    code: 'CAN' + String(Math.floor(100 + Math.random() * 900)),
+    title: 'E2E Candidate Management',
+    duration: 30,
+  };
+  const CAN_CLASS = '12CAN';
+  // Mixed case on purpose: the flexible RPC must match case/whitespace
+  // insensitively, so the assertions below send the name back in a DIFFERENT
+  // case than it is stored.
+  const CAN_MEMBERS = [
+    { code: 'E2ECAN01', fullName: 'Nguyễn Văn Một', dob: '2008-09-05', pin: '1111' },
+    { code: 'E2ECAN02', fullName: 'Trần Thị Hai', dob: null, pin: null },
+  ];
+
+  await teacher.from('exams').delete().eq('code', CAN_EXAM.code);
+  const canExam = await teacher
+    .from('exams')
+    .insert({
+      user_id: teacherId,
+      code: CAN_EXAM.code,
+      title: CAN_EXAM.title,
+      duration_minutes: CAN_EXAM.duration,
+      allow_practice: false,
+      is_active: true,
+    })
+    .select('id')
+    .single();
+  check('32b: candidate exam created with practice OFF', !canExam.error && !!canExam.data,
+    canExam.error?.message);
+  const canExamId = canExam.data?.id;
+
+  const canQuestions = await teacher.from('question_bank').insert({
+    user_id: teacherId,
+    exam_id: canExamId,
+    question_text: 'Câu hỏi ôn luyện số 1?',
+    question_type: 'MULTIPLE_CHOICE',
+    options: ['A', 'B', 'C', 'D'],
+    correct_answer: 0,
+    explanation: 'Đáp án A.',
+    position: 1,
+  });
+  check('32b: candidate exam seeded with one question', !canQuestions.error,
+    canQuestions.error?.message);
+
+  const canRoster = await teacher.from('students').insert(
+    CAN_MEMBERS.map((m) => ({
+      exam_code: CAN_EXAM.code,
+      student_code: m.code,
+      full_name: m.fullName,
+      class_name: CAN_CLASS,
+      dob: m.dob,
+      pin: m.pin,
+    })),
+  );
+  check('32b: candidate exam seeded with a 2-person roster', !canRoster.error,
+    canRoster.error?.message);
+
+  const flexAnon = createClient(SB_URL, SB_PUBLISHABLE, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+
+  // Practice is OFF: the practice-mode roster must refuse.
+  const rosterPracticeOff = await flexAnon.rpc('get_exam_roster', {
+    p_exam_code: CAN_EXAM.code, p_for_practice: true,
+  });
+  check('32b: a practice roster request is refused while allow_practice = false',
+    rosterPracticeOff.data?.success === false
+      && rosterPracticeOff.data?.code === 'PRACTICE_NOT_ALLOWED',
+    JSON.stringify(rosterPracticeOff.data));
+
+  // Now close the exam but open practice — the exact "self-study after the
+  // official sitting" case this parameter exists for.
+  await teacher.from('exams')
+    .update({ allow_practice: true, is_active: false })
+    .eq('code', CAN_EXAM.code);
+
+  const rosterOfficialClosed = await flexAnon.rpc('get_exam_roster', {
+    p_exam_code: CAN_EXAM.code,
+  });
+  check('32b: the official roster still refuses a closed exam',
+    rosterOfficialClosed.data?.success === false
+      && rosterOfficialClosed.data?.code === 'EXAM_INACTIVE',
+    JSON.stringify(rosterOfficialClosed.data));
+
+  const rosterPracticeOn = await flexAnon.rpc('get_exam_roster', {
+    p_exam_code: CAN_EXAM.code, p_for_practice: true,
+  });
+  check('32b: the practice roster succeeds on a closed but practice-enabled exam',
+    rosterPracticeOn.data?.success === true, JSON.stringify(rosterPracticeOn.data));
+  check('32b: the practice roster reports allow_practice = true',
+    rosterPracticeOn.data?.allow_practice === true,
+    String(rosterPracticeOn.data?.allow_practice));
+  check('32b: the practice roster returns both candidates',
+    Array.isArray(rosterPracticeOn.data?.candidates)
+      && rosterPracticeOn.data.candidates.length === 2,
+    JSON.stringify(rosterPracticeOn.data?.candidates));
+  // The roster is a display payload: credentials must never ride along, in
+  // either mode.
+  const practiceRosterJson = JSON.stringify(rosterPracticeOn.data);
+  check('32b: the practice roster leaks neither pin nor dob',
+    !practiceRosterJson.includes('"pin"') && !practiceRosterJson.includes('"dob"')
+      && CAN_MEMBERS.every((m) => !practiceRosterJson.includes('1111')),
+    practiceRosterJson.slice(0, 200));
+
+  // A trashed exam stays invisible in practice mode too.
+  await teacher.from('exams')
+    .update({ deleted_at: new Date().toISOString() })
+    .eq('code', CAN_EXAM.code);
+  const rosterTrashedPractice = await flexAnon.rpc('get_exam_roster', {
+    p_exam_code: CAN_EXAM.code, p_for_practice: true,
+  });
+  check('32b: a trashed exam is invisible even in practice mode',
+    rosterTrashedPractice.data?.success === false
+      && rosterTrashedPractice.data?.code === 'EXAM_NOT_FOUND',
+    JSON.stringify(rosterTrashedPractice.data));
+  await teacher.from('exams').update({ deleted_at: null }).eq('code', CAN_EXAM.code);
+
+  // --- 32c. get_practice_exam_payload by (full_name, class_name) ---------
+  // No `student_code` is sent at all — the SPA no longer has a field for it.
+  const payloadByName = await flexAnon.rpc('get_practice_exam_payload', {
+    p_exam_code: CAN_EXAM.code,
+    p_class_name: CAN_CLASS.toLowerCase(),
+    p_full_name: CAN_MEMBERS[0].fullName.toUpperCase(),
+  });
+  check('32c: practice payload authorises by (full_name, class_name) without a code',
+    payloadByName.data?.success === true, JSON.stringify(payloadByName.data));
+  check('32c: it echoes the roster full name as student_name',
+    payloadByName.data?.student_name === CAN_MEMBERS[0].fullName,
+    String(payloadByName.data?.student_name));
+  check('32c: it still returns the answer key the practice flow needs',
+    Array.isArray(payloadByName.data?.questions)
+      && payloadByName.data.questions.length === 1
+      && payloadByName.data.questions[0].correct_answer === 0,
+    JSON.stringify(payloadByName.data?.questions));
+
+  // A name that is not on the roster is refused, even with a valid class.
+  const payloadStranger = await flexAnon.rpc('get_practice_exam_payload', {
+    p_exam_code: CAN_EXAM.code,
+    p_class_name: CAN_CLASS,
+    p_full_name: 'Kẻ Mạo Danh',
+  });
+  check('32c: an off-roster (full_name, class_name) is refused',
+    payloadStranger.data?.success === false
+      && payloadStranger.data?.message === 'STUDENT_NOT_WHITELISTED',
+    JSON.stringify(payloadStranger.data));
+
+  // The legacy student_code path must keep working (the roster picker still
+  // resolves a code from the candidates it fetched).
+  const payloadByCode = await flexAnon.rpc('get_practice_exam_payload', {
+    p_exam_code: CAN_EXAM.code,
+    p_student_code: CAN_MEMBERS[1].code,
+  });
+  check('32c: authorising by student_code still succeeds',
+    payloadByCode.data?.success === true, JSON.stringify(payloadByCode.data));
+
+  // verify_student_practice (the personal-.docx path) now accepts class + name.
+  const verifyByName = await flexAnon.rpc('verify_student_practice', {
+    p_class_name: CAN_CLASS,
+    p_full_name: CAN_MEMBERS[0].fullName,
+  });
+  check('32c: verify_student_practice authorises by (class_name, full_name)',
+    verifyByName.data?.authorized === true
+      && verifyByName.data?.student_code === CAN_MEMBERS[0].code,
+    JSON.stringify(verifyByName.data));
+
+  const verifyMissing = await flexAnon.rpc('verify_student_practice', {
+    p_class_name: CAN_CLASS,
+    p_full_name: 'Không Có Thật',
+  });
+  check('32c: verify_student_practice refuses an unknown name',
+    verifyMissing.data?.authorized === false, JSON.stringify(verifyMissing.data));
+
+  const verifyBlank = await flexAnon.rpc('verify_student_practice', {
+    p_class_name: '   ', p_full_name: '',
+  });
+  check('32c: verify_student_practice demands both fields',
+    verifyBlank.data?.authorized === false, JSON.stringify(verifyBlank.data));
+
+  // --- 32d. teacher-web candidate CRUD -----------------------------------
+  const listed = await listExamCandidates(teacher, CAN_EXAM.code);
+  check('32d: listExamCandidates returns the seeded roster',
+    Array.isArray(listed) && listed.length === 2, JSON.stringify(listed?.length));
+  check('32d: it carries the credential columns the editor edits',
+    listed.every((row) => 'dob' in row && 'pin' in row && 'created_at' in row),
+    JSON.stringify(listed?.[0]));
+
+  // Add without a code: the helper derives one from the class name.
+  const added = await addExamCandidate(teacher, CAN_EXAM.code, {
+    full_name: 'Lê Văn Ba', class_name: CAN_CLASS, dob: '2009-01-02', pin: null,
+  });
+  check('32d: addExamCandidate auto-generates a student_code',
+    !!added?.id && typeof added.student_code === 'string' && added.student_code.length > 0,
+    JSON.stringify(added));
+  check('32d: the added candidate round-trips its fields',
+    added.full_name === 'Lê Văn Ba' && added.class_name === CAN_CLASS
+      && added.dob === '2009-01-02' && added.pin === null,
+    JSON.stringify(added));
+
+  // A duplicate code must surface a usable message, not a raw constraint error.
+  let dupMessage = '';
+  try {
+    await addExamCandidate(teacher, CAN_EXAM.code, {
+      full_name: 'Nguyễn Văn Một (copy)', class_name: CAN_CLASS,
+      student_code: CAN_MEMBERS[0].code,
+    });
+  } catch (err) {
+    dupMessage = String(err?.message ?? err);
+  }
+  check('32d: a duplicate student_code is reported as a friendly error',
+    dupMessage.includes(CAN_MEMBERS[0].code) && dupMessage.includes('đã tồn tại'),
+    dupMessage);
+
+  // Update: rename, and explicitly CLEAR dob/pin with null.
+  const updated = await updateExamCandidate(teacher, added.id, {
+    full_name: 'Lê Văn Ba (sửa)', dob: null, pin: '4321',
+  });
+  check('32d: updateExamCandidate applies the rename',
+    updated?.full_name === 'Lê Văn Ba (sửa)', JSON.stringify(updated));
+  check('32d: an explicit null clears dob while pin is set',
+    updated?.dob === null && updated?.pin === '4321', JSON.stringify(updated));
+
+  let noChangeMessage = '';
+  try {
+    await updateExamCandidate(teacher, added.id, {});
+  } catch (err) {
+    noChangeMessage = String(err?.message ?? err);
+  }
+  check('32d: an empty update is refused with a clear message',
+    noChangeMessage.includes('Không có thay đổi'), noChangeMessage);
+
+  // Delete a candidate with NO result: allowed.
+  await deleteExamCandidate(teacher, added.id);
+  const afterDelete = await listExamCandidates(teacher, CAN_EXAM.code);
+  check('32d: deleteExamCandidate removes the row',
+    afterDelete.length === 2 && !afterDelete.some((r) => r.id === added.id),
+    JSON.stringify(afterDelete.map((r) => r.id)));
+
+  // Delete a candidate WITH a submitted result: refused. A service-role insert
+  // is used because `authenticated` deliberately has no INSERT policy on
+  // exam_results (writes only ever come from submit_exam_result).
+  const canAdmin = createClient(SB_URL, SB_SECRET, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  await canAdmin.from('exam_results').delete()
+    .eq('exam_code', CAN_EXAM.code).eq('student_code', CAN_MEMBERS[0].code);
+  const resultInsert = await canAdmin.from('exam_results').insert({
+    exam_code: CAN_EXAM.code,
+    student_code: CAN_MEMBERS[0].code,
+    student_name: CAN_MEMBERS[0].fullName,
+    class_name: CAN_CLASS,
+    score: 1,
+    total_questions: 1,
+  }).select('id').single();
+  check('32d: an exam_results row exists for the delete guard',
+    !resultInsert.error && !!resultInsert.data?.id,
+    resultInsert.error?.message ?? JSON.stringify(resultInsert.data));
+
+  const guardRow = listed.find((r) => r.student_code === CAN_MEMBERS[0].code);
+  let guardMessage = '';
+  try {
+    await deleteExamCandidate(teacher, guardRow.id);
+  } catch (err) {
+    guardMessage = String(err?.message ?? err);
+  }
+  check('32d: a candidate who has submitted cannot be deleted',
+    guardMessage.includes('đã nộp bài'), guardMessage);
+  const guardStillThere = await listExamCandidates(teacher, CAN_EXAM.code);
+  check('32d: the guarded candidate is still on the roster',
+    guardStillThere.some((r) => r.student_code === CAN_MEMBERS[0].code),
+    JSON.stringify(guardStillThere.map((r) => r.student_code)));
+
+  // --- 32e. the SPA exposes no student-code input ------------------------
+  // Read the SHIPPED markup, not a copy: a regression that re-adds the field
+  // would otherwise slip past.
+  const spaHtml = readFileSync(new URL('../student/index.html', import.meta.url), 'utf8');
+  const spaJs = readFileSync(new URL('../student/app.js', import.meta.url), 'utf8');
+
+  check('32e: the SPA has no student-code input element',
+    !spaHtml.includes('id="student-code-input"') && !spaHtml.includes('name="studentCode"'),
+    'a visible student-code input returned');
+  check('32e: the practice panel has no student-code input',
+    !spaHtml.includes('id="practiceStudentCode"'), 'practiceStudentCode returned');
+  check('32e: identity is Class + Full Name only',
+    spaHtml.includes('id="class-name-input"') && spaHtml.includes('id="student-name-input"')
+      && spaHtml.includes('id="practiceClassName"') && spaHtml.includes('id="practiceStudentName"'),
+    'expected identity fields missing');
+  check('32e: the code still exists as a HIDDEN field resolved from the roster',
+    spaHtml.includes('id="student-code-hidden"'), 'hidden code field missing');
+
+  // View isolation: the tree owns the viewport instead of nesting in the shell.
+  check('32e: the SPA declares both top-level views',
+    spaHtml.includes('id="view-exam"') && spaHtml.includes('id="view-tree"'),
+    'view containers missing');
+  check('32e: app.js ships the switchView router',
+    spaJs.includes('function switchView('), 'switchView missing');
+  // The static-host fix: the .docx upload must address the Worker absolutely.
+  check('32e: the .docx upload resolves an absolute Worker base URL',
+    spaJs.includes('function resolveWorkerBaseUrl(') && spaJs.includes('/api/v1/extract-practice'),
+    'worker URL resolution missing');
+
+  // --- cleanup ------------------------------------------------------------
+  await canAdmin.from('exam_results').delete()
+    .eq('exam_code', CAN_EXAM.code).eq('student_code', CAN_MEMBERS[0].code);
+  await teacher.from('exams').delete().eq('code', CAN_EXAM.code);
+
+  /* --- 33. Organic redesign + knowledge dewdrops + bloom (8.2) ---------- */
+  // Pure engine checks again, but pinned to the Phase 8.2 contract: the new
+  // sprout/sapling/maturing/bloom ladder, the `isFlourished` flag, the dewdrop
+  // anchor aliases, and a full draw pass over a curve-capable stub context.
+  step(33, 'tree of knowledge organic stages, dewdrops, and bloom celebration');
+
+  // --- 33a. engine parity ------------------------------------------------
+  // The web projector bundles its own copy so Next.js can resolve it; a drift
+  // would make the classroom screen and the students' phones disagree.
+  const studentEngine33 = readFileSync(new URL('../student/tree-engine.js', import.meta.url), 'utf8');
+  const webEngine33 = readFileSync(new URL('../web/src/lib/tree-engine.js', import.meta.url), 'utf8');
+  check('33a: the web engine copy is byte-identical to the student engine',
+    studentEngine33 === webEngine33,
+    `student=${studentEngine33.length}B web=${webEngine33.length}B`);
+
+  // The two copies must also be the SAME file the suite imported at the top.
+  check('33a: the imported engine exposes the five Phase 8.2 stage constants',
+    TREE_STAGES.SEED === 'seed' && TREE_STAGES.SPROUT === 'sprout'
+      && TREE_STAGES.SAPLING === 'sapling' && TREE_STAGES.MATURING === 'maturing'
+      && TREE_STAGES.BLOOM === 'bloom',
+    JSON.stringify(TREE_STAGES));
+
+  // --- 33b. the five growth stages on the new ladder ---------------------
+  const treeStateAtP = (k, n) =>
+    computeTreeState({ ...treeBase, totalStudents: n, seed: 2026, submissions: treeSubs(k, 4) });
+
+  const stageSeed = treeStateAtP(0, 10);
+  check('33b: P = 0 yields TREE_STAGES.SEED',
+    stageSeed.participation === 0 && stageSeed.stage === TREE_STAGES.SEED,
+    JSON.stringify({ p: stageSeed.participation, stage: stageSeed.stage }));
+
+  const stageSprout = treeStateAtP(1, 10);
+  check('33b: P = 0.10 yields TREE_STAGES.SPROUT',
+    Math.abs(stageSprout.participation - 0.10) < 1e-9 && stageSprout.stage === TREE_STAGES.SPROUT,
+    JSON.stringify({ p: stageSprout.participation, stage: stageSprout.stage }));
+
+  const stageSapling = treeStateAtP(3, 10);
+  check('33b: P = 0.30 yields TREE_STAGES.SAPLING',
+    Math.abs(stageSapling.participation - 0.30) < 1e-9 && stageSapling.stage === TREE_STAGES.SAPLING,
+    JSON.stringify({ p: stageSapling.participation, stage: stageSapling.stage }));
+
+  const stageMaturing = treeStateAtP(7, 10);
+  check('33b: P = 0.70 yields TREE_STAGES.MATURING',
+    Math.abs(stageMaturing.participation - 0.70) < 1e-9 && stageMaturing.stage === TREE_STAGES.MATURING,
+    JSON.stringify({ p: stageMaturing.participation, stage: stageMaturing.stage }));
+
+  const stageBloom = treeStateAtP(10, 10);
+  check('33b: P = 1.0 yields TREE_STAGES.BLOOM with isFlourished = true',
+    stageBloom.participation === 1 && stageBloom.stage === TREE_STAGES.BLOOM
+      && stageBloom.isFlourished === true,
+    JSON.stringify({ p: stageBloom.participation, stage: stageBloom.stage, bloom: stageBloom.isFlourished }));
+
+  // The flag must be false at EVERY rung below a full class — otherwise a
+  // half-empty room would celebrate.
+  check('33b: isFlourished is false for every sub-unity participation',
+    [stageSeed, stageSprout, stageSapling, stageMaturing].every((s) => s.isFlourished === false),
+    [stageSeed, stageSprout, stageSapling, stageMaturing].map((s) => s.isFlourished).join(','));
+
+  // The ladder is now strictly widening toward the flourish.
+  check('33b: the stage ladder reaches MAX_BRANCH_DEPTH only at BLOOM',
+    STAGE_LADDER[STAGE_LADDER.length - 1].name === TREE_STAGES.BLOOM
+      && STAGE_LADDER[STAGE_LADDER.length - 1].maxDepth === MAX_BRANCH_DEPTH,
+    JSON.stringify(STAGE_LADDER[STAGE_LADDER.length - 1]));
+
+  // --- 33c. dewdrop anchors (identity with the fruit aliases) ------------
+  const dewAnchors = layoutDewdropAnchors(stageMaturing.anchors, 800, 600);
+  check('33c: layoutDewdropAnchors is the SAME behaviour as layoutFruitAnchors',
+    JSON.stringify(dewAnchors) === JSON.stringify(layoutFruitAnchors(stageMaturing.anchors, 800, 600)));
+  check('33c: every submission yields one in-bounds dewdrop hitbox',
+    dewAnchors.length === stageMaturing.anchors.length
+      && dewAnchors.every((a) => a.x - a.pixelRadius >= -0.001 && a.x + a.pixelRadius <= 800.001
+        && a.y - a.pixelRadius >= -0.001 && a.y + a.pixelRadius <= 600.001),
+    JSON.stringify(dewAnchors.map((a) => [a.x, a.y, a.pixelRadius])));
+  check('33c: hitTestDewdrops resolves a dewdrop and aliases hitTestFruits',
+    hitTestDewdrops(dewAnchors, dewAnchors[0].x, dewAnchors[0].y)?.student_code
+      === stageMaturing.anchors[0].student_code
+      && hitTestFruits(dewAnchors, dewAnchors[0].x, dewAnchors[0].y)?.student_code
+        === stageMaturing.anchors[0].student_code,
+    hitTestDewdrops(dewAnchors, dewAnchors[0].x, dewAnchors[0].y)?.student_code);
+  check('33c: hitTestDewdrops returns null on empty space',
+    hitTestDewdrops([], 10, 10) === null);
+
+  // A denser/harder case must still be overlap-free on the new engine.
+  const denseState = computeTreeState({ ...treeBase, totalStudents: 48, seed: 88, submissions: treeSubs(48, 3) });
+  const denseLayout = layoutDewdropAnchors(denseState.anchors, 1000, 800);
+  let denseWorstGap = Infinity;
+  for (let i = 0; i < denseLayout.length; i += 1) {
+    for (let j = i + 1; j < denseLayout.length; j += 1) {
+      const dx = denseLayout[j].x - denseLayout[i].x;
+      const dy = denseLayout[j].y - denseLayout[i].y;
+      const gap = Math.sqrt(dx * dx + dy * dy)
+        - (denseLayout[i].pixelRadius + denseLayout[j].pixelRadius);
+      if (gap < denseWorstGap) denseWorstGap = gap;
+    }
+  }
+  check('33c: a 48-dewdrop canopy stays overlap-free',
+    denseLayout.length === 48 && denseWorstGap > 0,
+    `worst gap = ${denseWorstGap.toExponential(3)}px`);
+
+  // --- 33d. TreeRenderer draws every stage on a curve-capable stub -------
+  // This stub is richer than Step 29's: it records the organic primitives
+  // (quadraticCurveTo / bezierCurveTo) so the curved-branch and teardrop paths
+  // are actually exercised rather than falling back.
+  const richGradient = () => ({ addColorStop() {} });
+  const richCalls = { arc: 0, fill: 0, stroke: 0, quadratic: 0, bezier: 0, fillRect: 0, ellipse: 0 };
+  const richCtx = {
+    setTransform() {}, clearRect() {},
+    fillRect() { richCalls.fillRect += 1; },
+    beginPath() {}, closePath() {}, moveTo() {}, lineTo() {},
+    quadraticCurveTo() { richCalls.quadratic += 1; },
+    bezierCurveTo() { richCalls.bezier += 1; },
+    ellipse() { richCalls.ellipse += 1; },
+    arc() { richCalls.arc += 1; },
+    fill() { richCalls.fill += 1; },
+    stroke() { richCalls.stroke += 1; },
+    save() {}, restore() {},
+    createLinearGradient: richGradient, createRadialGradient: richGradient,
+  };
+  const richCanvas = {
+    width: 0, height: 0, clientWidth: 900, clientHeight: 700,
+    getContext: () => richCtx,
+  };
+  const bloomRenderer = new TreeRenderer(richCanvas);
+
+  let renderError = '';
+  try {
+    bloomRenderer.render(stageSeed);
+    bloomRenderer.render(stageSprout);
+    bloomRenderer.render(stageSapling);
+    bloomRenderer.render(stageMaturing);
+    bloomRenderer.render(stageBloom);
+  } catch (err) {
+    renderError = String(err?.message ?? err);
+  }
+  check('33d: TreeRenderer draws all five stages without throwing',
+    renderError === '', renderError);
+  check('33d: the organic branch pass used quadratic Curves',
+    richCalls.quadratic > 0, JSON.stringify(richCalls));
+  check('33d: the dewdrop body used Bézier Curves',
+    richCalls.bezier > 0, JSON.stringify(richCalls));
+
+  // The seed stage draws no dewdrops; the bloom stage caches one per submission
+  // AND paints flowers/sparkles (extra `arc` calls beyond the dewdrop count).
+  bloomRenderer.render(stageSeed);
+  check('33d: the seed stage exposes no dewdrop hitboxes',
+    bloomRenderer.dewdropAnchors.length === 0, String(bloomRenderer.dewdropAnchors.length));
+
+  bloomRenderer.render(stageBloom);
+  check('33d: the bloom stage caches one hitbox per submission',
+    bloomRenderer.dewdropAnchors.length === stageBloom.anchors.length,
+    `${bloomRenderer.dewdropAnchors.length} vs ${stageBloom.anchors.length}`);
+
+  const bloomTarget = bloomRenderer.dewdropAnchors[1];
+  check('33d: getDewdropAt resolves the dewdrop and aliases getFruitAt',
+    bloomRenderer.getDewdropAt(bloomTarget.x, bloomTarget.y)?.student_code
+      === stageBloom.anchors[1].student_code
+      && bloomRenderer.getFruitAt(bloomTarget.x, bloomTarget.y)?.student_code
+        === stageBloom.anchors[1].student_code,
+    bloomTarget.student_code);
+
+  bloomRenderer.setHighlight(bloomTarget.id);
+  check('33d: setHighlight re-renders the highlighted dewdrop without throwing',
+    bloomRenderer.getDewdropAt(bloomTarget.x, bloomTarget.y) !== null);
+  bloomRenderer.startAnimation(stageBloom);
+  bloomRenderer.stopAnimation();
+  check('33d: startAnimation/stopAnimation no-op safely without requestAnimationFrame',
+    bloomRenderer.animFrameId === null);
+
+  // --- 33e. UI copy renamed from "Quả" to "Giọt sương" -------------------
+  const projectorSource = readFileSync(new URL('../web/src/components/tree/TreeProjector.tsx', import.meta.url), 'utf8');
+  const studentAppSource = readFileSync(new URL('../student/app.js', import.meta.url), 'utf8');
+  check('33e: the projector tooltip is titled "Giọt sương tri thức"',
+    projectorSource.includes('Giọt sương tri thức')
+      && projectorSource.includes('Giọt sương #{fruit.fruit_index}'),
+    'projector copy not renamed');
+  check('33e: the projector progress badge celebrates contributing "dưỡng chất"',
+    projectorSource.includes('đã góp dưỡng chất'), 'badge copy not renamed');
+  check('33e: the projector shows the whole-class bloom banner at P = 1.0',
+    projectorSource.includes('Cả lớp đã chung sức nuôi dưỡng Cây Tri Thức đơm hoa kết trái rực rỡ'),
+    'bloom banner missing');
+  check('33e: the student SPA success message speaks of a knowledge dewdrop',
+    studentAppSource.includes('Giọt sương tri thức của bạn đã hòa vào cây'),
+    'student success copy not renamed');
+  check('33e: no stale "Quả của bạn" / "Quả #" copy remains in the SPA or projector',
+    !studentAppSource.includes('Quả của bạn') && !projectorSource.includes('Quả #'),
+    'stale fruit copy remains');
 
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);

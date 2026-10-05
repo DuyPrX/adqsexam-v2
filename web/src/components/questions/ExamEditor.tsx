@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { AlertTriangle, BookOpen, Loader2, Plus, Save, ShieldAlert } from 'lucide-react';
+import { AlertTriangle, BookOpen, Loader2, Plus, Save, Share2, ShieldAlert, UserCheck } from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
 import {
   PersistenceError,
@@ -21,8 +21,10 @@ import { cn, hasResolvedAnswer } from '@/lib/utils';
 import { toLocalDatetimeString, toUtcIsoString } from '@/lib/date';
 import { DeleteExamDialog } from '@/components/DeleteExamDialog';
 import { ClassPickerModal } from '@/components/ClassPickerModal';
+import { ExamShareModal } from '@/components/ExamShareModal';
 import { QuestionCard } from './QuestionCard';
 import { PinPolicyControl } from './PinPolicyControl';
+import { ExamCandidatesManager } from './ExamCandidatesManager';
 
 interface ExamEditorProps {
   exam: ExamRow;
@@ -74,6 +76,14 @@ export function ExamEditor({ exam, initialQuestions, submissionCount }: ExamEdit
   const [pinMode, setPinMode] = useState<PinMode>(exam.pin_mode);
   const [globalPin, setGlobalPin] = useState(exam.global_pin ?? '');
   const [isClassPickerOpen, setIsClassPickerOpen] = useState(false);
+  /** Phase 8.1 — share/QR modal. */
+  const [isShareOpen, setIsShareOpen] = useState(false);
+  /**
+   * Phase 8.1 — which section the editor shows. `questions` keeps the Phase 5.4
+   * behaviour; `candidates` mounts the new thí sinh manager. A tab (rather than
+   * a stacked section) keeps the page short: both lists can run long.
+   */
+  const [activeTab, setActiveTab] = useState<'questions' | 'candidates'>('questions');
   const [isImporting, setIsImporting] = useState(false);
   const [importMessage, setImportMessage] = useState<string | null>(null);
   const [startsAt, setStartsAt] = useState(toLocalDatetimeString(exam.starts_at));
@@ -308,8 +318,39 @@ export function ExamEditor({ exam, initialQuestions, submissionCount }: ExamEdit
         </div>
       )}
 
+      {/* Phase 8.1 — questions vs candidates. */}
+      <div className="flex gap-1 rounded-lg border border-slate-200 bg-white p-1">
+        <button
+          type="button"
+          onClick={() => setActiveTab('questions')}
+          className={cn(
+            'flex-1 rounded-md px-3 py-1.5 text-sm font-semibold transition',
+            activeTab === 'questions'
+              ? 'bg-slate-900 text-white'
+              : 'text-slate-600 hover:bg-slate-100',
+          )}
+        >
+          Câu hỏi ({questions.length})
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab('candidates')}
+          className={cn(
+            'flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-semibold transition',
+            activeTab === 'candidates'
+              ? 'bg-slate-900 text-white'
+              : 'text-slate-600 hover:bg-slate-100',
+          )}
+        >
+          <UserCheck size={14} />
+          Danh sách thí sinh dự thi
+        </button>
+      </div>
+
+      {activeTab === 'candidates' && <ExamCandidatesManager examCode={exam.code} />}
+
       {/* Question list */}
-      <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
+      <div className={cn('space-y-3 rounded-xl border border-slate-200 bg-white p-4', activeTab !== 'questions' && 'hidden')}>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">
             Danh sách câu hỏi ({questions.length})
@@ -373,6 +414,14 @@ export function ExamEditor({ exam, initialQuestions, submissionCount }: ExamEdit
       <div className="flex items-center justify-end gap-2">
         <button
           type="button"
+          onClick={() => setIsShareOpen(true)}
+          className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+        >
+          <Share2 size={15} />
+          Chia sẻ đề thi
+        </button>
+        <button
+          type="button"
           onClick={() => router.push(`/exams/${exam.code}/results`)}
           className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
         >
@@ -414,6 +463,12 @@ export function ExamEditor({ exam, initialQuestions, submissionCount }: ExamEdit
           onConfirm={(classIds) => void handleImportClasses(classIds)}
         />
       )}
+
+      <ExamShareModal
+        exam={{ code: exam.code, title: exam.title }}
+        isOpen={isShareOpen}
+        onClose={() => setIsShareOpen(false)}
+      />
     </div>
   );
 }

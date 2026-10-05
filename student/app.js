@@ -32,6 +32,44 @@ const MAX_DEVICE_INFO = 200;
 const CERT_PASS_PERCENT = 80;            // must match schema: score/total >= 0.8
 const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 
+/**
+ * Phase 8.1 — base URL of the Cloudflare Worker that parses a personal .docx.
+ *
+ * The student SPA is a STATIC bundle on Cloudflare Pages, which serves only
+ * files under its assets directory — there is no server-side route handler, so a
+ * relative `/api/v1/extract-practice` request 405s/404s. The Worker lives at its
+ * own origin and must therefore be addressed absolutely.
+ *
+ * Resolution order:
+ *   1. `window.WORKER_API_URL` — set by a deployment's own config script.
+ *   2. the configured practice URL (APP_CONFIG.practiceApiUrl), when it is
+ *      already absolute — the existing `?api=` / localStorage override path.
+ *   3. localhost:8787 (wrangler dev) when developing locally.
+ *   4. `''` otherwise — the caller reports "chưa cấu hình" rather than issuing a
+ *      request that would fail as an opaque 404 against the static host.
+ *
+ * Trailing slashes are stripped so path concatenation is unambiguous.
+ */
+function resolveWorkerBaseUrl() {
+  const explicit = String(window.WORKER_API_URL || '').replace(/\/+$/, '');
+  if (explicit) return explicit;
+
+  const configured = String((window.APP_CONFIG || {}).practiceApiUrl || '').trim();
+  if (/^https?:\/\//i.test(configured)) {
+    // The configured value may be the FULL endpoint; strip the known path so the
+    // caller can append its own consistently.
+    return configured.replace(/\/api\/v1\/extract-practice\/?$/i, '').replace(/\/+$/, '');
+  }
+
+  if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+    return 'http://localhost:8787';
+  }
+
+  // Unconfigured non-local deployment: surface a clear message instead of
+  // letting the request fail as an opaque 404 against the static host.
+  return '';
+}
+
 /** Server RPC result codes -> Vietnamese copy shown to the student. */
 const RPC_MESSAGES = {
   EXAM_NOT_FOUND: 'Không tìm thấy mã đề thi này. Vui lòng kiểm tra lại.',
@@ -149,6 +187,14 @@ const state = {
   rosterPinMode: null,
   /** Guards against out-of-order responses when the student retypes the code. */
   rosterRequestId: 0,
+  /**
+   * Phase 8.1 — the PRACTICE roster for the entered practice exam code, fetched
+   * with `p_for_practice: true` so a closed-but-practiceable exam still yields
+   * its candidates. Used to fill the class/name datalists and to resolve the
+   * `student_code` the write path expects from a typed name.
+   */
+  practiceRoster: null,
+  practiceRosterRequestId: 0,
   /** Phase 7.2 — Tree of Knowledge screen state. */
   treeRenderer: null,
   treeData: null,
@@ -385,7 +431,6 @@ function setRosterMode(mode) {
   // `required` is kept in sync with visibility. The form is `novalidate`, so
   // this is not what enforces the choice (readIdentity does that) — it keeps the
   // semantics honest for assistive tech instead of marking hidden fields required.
-  $('student-code-input').required = !usePicker;
   $('class-name-input').required = !usePicker;
   $('student-name-input').required = !usePicker;
   $('class-select').required = usePicker;
@@ -435,13 +480,14 @@ async function loadExamRoster(examCode) {
   if (!result.ok) {
     setRosterMode('manual');
     applyPinVisibility(null);
-    rosterStatus('Không tải được danh sách dự thi. Vui lòng nhập thông tin thủ công.', false);
+    rosterStatus('Không tải được danh sách dự thi. Vui lòng kiểm tra mạng và thử lại.', true);
     return;
   }
 
   const payload = result.data || {};
   if (payload.success !== true) {
-    // A definitive server refusal — manual entry cannot work either.
+    // A definitive server refusal — manual entry cannot help either, since the
+    // identity can only be resolved against a loaded roster (Phase 8.1).
     setRosterMode('manual');
     applyPinVisibility(null);
     rosterStatus(rpcMessage(payload.code, payload.message), true);
@@ -455,8 +501,10 @@ async function loadExamRoster(examCode) {
   state.roster = candidates;
 
   if (candidates.length === 0) {
+    // Manual entry still renders, but submitting will report that the roster is
+    // empty (readIdentity) — there is no code to match a typed name against.
     setRosterMode('manual');
-    rosterStatus('Đề thi chưa có danh sách dự thi. Vui lòng nhập thông tin thủ công.', false);
+    rosterStatus('Đề thi chưa có danh sách dự thi. Vui lòng liên hệ giáo viên.', true);
     return;
   }
 
@@ -523,9 +571,16 @@ function onStudentSelected() {
 /**
  * Reads the identity from whichever mode is active.
  *
- * Returns `{ studentCode, className, fullName }` or `{ error }`. The picker
- * branch reads the authoritative roster row so `full_name`/`class_name` come
- * from the server, not from anything the student can type.
+ * Returns `{ studentCode, className, fullName }` or `{ error }`.
+ *
+ * Phase 8.1 — there is no visible student-code input anywhere, so BOTH branches
+ * must resolve the code themselves:
+ *   - picker: the code is the selected `<option>` value (a roster row).
+ *   - manual: class + name are matched against the roster already fetched for
+ *     this exam. Without a roster there is nothing to match, and
+ *     `verify_and_acquire_session` (which matches on student_code) cannot be
+ *     called — so a missing roster is reported as a clear error instead of being
+ *     sent as a blank code.
  */
 function readIdentity() {
   if (state.roster !== null && !$('rosterFields').classList.contains('hidden')) {
@@ -547,10 +602,31 @@ function readIdentity() {
     };
   }
 
+  // Manual fallback: class + name, resolved against the roster.
+  const className = $('class-name-input').value.trim();
+  const fullName = $('student-name-input').value.trim();
+
+  if (!className || !fullName) {
+    return { error: 'Vui lòng nhập đầy đủ Họ tên và Lớp.' };
+  }
+  if (!state.roster || state.roster.length === 0) {
+    return {
+      error: 'Đề thi chưa có danh sách dự thi nên không thể xác minh. Vui lòng liên hệ giáo viên.',
+    };
+  }
+
+  const match = state.roster.find(
+    (row) => row.class_name.toLowerCase() === className.toLowerCase()
+      && row.full_name.toLowerCase() === fullName.toLowerCase(),
+  );
+  if (!match) {
+    return { error: 'Họ tên hoặc lớp không khớp với danh sách dự thi của đề này.' };
+  }
+
   return {
-    studentCode: $('student-code-input').value.trim(),
-    className: $('class-name-input').value.trim(),
-    fullName: $('student-name-input').value.trim(),
+    studentCode: match.student_code,
+    className: match.class_name,
+    fullName: match.full_name,
   };
 }
 
@@ -1697,12 +1773,18 @@ function selectPracticeSource(source) {
  * `get_practice_exam_payload` is the only RPC that returns answer keys for a
  * stored exam, and it does so ONLY when the teacher set `allow_practice` and
  * the caller is on the exam's roster.
+ *
+ * Phase 8.1 — identity is sent as (full_name, class_name) instead of a student
+ * code. The RPC matches either, so no code lookup is needed here; the roster
+ * fetch in `loadPracticeRoster` exists only to offer suggestions and to resolve
+ * the code that `verify_student_practice` (the .docx path) may want.
  */
 async function loadPracticeFromExamCode(examCode) {
   const result = await callRpc('get_practice_exam_payload', {
     p_exam_code: examCode,
-    p_student_code: state.studentCode,
+    p_student_code: state.studentCode || null,
     p_class_name: state.className,
+    p_full_name: state.fullName,
   });
 
   if (!result.ok) {
@@ -1725,22 +1807,118 @@ async function loadPracticeFromExamCode(examCode) {
     ok: true,
     title: payload.exam?.title || examCode,
     questions: normalizePracticeQuestions(raw),
+    // The roster row is authoritative — the student may have typed their name
+    // with different capitalisation.
+    studentName: payload.student_name || '',
   };
+}
+
+/**
+ * Phase 8.1 — loads the practice roster for an exam code and fills the datalists.
+ *
+ * Called when the practice code is entered. `p_for_practice: true` is what makes
+ * this work on a CLOSED exam: the official-exam scheduling gates are skipped for
+ * practice (migration 20261005140000), so a student can self-practise after the
+ * sitting has ended.
+ *
+ * Best-effort: a failure only means the student types their identity manually.
+ */
+async function loadPracticeRoster(examCode) {
+  const code = String(examCode || '').trim();
+  const requestId = ++state.practiceRosterRequestId;
+  state.practiceRoster = null;
+  clearPracticeDatalists();
+
+  if (!code) return;
+
+  const result = await callRpc('get_exam_roster', { p_exam_code: code, p_for_practice: true });
+  if (requestId !== state.practiceRosterRequestId) return;
+
+  if (!result.ok || result.data?.success !== true) {
+    // Silent by design: this is a convenience layer, and a loud error here would
+    // interrupt the student mid-typing. The submit path reports the real refusal.
+    return;
+  }
+
+  const candidates = Array.isArray(result.data.candidates) ? result.data.candidates : [];
+  state.practiceRoster = candidates;
+  fillPracticeDatalists(candidates);
+}
+
+/** Clears the practice suggestion lists. */
+function clearPracticeDatalists() {
+  const classOptions = $('practiceClassOptions');
+  const nameOptions = $('practiceStudentOptions');
+  if (classOptions) clear(classOptions);
+  if (nameOptions) clear(nameOptions);
+}
+
+/**
+ * Fills the practice class/name datalists from a roster.
+ *
+ * The name list holds EVERY candidate (not just one class's): the class and name
+ * inputs are independent text fields, so filtering names by the current class
+ * would require re-rendering on every keystroke for little benefit — the browser
+ * narrows the suggestions as the student types.
+ */
+function fillPracticeDatalists(candidates) {
+  const classOptions = $('practiceClassOptions');
+  const nameOptions = $('practiceStudentOptions');
+  if (!classOptions || !nameOptions) return;
+
+  clear(classOptions);
+  clear(nameOptions);
+
+  const seenClasses = new Set();
+  candidates.forEach((candidate) => {
+    const className = String(candidate.class_name || '');
+    if (className && !seenClasses.has(className)) {
+      seenClasses.add(className);
+      classOptions.appendChild(el('option', { attrs: { value: className } }));
+    }
+    if (candidate.full_name) {
+      nameOptions.appendChild(el('option', { attrs: { value: candidate.full_name } }));
+    }
+  });
+}
+
+/**
+ * Resolves a typed (name, class) pair against the practice roster.
+ *
+ * Returns the matching row, or null. Used to recover the `student_code` when the
+ * RPC needs one; when no roster is loaded the caller proceeds with name+class,
+ * which the Phase 8.1 RPCs accept on their own.
+ */
+function matchPracticeCandidate(className, fullName) {
+  const roster = state.practiceRoster;
+  if (!Array.isArray(roster)) return null;
+  const wantClass = className.trim().toLowerCase();
+  const wantName = fullName.trim().toLowerCase();
+  return roster.find(
+    (row) => String(row.class_name || '').trim().toLowerCase() === wantClass
+      && String(row.full_name || '').trim().toLowerCase() === wantName,
+  ) || null;
 }
 
 async function handlePracticeSubmit(event) {
   event.preventDefault();
   practiceError('');
 
-  const studentCode = $('practiceStudentCode').value.trim();
   const className = $('practiceClassName').value.trim();
+  const fullName = $('practiceStudentName').value.trim();
 
-  if (!studentCode || !className) {
-    practiceError('Vui lòng nhập Mã học sinh và Lớp.');
+  if (!className || !fullName) {
+    practiceError('Vui lòng nhập đầy đủ Họ tên và Lớp.');
     return;
   }
-  state.studentCode = studentCode;
+
   state.className = className;
+  state.fullName = fullName;
+  // Recover the roster row when available. It is optional for the by-code RPC
+  // (which matches on name+class) but the .docx path prefers a code when one
+  // exists, and it lets the RPC return the canonical spelling of the name.
+  const match = matchPracticeCandidate(className, fullName);
+  state.studentCode = match ? match.student_code : '';
 
   $('practiceStartBtn').disabled = true;
   busy(true, 'Đang kiểm tra thông tin…');
@@ -1772,7 +1950,8 @@ async function startPracticeByCode() {
     return;
   }
 
-  state.fullName = '';
+  // Prefer the server's canonical name when the RPC returned one.
+  if (loaded.studentName) state.fullName = loaded.studentName;
   state.examCode = examCode;
   state.practiceQuestions = loaded.questions;
   enterPractice(loaded.title);
@@ -1793,9 +1972,13 @@ async function startPracticeByFile() {
   }
 
   // --- 1. Authorization ---------------------------------------------------
+  // Phase 8.1 — the .docx path has no exam code, so there is no roster to derive
+  // a student code from. The RPC now matches on (full_name, class_name); the code
+  // is still forwarded when a practice roster happened to supply one.
   const auth = await callRpc('verify_student_practice', {
-    p_student_code: state.studentCode,
     p_class_name: state.className,
+    p_full_name: state.fullName,
+    p_student_code: state.studentCode || null,
   });
   if (!auth.ok) {
     practiceError('Không kết nối được máy chủ. Vui lòng kiểm tra mạng và thử lại.');
@@ -1826,12 +2009,23 @@ async function startPracticeByFile() {
   enterPractice(file.name.replace(/\.docx$/i, ''));
 }
 
-/** POSTs the .docx to the public practice endpoint (forced mode=rule). */
+/**
+ * POSTs the .docx to the public practice endpoint (forced mode=rule).
+ *
+ * Phase 8.1 — the endpoint is built from `resolveWorkerBaseUrl()` rather than
+ * being used as a relative path: this SPA is served as static assets, so a
+ * relative `/api/...` request would hit the Pages host (405/404) instead of the
+ * Worker that actually parses the file.
+ */
 async function extractPracticeDocx(file) {
-  const endpoint = (window.APP_CONFIG || {}).practiceApiUrl;
-  if (!endpoint) {
-    return { ok: false, message: 'Chưa cấu hình địa chỉ máy chủ ôn luyện.' };
+  const workerBase = resolveWorkerBaseUrl();
+  if (!workerBase) {
+    return {
+      ok: false,
+      message: 'Chưa cấu hình địa chỉ máy chủ ôn luyện. Vui lòng báo giáo viên.',
+    };
   }
+  const endpoint = `${workerBase}/api/v1/extract-practice`;
 
   const body = new FormData();
   body.append('file', file);
@@ -1840,8 +2034,13 @@ async function extractPracticeDocx(file) {
   try {
     response = await fetch(endpoint, { method: 'POST', body });
   } catch (error) {
+    // A CORS rejection and an offline network both surface as a TypeError here,
+    // and the student cannot tell them apart — so the copy covers both.
     console.error('Practice extraction failed', error);
-    return { ok: false, message: 'Không kết nối được máy chủ ôn luyện. Vui lòng thử lại.' };
+    return {
+      ok: false,
+      message: 'Không kết nối được máy chủ ôn luyện. Vui lòng kiểm tra mạng và thử lại.',
+    };
   }
 
   let json = null;
@@ -2205,7 +2404,9 @@ function showFruitInfo(fruit) {
   if (!fruit) { hide(node); node.textContent = ''; return; }
 
   const mine = state.treeIdentity && fruit.student_code === state.treeIdentity.student_code;
-  const who = mine ? `Quả của bạn (#${fruit.fruit_index})` : `${fruit.student_name} (#${fruit.fruit_index})`;
+  const who = mine
+    ? `Giọt sương tri thức của bạn (#${fruit.fruit_index})`
+    : `${fruit.student_name} (#${fruit.fruit_index})`;
   node.textContent = `${who} — ${fruit.word_count} từ`;
   show(node);
 }
@@ -2349,6 +2550,11 @@ function loadTreeFromUrl() {
  * populated before Realtime connects, (4) subscribe for live growth.
  */
 async function loadTreeActivity(sessionId) {
+  // Phase 8.1 — isolate the tree view BEFORE anything else. The error states
+  // below must also render inside the tree view, so switching first means a bad
+  // link shows the message there rather than leaving the exam form on screen.
+  switchView('tree');
+
   // A URL is never trusted: the RPC takes a uuid, so anything else would be a
   // wasted round-trip and an opaque PostgREST cast error.
   if (!isUuid(sessionId)) {
@@ -2641,7 +2847,7 @@ async function submitTreeAnswer() {
   renderTree(session, state.treeSubmissions, true);
   state.treeRenderer.setHighlight(submissionId);
 
-  treeStatus('🌱 Quả của bạn đã xuất hiện trên cây! Bạn có thể sửa và gửi lại trước khi hết giờ.', 'success');
+  treeStatus('🌱 Giọt sương tri thức của bạn đã hòa vào cây! Bạn có thể sửa và gửi lại trước khi hết giờ.', 'success');
   button.disabled = false;
   $('treeAnswerInput').focus();
 }
@@ -2657,6 +2863,41 @@ function bindTreeControls() {
   $('btnSubmitTreeAnswer').addEventListener('click', submitTreeAnswer);
 }
 
+
+/* =====================================================================
+   View router (Phase 8.1)
+   =====================================================================
+   The two top-level `.spa-view` containers are mutually exclusive:
+
+     #view-exam — the whole exam/practice flow
+     #view-tree — the Tree of Knowledge, which must own the FULL viewport
+
+   Isolating the tree view in its own container (rather than a `.screen` inside
+   the exam shell) is what stops the exam header, the tab bar and the login form
+   from showing through / competing for layout when a student opens a join link.
+   ===================================================================== */
+
+/**
+ * Shows one top-level view and hides the other.
+ *
+ * Uses inline `display` (not the `.hidden` class) because `#view-exam` has no
+ * `hidden` class in the markup: it is the default view, so it must be visible on
+ * load without a class to remove.
+ */
+function switchView(viewName) {
+  const examView = $('view-exam');
+  const treeView = $('view-tree');
+  if (viewName === 'tree') {
+    if (examView) examView.style.display = 'none';
+    if (treeView) treeView.style.display = 'block';
+    // Only the tree view is scrollable-to-top; an exam view left scrolled would
+    // otherwise land the student mid-page when they switch back.
+    window.scrollTo(0, 0);
+  } else {
+    if (treeView) treeView.style.display = 'none';
+    if (examView) examView.style.display = 'block';
+  }
+}
 
 async function boot() {
   initTheme();
@@ -2685,6 +2926,11 @@ async function boot() {
   $('tabPractice').addEventListener('click', () => selectModeTab('practice'));
   $('practiceSourceCodeBtn').addEventListener('click', () => selectPracticeSource('code'));
   $('practiceSourceFileBtn').addEventListener('click', () => selectPracticeSource('file'));
+  // Phase 8.1 — fetch the practice roster (closed-but-practiceable exams included)
+  // once a code is entered, so the class/name datalists can suggest the identity.
+  $('practice-exam-code').addEventListener('change', (event) => {
+    void loadPracticeRoster(event.target.value);
+  });
   $('navToggleBtn').addEventListener('click', openNavPanel);
   $('navCloseBtn').addEventListener('click', closeNavPanel);
   $('navBackdrop').addEventListener('click', closeNavPanel);

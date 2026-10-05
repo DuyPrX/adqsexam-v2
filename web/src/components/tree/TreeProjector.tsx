@@ -155,6 +155,9 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
   const totalStudents = Math.max(session.total_students, 1);
   const k = submissions.length;
   const percent = Math.min(100, Math.round((k / totalStudents) * 100));
+  // Phase 8.2 — the whole-class flourish. The engine keys it off participation
+  // reaching 1.0, which is exactly `k >= totalStudents`.
+  const isFlourished = k >= totalStudents;
 
   // The pinned fruit wins over the transient hover, so a click "sticks" while
   // the pointer moves off to read the preview.
@@ -254,7 +257,7 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
             <div className="flex items-center justify-between text-xs font-semibold text-slate-400">
               <span className="flex items-center gap-1.5">
                 <Users size={13} />
-                {k}/{totalStudents} Học sinh ({percent}%)
+                {k}/{totalStudents} bạn đã góp dưỡng chất ({percent}%)
               </span>
             </div>
             <div className="mt-1.5 h-2.5 w-full overflow-hidden rounded-full bg-slate-800">
@@ -335,6 +338,14 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
           />
         )}
 
+        {isFlourished && (
+          <div className="pointer-events-none absolute inset-x-0 top-6 flex justify-center px-4">
+            <p className="animate-pulse rounded-full border border-amber-400/60 bg-amber-500/20 px-5 py-2.5 text-center text-sm font-bold text-amber-100 shadow-lg backdrop-blur">
+              🎉 Cả lớp đã chung sức nuôi dưỡng Cây Tri Thức đơm hoa kết trái rực rỡ!
+            </p>
+          </div>
+        )}
+
         {k === 0 && (
           <div className="pointer-events-none absolute inset-x-0 bottom-8 text-center">
             <p className="inline-block rounded-full bg-slate-900/80 px-4 py-2 text-sm font-semibold text-slate-300">
@@ -405,11 +416,14 @@ function FruitTooltip({ anchor, fruit, showAnswer, onToggleAnswer, onClose }: Fr
     >
       <div className="flex items-start justify-between gap-2">
         <div>
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-400">
+            Giọt sương tri thức
+          </p>
           <p className="text-sm font-bold text-white">{fruit.student_name}</p>
           <p className="font-mono text-[11px] text-slate-400">{fruit.student_code}</p>
         </div>
         <span className="shrink-0 rounded-full bg-emerald-600/20 px-2 py-0.5 text-[11px] font-bold text-emerald-300">
-          Quả #{fruit.fruit_index}
+          Giọt sương #{fruit.fruit_index}
         </span>
       </div>
 

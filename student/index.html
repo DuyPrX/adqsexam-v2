@@ -12,6 +12,14 @@
 <body>
   <a class="skip-link" href="#questionHost">Bỏ qua tới nội dung câu hỏi</a>
 
+  <!-- Phase 8.1 — top-level view router. Exactly one `.spa-view` is visible at a
+       time, switched by `switchView()`:
+         #view-exam — the whole exam/practice experience (header, tabs, quiz,
+                      result, certificate overlays).
+         #view-tree — a dedicated FULL-VIEWPORT Tree of Knowledge view. Opened
+                      from `?session=`/`?tree=`, it must cover the exam header and
+                      tabs entirely rather than appearing underneath them. -->
+  <div id="view-exam" class="spa-view">
   <!-- Reading progress -->
   <div id="progressWrap" class="progress-wrap hidden" aria-hidden="true">
     <div id="progressBar" class="progress-bar"></div>
@@ -82,13 +90,13 @@
 
             <!-- Fallback: shown when the exam has no roster, or the roster RPC is
                  unavailable. Kept completely separate from the picker so switching
-                 between the two can never leave a stale half-selected value. -->
+                 between the two can never leave a stale half-selected value.
+
+                 Phase 8.1 — the student-code input is GONE. Identity is strictly
+                 Class + Full Name; `readIdentity()` resolves the matching roster
+                 row (and therefore the code the RPC needs) from the candidates
+                 already fetched for this exam. -->
             <div id="manualFields">
-              <div class="field">
-                <label for="student-code-input">Mã học sinh</label>
-                <input id="student-code-input" name="studentCode" type="text"
-                       autocomplete="off" maxlength="50" placeholder="VD: HS001" required />
-              </div>
               <div class="field">
                 <label for="class-name-input">Lớp</label>
                 <input id="class-name-input" name="className" type="text"
@@ -146,15 +154,27 @@
                       role="tab" aria-selected="false" aria-controls="practiceFileFields">Tải file đề cá nhân (.docx)</button>
             </div>
 
-            <div class="field">
-              <label for="practiceStudentCode">Mã học sinh</label>
-              <input id="practiceStudentCode" name="practiceStudentCode" type="text"
-                     autocomplete="off" maxlength="50" placeholder="VD: HS001" required />
-            </div>
+            <!-- Phase 8.1 — no student-code input anywhere. The shared identity
+                 fields are Class + Full Name.
+
+                 These are TEXT inputs with a `<datalist>` rather than `<select>`s:
+                 the personal-.docx path has no exam code, so there is no roster to
+                 populate a dropdown from and the student must be able to type. When
+                 a practice exam IS entered, the datalists are filled from its roster
+                 so the identity can be picked instead of typed. -->
             <div class="field">
               <label for="practiceClassName">Lớp</label>
               <input id="practiceClassName" name="practiceClassName" type="text"
-                     autocomplete="off" maxlength="50" placeholder="VD: 12A1" required />
+                     list="practiceClassOptions" autocomplete="off" maxlength="50"
+                     placeholder="VD: 12A1" required />
+              <datalist id="practiceClassOptions"></datalist>
+            </div>
+            <div class="field">
+              <label for="practiceStudentName">Họ và tên</label>
+              <input id="practiceStudentName" name="practiceStudentName" type="text"
+                     list="practiceStudentOptions" autocomplete="off" maxlength="150"
+                     placeholder="VD: Nguyễn Văn A" required />
+              <datalist id="practiceStudentOptions"></datalist>
             </div>
 
             <!-- Source A: an exam the teacher explicitly opened for practice. -->
@@ -164,6 +184,9 @@
                 <input id="practice-exam-code" name="practice-exam-code" type="text"
                        inputmode="numeric" autocomplete="off" maxlength="20"
                        placeholder="Nhập mã đề (VD: 839201)" />
+                <small class="hint-text">
+                  Nhập mã đề để gợi ý danh sách lớp và tên, hoặc tự điền ở trên.
+                </small>
               </div>
             </div>
 
@@ -208,15 +231,51 @@
       </div>
     </section>
 
-    <!-- ================= TREE OF KNOWLEDGE ================= -->
-    <!-- Phase 7.4 — student interactive view. Two mutually exclusive states:
-         `#treeCheckinForm` (opened from `?session=`/`?tree=`, before identity is
-         chosen) and `#treeWorkspace` (the split view: live canvas above, answer
-         box below). The canvas lives inside the workspace, which is hidden until
-         check-in completes — `TreeRenderer` sizes its backing store from
-         `clientWidth/clientHeight`, so the container must be LAYOUT (not
-         `display:none`) before the first render, which `showTree` guarantees by
-         showing the screen before rendering. -->
+    <!-- ================= RESULT ================= -->
+    <section id="resultScreen" class="screen result hidden" aria-labelledby="resultHeading">
+      <div class="result__ring-wrap">
+        <svg class="result__ring" viewBox="0 0 200 200" aria-hidden="true">
+          <circle class="result__ring-track" cx="100" cy="100" r="86"></circle>
+          <circle id="ringValue" class="result__ring-value" cx="100" cy="100" r="86"></circle>
+        </svg>
+        <div class="result__ring-label">
+          <span id="resultPercent" class="result__percent">0%</span>
+          <span class="result__percent-caption">Điểm tự động</span>
+        </div>
+      </div>
+
+      <h1 id="resultHeading" class="result__heading"></h1>
+      <p id="resultScore" class="result__score" role="status"></p>
+      <p id="resultSub" class="result__sub"></p>
+      <p id="resultPending" class="result__pending hidden"></p>
+      <p id="resultElapsed" class="result__elapsed"></p>
+
+      <div id="resultNotice" class="alert hidden"></div>
+
+      <div id="practiceReview" class="review-list hidden" aria-label="Xem lại bài làm"></div>
+
+      <div id="achievementBanner" class="achievement hidden">
+        <span class="achievement__icon" aria-hidden="true">🏆</span>
+        <p class="achievement__text">Chúc mừng! Bạn đã đạt kết quả xuất sắc.</p>
+        <button id="certBtn" type="button" class="btn btn--primary">Nhận Giấy Chứng Nhận</button>
+      </div>
+
+      <button id="restartBtn" type="button" class="btn btn--primary btn--block">Làm bài khác</button>
+    </section>
+  </main>
+  </div>
+  <!-- /#view-exam -->
+
+  <!-- ================= TREE OF KNOWLEDGE (Phase 7.4 / 8.1) ================= -->
+  <!-- A dedicated full-viewport view: `switchView('tree')` hides #view-exam
+       entirely, so the exam header, tab bar and forms cannot show through. Two
+       mutually exclusive states live inside:
+         #treeCheckinForm — pick your name from the class roster
+         #treeWorkspace   — live canvas + answer box
+       The canvas is sized from clientWidth/clientHeight, so it must be LAYOUT
+       (not `display:none`) before the first render; `showTree` shows the screen
+       before rendering to guarantee that. -->
+  <div id="view-tree" class="spa-view" style="display: none;">
     <section id="treeScreen" class="screen tree-screen hidden" aria-labelledby="treeHeading">
       <h1 id="treeHeading" class="tree-screen__title">Cây Tri Thức</h1>
       <p id="treeSubtitle" class="tree-screen__subtitle"></p>
@@ -276,39 +335,8 @@
         </div>
       </div>
     </section>
-
-    <!-- ================= RESULT ================= -->
-    <section id="resultScreen" class="screen result hidden" aria-labelledby="resultHeading">
-      <div class="result__ring-wrap">
-        <svg class="result__ring" viewBox="0 0 200 200" aria-hidden="true">
-          <circle class="result__ring-track" cx="100" cy="100" r="86"></circle>
-          <circle id="ringValue" class="result__ring-value" cx="100" cy="100" r="86"></circle>
-        </svg>
-        <div class="result__ring-label">
-          <span id="resultPercent" class="result__percent">0%</span>
-          <span class="result__percent-caption">Điểm tự động</span>
-        </div>
-      </div>
-
-      <h1 id="resultHeading" class="result__heading"></h1>
-      <p id="resultScore" class="result__score" role="status"></p>
-      <p id="resultSub" class="result__sub"></p>
-      <p id="resultPending" class="result__pending hidden"></p>
-      <p id="resultElapsed" class="result__elapsed"></p>
-
-      <div id="resultNotice" class="alert hidden"></div>
-
-      <div id="practiceReview" class="review-list hidden" aria-label="Xem lại bài làm"></div>
-
-      <div id="achievementBanner" class="achievement hidden">
-        <span class="achievement__icon" aria-hidden="true">🏆</span>
-        <p class="achievement__text">Chúc mừng! Bạn đã đạt kết quả xuất sắc.</p>
-        <button id="certBtn" type="button" class="btn btn--primary">Nhận Giấy Chứng Nhận</button>
-      </div>
-
-      <button id="restartBtn" type="button" class="btn btn--primary btn--block">Làm bài khác</button>
-    </section>
-  </main>
+  </div>
+  <!-- /#view-tree -->
 
   <!-- ================= NAVIGATION PANEL ================= -->
   <div id="navBackdrop" class="nav-backdrop hidden"></div>

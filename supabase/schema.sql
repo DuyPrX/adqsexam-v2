@@ -1231,52 +1231,72 @@ $$;
 -- ----------------------------------------------------------------------------
 -- C.7  verify_student_practice  (PUBLIC — anon, Phase 5.2)
 --      Gate for AUTHORIZED SELF-PRACTICE. A candidate may practise with any
---      .docx of their own choosing as long as their (student_code, class_name)
---      pair appears in the whitelist of ANY exam roster ever imported — the
---      exam_code is deliberately NOT part of the match, because practice is
---      not tied to a published exam.
+--      .docx of their own choosing as long as their identity appears in the
+--      whitelist of ANY exam roster ever imported — the exam_code is
+--      deliberately NOT part of the match, because practice is not tied to a
+--      published exam.
 --
---      Matching is case- and whitespace-insensitive on both fields, mirroring
+--      Phase 8.1: matches on (full_name, class_name) — falling back to
+--      student_code only when one is supplied — because the student SPA no
+--      longer shows a student-code input. This is REQUIRED for coherence, not
+--      cosmetic: the .docx path has no exam code, so it cannot look up a roster
+--      picker and name+class is the only identity it can offer.
+--
+--      Matching is case- and whitespace-insensitive on every field, mirroring
 --      the tolerance of verify_and_acquire_session().
 --
 --      This is an authorization probe only: it writes nothing, reveals no
 --      exam content, and returns the canonical full_name so the client can
 --      greet the student. Practice exams are never persisted (no `exams`,
 --      `question_bank`, `active_sessions` or `exam_results` rows are touched).
+--
+--      The parameter ORDER changed (class_name first, student_code last and
+--      optional), so the old 2-arg function is dropped first — `create or
+--      replace` alone would leave both signatures callable.
 -- ----------------------------------------------------------------------------
+drop function if exists public.verify_student_practice(varchar, varchar);
+
 create or replace function public.verify_student_practice(
-    p_student_code varchar,
-    p_class_name   varchar
+    p_class_name   varchar,
+    p_full_name    varchar,
+    p_student_code varchar default null
 ) returns jsonb
 language plpgsql
 security definer
 set search_path = public, pg_temp
 as $$
 declare
-    v_exists       boolean;
-    v_student_name varchar;
+    v_match   public.students%rowtype;
+    v_matched boolean := false;
 begin
-    if p_student_code is null or trim(p_student_code) = ''
-       or p_class_name is null or trim(p_class_name) = '' then
+    if p_class_name is null or trim(p_class_name) = ''
+       or p_full_name is null or trim(p_full_name) = '' then
         return jsonb_build_object(
             'authorized', false,
-            'message',    'Vui lòng nhập đầy đủ Mã học sinh và Lớp.'
+            'message',    'Vui lòng nhập đầy đủ Họ tên và Lớp.'
         );
     end if;
 
-    select exists (
-               select 1
-                 from public.students s
-                where lower(trim(s.student_code)) = lower(trim(p_student_code))
-                  and lower(trim(s.class_name))   = lower(trim(p_class_name))
-           ),
-           max(s.full_name)
-      into v_exists, v_student_name
-      from public.students s
-     where lower(trim(s.student_code)) = lower(trim(p_student_code))
-       and lower(trim(s.class_name))   = lower(trim(p_class_name));
+    -- `v_matched` is tracked explicitly rather than relying on FOUND: an
+    -- if/elsif where no branch runs leaves FOUND holding the previous value.
+    if p_student_code is not null and trim(p_student_code) <> '' then
+        select * into v_match
+          from public.students s
+         where lower(trim(s.student_code)) = lower(trim(p_student_code))
+           and lower(trim(s.class_name))   = lower(trim(p_class_name))
+         limit 1;
+        v_matched := found;
+    else
+        select * into v_match
+          from public.students s
+         where lower(trim(s.full_name))  = lower(trim(p_full_name))
+           and lower(trim(s.class_name)) = lower(trim(p_class_name))
+         order by s.student_code
+         limit 1;
+        v_matched := found;
+    end if;
 
-    if not v_exists then
+    if not v_matched then
         return jsonb_build_object(
             'authorized', false,
             'message',    'Thông tin học sinh không có trong danh sách được phép ôn luyện.'
@@ -1285,7 +1305,8 @@ begin
 
     return jsonb_build_object(
         'authorized',   true,
-        'student_name', v_student_name
+        'student_name', v_match.full_name,
+        'student_code', v_match.student_code
     );
 end;
 $$;
@@ -1707,17 +1728,27 @@ $$;
 --              (a trashed or missing exam reports EXAM_NOT_FOUND).
 --
 --       Authorization: the caller must be ON THIS EXAM'S ROSTER (`students`),
---       matched case/whitespace-insensitively on student_code + class_name —
---       so guessing a 6-digit code cannot harvest keys even when practice is on.
+--       matched case/whitespace-insensitively. Phase 8.1 widens this from
+--       student_code + class_name to EITHER:
+--           * p_student_code (when supplied), or
+--           * (p_full_name, p_class_name)
+--       because the student SPA no longer shows a student-code input.
 --
 --       Deliberately NOT gated on is_active / the scheduling window (a teacher
 --       who closes an exam for the sitting may still want it practiceable), but
 --       trashed exams ARE refused (Phase 5.5: Trash is invisible to students).
+--
+--       Phase 8.1: the signature gained p_full_name, so the OLD 3-arg function is
+--       dropped first — `create or replace` would otherwise leave both versions
+--       in place and make a matching call ambiguous.
 -- ----------------------------------------------------------------------------
+drop function if exists public.get_practice_exam_payload(varchar, varchar, varchar);
+
 create or replace function public.get_practice_exam_payload(
     p_exam_code    varchar,
-    p_student_code varchar,
-    p_class_name   varchar
+    p_student_code varchar default null,
+    p_class_name   varchar default null,
+    p_full_name    varchar default null
 ) returns jsonb
 language plpgsql
 security definer
@@ -1725,15 +1756,12 @@ set search_path = public, pg_temp
 as $$
 declare
     v_exam      public.exams%rowtype;
+    v_match     public.students%rowtype;
+    v_matched   boolean := false;
     v_questions jsonb;
     v_total     integer;
 begin
-    if p_student_code is null or trim(p_student_code) = ''
-       or p_class_name is null or trim(p_class_name) = '' then
-        return jsonb_build_object('success', false, 'message', 'STUDENT_NOT_WHITELISTED');
-    end if;
-
-    select * into v_exam from public.exams where code = p_exam_code;
+    select * into v_exam from public.exams where code = upper(trim(coalesce(p_exam_code, '')));
     if not found then
         return jsonb_build_object('success', false, 'message', 'EXAM_NOT_FOUND');
     end if;
@@ -1748,15 +1776,29 @@ begin
         return jsonb_build_object('success', false, 'message', 'PRACTICE_NOT_ALLOWED');
     end if;
 
-    -- Caller must be on THIS exam's roster (case/whitespace-insensitive, matching
-    -- verify_and_acquire_session's identity comparison).
-    if not exists (
-        select 1
+    -- Flexible whitelist check: by student_code when supplied, otherwise by
+    -- (full_name + class_name). `v_matched` is tracked explicitly rather than
+    -- relying on FOUND, which an if/elsif with no branch would leave stale.
+    if p_student_code is not null and trim(p_student_code) <> '' then
+        select * into v_match
           from public.students s
-         where s.exam_code = p_exam_code
+         where s.exam_code = v_exam.code
            and lower(trim(s.student_code)) = lower(trim(p_student_code))
-           and lower(trim(s.class_name))   = lower(trim(p_class_name))
-    ) then
+         limit 1;
+        v_matched := found;
+    elsif p_full_name is not null and trim(p_full_name) <> ''
+      and p_class_name is not null and trim(p_class_name) <> '' then
+        select * into v_match
+          from public.students s
+         where s.exam_code = v_exam.code
+           and lower(trim(s.full_name))  = lower(trim(p_full_name))
+           and lower(trim(s.class_name)) = lower(trim(p_class_name))
+         order by s.student_code
+         limit 1;
+        v_matched := found;
+    end if;
+
+    if not v_matched then
         return jsonb_build_object('success', false, 'message', 'STUDENT_NOT_WHITELISTED');
     end if;
 
@@ -1800,6 +1842,9 @@ begin
             'duration_minutes', v_exam.duration_minutes,
             'total_questions',  v_total
         ),
+        -- The roster row is authoritative: the client displays this rather than
+        -- echoing whatever identity was typed.
+        'student_name', v_match.full_name,
         'questions', v_questions
     );
 end;
@@ -1890,9 +1935,18 @@ $$;
 --       is documented in migration 20261005110000: a live exam code reveals that
 --       exam's names/codes/classes, but no secret. An empty roster is not an
 --       error — the SPA falls back to manual entry.
+--
+--       Phase 8.1: `p_for_practice = true` returns the roster of a
+--       practice-enabled exam even when it is CLOSED or outside its window, so a
+--       student can self-practise after the sitting. It still refuses a trashed
+--       exam and one with `allow_practice = false`. The signature gained a
+--       parameter, so the OLD 1-arg function is dropped first (overload hazard).
 -- ----------------------------------------------------------------------------
+drop function if exists public.get_exam_roster(varchar);
+
 create or replace function public.get_exam_roster(
-    p_exam_code varchar
+    p_exam_code    varchar,
+    p_for_practice boolean default false
 ) returns jsonb
 language plpgsql
 security definer
@@ -1916,15 +1970,28 @@ begin
         return jsonb_build_object('success', false, 'code', 'EXAM_NOT_FOUND', 'message', 'Đề thi không tồn tại.');
     end if;
 
-    if v_exam.is_active is not true then
-        return jsonb_build_object('success', false, 'code', 'EXAM_INACTIVE', 'message', 'Đề thi hiện đang đóng.');
-    end if;
+    if p_for_practice then
+        -- Practice mode: the ONLY gate is the teacher's explicit consent. The
+        -- open/close switch and the schedule are deliberately NOT consulted —
+        -- that is the point of this parameter (self-study after the sitting).
+        if v_exam.allow_practice is not true then
+            return jsonb_build_object(
+                'success', false,
+                'code',    'PRACTICE_NOT_ALLOWED',
+                'message', 'Đề thi này chưa mở cho tự luyện tập.'
+            );
+        end if;
+    else
+        if v_exam.is_active is not true then
+            return jsonb_build_object('success', false, 'code', 'EXAM_INACTIVE', 'message', 'Đề thi hiện đang đóng.');
+        end if;
 
-    if v_exam.starts_at is not null and now() < v_exam.starts_at then
-        return jsonb_build_object('success', false, 'code', 'EXAM_NOT_STARTED', 'message', 'Chưa đến giờ làm bài.');
-    end if;
-    if v_exam.ends_at is not null and now() > v_exam.ends_at then
-        return jsonb_build_object('success', false, 'code', 'EXAM_EXPIRED', 'message', 'Đề thi đã kết thúc.');
+        if v_exam.starts_at is not null and now() < v_exam.starts_at then
+            return jsonb_build_object('success', false, 'code', 'EXAM_NOT_STARTED', 'message', 'Chưa đến giờ làm bài.');
+        end if;
+        if v_exam.ends_at is not null and now() > v_exam.ends_at then
+            return jsonb_build_object('success', false, 'code', 'EXAM_EXPIRED', 'message', 'Đề thi đã kết thúc.');
+        end if;
     end if;
 
     -- Three display keys ONLY: `pin`/`dob` must never leave the server here.
@@ -1941,11 +2008,14 @@ begin
      where s.exam_code = v_exam.code;
 
     return jsonb_build_object(
-        'success',    true,
-        'exam_code',  v_exam.code,
-        'title',      v_exam.title,
-        'pin_mode',   v_exam.pin_mode,
-        'candidates', coalesce(v_candidates, '[]'::jsonb)
+        'success',        true,
+        'exam_code',      v_exam.code,
+        'title',          v_exam.title,
+        'pin_mode',       v_exam.pin_mode,
+        -- Lets the practice picker distinguish "closed" from "not open for
+        -- practice" without a second round-trip.
+        'allow_practice', v_exam.allow_practice,
+        'candidates',     coalesce(v_candidates, '[]'::jsonb)
     );
 end;
 $$;
@@ -2191,16 +2261,17 @@ revoke all on function public.get_student_exam_payload(varchar, uuid)           
 revoke all on function public.submit_exam_result(varchar, varchar, uuid, jsonb, jsonb)                     from public;
 revoke all on function public.record_proctoring_snapshot(varchar, varchar, uuid, text)                     from public;
 revoke all on function public.get_certificate_verification(uuid)                                          from public;
-revoke all on function public.verify_student_practice(varchar, varchar)                                    from public;
+revoke all on function public.verify_student_practice(varchar, varchar, varchar)                           from public;
 revoke all on function public.update_exam_questions_safe(varchar, jsonb)                                   from public;
 revoke all on function public.grade_exam_answers(uuid, jsonb)                                              from public;
 revoke all on function public.delete_exam(varchar)                                                         from public;
 revoke all on function public.restore_exam(varchar)                                                        from public;
 revoke all on function public.purge_expired_exams()                                                        from public;
 revoke all on function public.recalculate_exam_scores(varchar)                                             from public;
-revoke all on function public.get_practice_exam_payload(varchar, varchar, varchar)                          from public;
--- Phase 6.3 — student-facing. Returns a sanitised roster (no pin/dob).
-revoke all on function public.get_exam_roster(varchar)                                                    from public;
+revoke all on function public.get_practice_exam_payload(varchar, varchar, varchar, varchar)                   from public;
+-- Phase 6.3 / 8.1 — student-facing. Returns a sanitised roster (no pin/dob);
+-- `p_for_practice=true` also serves a practice-enabled exam that is closed.
+revoke all on function public.get_exam_roster(varchar, boolean)                                          from public;
 -- Phase 7.1 — student-facing write path for the tree activity.
 revoke all on function public.submit_tree_answer(uuid, varchar, varchar, text)                            from public;
 -- Phase 7.4 — student-facing check-in read for the tree activity.
@@ -2214,12 +2285,12 @@ grant execute on function public.get_student_exam_payload(varchar, uuid)        
 grant execute on function public.submit_exam_result(varchar, varchar, uuid, jsonb, jsonb)                     to anon, authenticated;
 grant execute on function public.record_proctoring_snapshot(varchar, varchar, uuid, text)                     to anon, authenticated;
 grant execute on function public.get_certificate_verification(uuid)                                           to anon, authenticated;
-grant execute on function public.verify_student_practice(varchar, varchar)                                     to anon, authenticated;
+grant execute on function public.verify_student_practice(varchar, varchar, varchar)                             to anon, authenticated;
 -- Phase 5.8: student-facing, but the body gates on the exam roster + allow_practice.
-grant execute on function public.get_practice_exam_payload(varchar, varchar, varchar)                          to anon, authenticated;
--- Phase 6.3 — student-facing: the roster picker must work BEFORE the student has
--- an identity, so this is anon-executable by design.
-grant execute on function public.get_exam_roster(varchar)                                                     to anon, authenticated;
+grant execute on function public.get_practice_exam_payload(varchar, varchar, varchar, varchar)                  to anon, authenticated;
+-- Phase 6.3 / 8.1 — student-facing: the roster picker must work BEFORE the student
+-- has an identity, so this is anon-executable by design.
+grant execute on function public.get_exam_roster(varchar, boolean)                                             to anon, authenticated;
 -- Phase 7.1 — student-facing. The similarity rules live inside the body, so a
 -- caller cannot bypass them by touching the table (anon holds no table rights).
 grant execute on function public.submit_tree_answer(uuid, varchar, varchar, text)                              to anon, authenticated;

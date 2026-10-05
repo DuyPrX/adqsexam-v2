@@ -3,13 +3,14 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
-import { BookOpen, FileText, LogOut, Pencil, Plus, Trash2, Users } from 'lucide-react';
+import { BookOpen, FileText, LogOut, Pencil, Plus, Share2, Trash2, Users } from 'lucide-react';
 import { signOut } from '@/lib/supabase/auth';
 import type { ExamRow } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { ExamActiveToggle } from './ExamActiveToggle';
 import { DeleteExamDialog } from './DeleteExamDialog';
 import { TrashList } from './TrashList';
+import { ExamShareModal } from './ExamShareModal';
 
 interface ExamListProps {
   exams: ExamRow[];
@@ -30,6 +31,8 @@ export function ExamList({ exams, trashedExams, counts, teacherEmail }: ExamList
   const router = useRouter();
   const [isSigningOut, setIsSigningOut] = useState(false);
   const [tab, setTab] = useState<'active' | 'trash'>('active');
+  /** Exam whose share/QR modal is open (Phase 8.1). */
+  const [sharingExam, setSharingExam] = useState<ExamRow | null>(null);
 
   const handleSignOut = async () => {
     setIsSigningOut(true);
@@ -180,6 +183,14 @@ export function ExamList({ exams, trashedExams, counts, teacherEmail }: ExamList
                         >
                           Xem kết quả
                         </Link>
+                        <button
+                          type="button"
+                          onClick={() => setSharingExam(exam)}
+                          className="inline-flex items-center gap-1 text-xs font-semibold text-slate-700 underline-offset-2 transition hover:text-slate-900 hover:underline"
+                        >
+                          <Share2 size={12} />
+                          Chia sẻ / QR
+                        </button>
                         <DeleteExamDialog
                           examCode={exam.code}
                           examTitle={exam.title}
@@ -194,6 +205,14 @@ export function ExamList({ exams, trashedExams, counts, teacherEmail }: ExamList
             </table>
           </div>
         </div>
+      )}
+
+      {sharingExam && (
+        <ExamShareModal
+          exam={{ code: sharingExam.code, title: sharingExam.title }}
+          isOpen
+          onClose={() => setSharingExam(null)}
+        />
       )}
     </div>
   );

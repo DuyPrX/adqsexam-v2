@@ -246,3 +246,24 @@ export interface StudentRow {
   full_name: string;
   class_name: string;
 }
+
+/**
+ * A full row of `public.students` — one candidate ("thí sinh") on an exam's
+ * whitelist, as managed by the Phase 8.1 candidate tab.
+ *
+ * Unlike `StudentRow` (a trimmed shape for the live monitor) this carries the
+ * credentials, which only the owning teacher may read; RLS
+ * (`students_teacher_all`) is what enforces that.
+ */
+export interface ExamCandidateRow {
+  id: string;
+  student_code: string;
+  full_name: string;
+  class_name: string;
+  exam_code: string;
+  /** ISO `YYYY-MM-DD`, or null. The DDMM PIN fallback. */
+  dob: string | null;
+  /** Explicit PIN; takes precedence over `dob`. Null = fall back to DOB. */
+  pin: string | null;
+  created_at: string;
+}

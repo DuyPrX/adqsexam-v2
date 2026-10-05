@@ -1,10 +1,20 @@
 /**
- * ADQS Exam v2 — Tree of Knowledge procedural renderer (Phase 7.2)
+ * ADQS Exam v2 — Tree of Knowledge procedural renderer (Phase 7.2 / 8.2)
  * =====================================================================
  * A dependency-free, deterministic Canvas 2D renderer for the "Cây tri thức"
  * activity. Every visual property derives from `tree_seed` plus the session's
  * participation/vitality figures, so two clients handed the same session data
  * draw the SAME tree — no tree geometry is ever stored server-side.
+ *
+ * PHASE 8.2 — ORGANIC REDESIGN
+ *   The renderer now grows like a plant rather than assembling primitives:
+ *     SEED     P = 0            a dormant seed nestled in a soil mound
+ *     SPROUT   0 < P <= 0.15    a tender stalk with two cotyledon leaves
+ *     SAPLING  0.15 < P <= 0.50 curved branches + organic foliage puffs
+ *     MATURING 0.50 < P < 1.0   a sprawling, gently swaying canopy
+ *     BLOOM    P = 1.0          petals + golden sparkles (`isFlourished`)
+ *   Submitted answers are rendered as glowing translucent "knowledge dewdrops"
+ *   (`drawDewdrop`) whose radiance scales with word count and vitality.
  *
  * ISOMORPHIC BY CONSTRUCTION
  *   Nothing touches `document`, `window`, `requestAnimationFrame` or `Math.random`
@@ -13,10 +23,11 @@
  *   module under plain Node and exercise the real shipped code.
  *
  * TESTABILITY SPLIT (the reason this module is shaped the way it is)
- *   `computeTreeState()` is PURE and returns fruit anchors in NORMALISED [0,1]
- *   coordinates. `layoutFruitAnchors()` maps them to pixels with a UNIFORM scale
- *   factor, which means anchor separation measured in normalised space is
- *   preserved exactly in pixels — so "fruits do not overlap" is provable headless.
+ *   `computeTreeState()` is PURE and returns dewdrop anchors in NORMALISED [0,1]
+ *   coordinates. `layoutDewdropAnchors()` maps them to pixels with a UNIFORM
+ *   scale factor, which means anchor separation measured in normalised space is
+ *   preserved exactly in pixels — so "dewdrops do not overlap" is provable
+ *   headless.
  *
  * DETERMINISM DISCIPLINE
  *   The tested geometry avoids implementation-defined math: no `Math.hypot`
@@ -29,23 +40,23 @@
    Constants
    ===================================================================== */
 
-/** Reference "design" min-dimension. Fruit radii are expressed relative to it. */
+/** Reference "design" min-dimension. Dewdrop radii are expressed relative to it. */
 export const NOMINAL_MIN_DIM = 520;
 
-/** Fruit base radius in pixels; the spec's `baseRadius` term. */
+/** Dewdrop base radius in pixels; the spec's `baseRadius` term. */
 export const BASE_FRUIT_RADIUS = 9;
 
 /**
  * Canopy ellipse in NORMALISED coordinates. Kept inside (0,1) with room for the
- * largest fruit radius so `nx ± r` never leaves the canvas bounding box.
+ * largest dewdrop radius so `nx ± r` never leaves the canvas bounding box.
  */
 const CANOPY = { cx: 0.5, cy: 0.40, rx: 0.46, ry: 0.38 };
 
 /**
- * Minimum clear space between fruit edges, in normalised units.
+ * Minimum clear space between dewdrop edges, in normalised units.
  *
  * Non-zero on purpose. With a gap of 0 the relaxation converges to exactly
- * TANGENT fruits (residual ~1e-13px of float noise), which looks cramped and
+ * TANGENT dewdrops (residual ~1e-13px of float noise), which looks cramped and
  * makes "do not overlap" an assertion against zero rather than a positive
  * margin. ~0.012 is about 6px on a reference canvas — visually comfortable and
  * comfortably provable.
@@ -161,27 +172,40 @@ export function themeForSeed(seed) {
    ===================================================================== */
 
 /**
- * The five growth stages. `maxInclusive` is the participation upper bound, so
- * the ladder is checked in order and the FIRST match wins:
+ * The five growth stage IDENTIFIERS (Phase 8.2). Exposed as string constants so
+ * call sites compare against `TREE_STAGES.BLOOM` rather than a bare literal.
+ */
+export const TREE_STAGES = {
+  SEED: 'seed',           // P = 0
+  SPROUT: 'sprout',       // 0 < P <= 0.15
+  SAPLING: 'sapling',     // 0.15 < P <= 0.50
+  MATURING: 'maturing',   // 0.50 < P < 1.0
+  BLOOM: 'bloom',         // P >= 1.0 (full flourish celebration)
+};
+
+/**
+ * The growth ladder. `maxInclusive` is the participation upper bound, so the
+ * ladder is checked in order and the FIRST match wins:
  *   P = 0        -> seed      (exactly zero participation)
  *   P <= 0.15    -> sprout
- *   P <= 0.45    -> sapling
- *   P <= 0.75    -> maturing
- *   P <= 1.00    -> mature
+ *   P <= 0.50    -> sapling
+ *   P < 1.00     -> maturing
+ *   P = 1.00     -> bloom     (checked by short-circuit, see below)
  *
- * Boundaries are inclusive on the upper end, which is what makes `P = 1.0`
- * reach the maximum recursion depth rather than falling off the ladder.
+ * BLOOM is reached only at exactly P = 1.0, so its `maxInclusive` mirrors
+ * MATURING and is never the deciding rung — `stageForParticipation` returns it
+ * before the loop for `ratio >= 1`.
  */
-export const TREE_STAGES = [
-  { name: 'seed', label: 'Hạt giống', maxInclusive: 0.0, maxDepth: 0 },
-  { name: 'sprout', label: 'Mầm non', maxInclusive: 0.15, maxDepth: 1 },
-  { name: 'sapling', label: 'Cây non', maxInclusive: 0.45, maxDepth: 3 },
-  { name: 'maturing', label: 'Cây trưởng thành', maxInclusive: 0.75, maxDepth: 5 },
-  { name: 'mature', label: 'Cây cổ thụ', maxInclusive: 1.0, maxDepth: 7 },
+export const STAGE_LADDER = [
+  { name: TREE_STAGES.SEED, label: 'Hạt giống', maxInclusive: 0.0, maxDepth: 0 },
+  { name: TREE_STAGES.SPROUT, label: 'Mầm non', maxInclusive: 0.15, maxDepth: 1 },
+  { name: TREE_STAGES.SAPLING, label: 'Cây non', maxInclusive: 0.50, maxDepth: 3 },
+  { name: TREE_STAGES.MATURING, label: 'Cây trưởng thành', maxInclusive: 1.0, maxDepth: 5 },
+  { name: TREE_STAGES.BLOOM, label: 'Đơm hoa kết trái', maxInclusive: 1.0, maxDepth: 7 },
 ];
 
 /** The maximum recursion depth of the final stage — the `P = 1.0` target. */
-export const MAX_BRANCH_DEPTH = TREE_STAGES[TREE_STAGES.length - 1].maxDepth;
+export const MAX_BRANCH_DEPTH = STAGE_LADDER[STAGE_LADDER.length - 1].maxDepth;
 
 export function clamp(value, lo, hi) {
   return value < lo ? lo : value > hi ? hi : value;
@@ -190,10 +214,12 @@ export function clamp(value, lo, hi) {
 /** Resolves the growth stage for a participation ratio. */
 export function stageForParticipation(p) {
   const ratio = clamp(Number.isFinite(p) ? p : 0, 0, 1.0);
-  for (const stage of TREE_STAGES) {
+  // A fully-participating class is the one and only flourish state.
+  if (ratio >= 1.0) return STAGE_LADDER[STAGE_LADDER.length - 1];
+  for (const stage of STAGE_LADDER) {
     if (ratio <= stage.maxInclusive) return stage;
   }
-  return TREE_STAGES[TREE_STAGES.length - 1];
+  return STAGE_LADDER[STAGE_LADDER.length - 1];
 }
 
 /** Parses a timestamp that may be an ISO string, a Date, or epoch millis. */
@@ -246,14 +272,23 @@ export function computeVitality({ submissions, createdAt, timeLimitMinutes }) {
 }
 
 /* =====================================================================
-   D. Fruit anchor placement
+   D. Dewdrop anchor placement
    ===================================================================== */
 
-/** The spec's per-fruit radius formula, in PIXELS. */
-export function fruitRadiusPx(wordCount) {
+/**
+ * The spec's per-dewdrop radius formula, in PIXELS:
+ *   radius = baseRadius + clamp(wordCount / 12, 1.5, 6)
+ * A longer answer radiates further; the clamp keeps a very long answer from
+ * crowding its neighbours (a class full of long answers would otherwise have to
+ * shrink every anchor, punishing everyone).
+ */
+export function dewdropRadiusPx(wordCount) {
   const words = Number.isFinite(Number(wordCount)) ? Number(wordCount) : 0;
-  return BASE_FRUIT_RADIUS + clamp(words / 10, 2, 8);
+  return BASE_FRUIT_RADIUS + clamp(words / 12, 1.5, 6);
 }
+
+/** Back-compat alias for the Phase 7.2 name. */
+export const fruitRadiusPx = dewdropRadiusPx;
 
 /**
  * Places one anchor per submission inside the canopy ellipse.
@@ -261,8 +296,8 @@ export function fruitRadiusPx(wordCount) {
  * Strategy: rejection-sample initial positions (no trigonometry, so the result
  * is exactly reproducible), then run a deterministic relaxation that pushes
  * overlapping pairs apart. Convergence is guaranteed by first SHRINKING the
- * radii if the roster is too dense to pack, so a large class degrades fruit size
- * rather than producing an overlapping mess.
+ * radii if the roster is too dense to pack, so a large class degrades dewdrop
+ * size rather than producing an overlapping mess.
  */
 function placeAnchors(submissions, rand) {
   const count = submissions.length;
@@ -270,7 +305,7 @@ function placeAnchors(submissions, rand) {
 
   // Desired radii, converted from pixels to normalised units.
   const desired = submissions.map(
-    (submission) => fruitRadiusPx(submission.word_count ?? submission.wordCount) / NOMINAL_MIN_DIM,
+    (submission) => dewdropRadiusPx(submission.word_count ?? submission.wordCount) / NOMINAL_MIN_DIM,
   );
 
   // Packing feasibility: shrink uniformly when the roster cannot fit. The
@@ -427,6 +462,8 @@ export function computeTreeState({
     stage: stage.name,
     stageLabel: stage.label,
     maxDepth: stage.maxDepth,
+    // Phase 8.2 — the whole-class celebration flag. True only at P = 1.0.
+    isFlourished: participation >= 1.0,
     vitality,
     anchors,
   };
@@ -443,7 +480,7 @@ export function computeTreeState({
  * precisely so that normalised separation is preserved in pixels — a per-axis
  * scale would squash the canopy and could introduce overlaps on a wide canvas.
  */
-export function layoutFruitAnchors(anchors, width, height) {
+export function layoutDewdropAnchors(anchors, width, height) {
   const w = Number(width) || 0;
   const h = Number(height) || 0;
   const scale = Math.min(w, h);
@@ -458,14 +495,17 @@ export function layoutFruitAnchors(anchors, width, height) {
   }));
 }
 
+/** Back-compat alias for the Phase 7.2 name. */
+export const layoutFruitAnchors = layoutDewdropAnchors;
+
 /**
- * Finds the fruit under a point, or null.
+ * Finds the dewdrop under a point, or null.
  *
- * Iterates last-to-first so the most recently drawn (visually topmost) fruit
+ * Iterates last-to-first so the most recently drawn (visually topmost) dewdrop
  * wins, matching what the user perceives when two hitboxes just touch.
  * Squared distances only — no `sqrt`, so it stays exact and cheap.
  */
-export function hitTestFruits(anchors, mouseX, mouseY) {
+export function hitTestDewdrops(anchors, mouseX, mouseY) {
   const px = Number(mouseX);
   const py = Number(mouseY);
   if (!Number.isFinite(px) || !Number.isFinite(py)) return null;
@@ -478,6 +518,9 @@ export function hitTestFruits(anchors, mouseX, mouseY) {
   }
   return null;
 }
+
+/** Back-compat alias for the Phase 7.2 name. */
+export const hitTestFruits = hitTestDewdrops;
 
 /* =====================================================================
    G. TreeRenderer
@@ -501,10 +544,22 @@ export class TreeRenderer {
     };
     this.animFrameId = null;
     this.time = 0;
-    /** Clickable/tappable fruit hitboxes in PIXELS, populated by `render()`. */
+    /** Clickable/tappable dewdrop hitboxes in PIXELS, populated by `render()`. */
     this.fruitAnchors = [];
     this._treeData = null;
     this._tips = [];
+    this._theme = THEMES[0];
+    this._vitality = 1;
+    this._stage = TREE_STAGES.SEED;
+    this._showFoliage = false;
+    this._isFlourished = false;
+    this._w = this.options.width;
+    this._h = this.options.height;
+  }
+
+  /** Phase 8.2 name for the hitbox cache; same array as `fruitAnchors`. */
+  get dewdropAnchors() {
+    return this.fruitAnchors;
   }
 
   /** Fits the backing store to the element so retina/4K displays stay crisp. */
@@ -522,7 +577,178 @@ export class TreeRenderer {
     return { width: cssWidth, height: cssHeight };
   }
 
-  /** Recursive branch pass. Collects leaf tips for foliage + fruit anchoring. */
+  /* ---------------- private drawing helpers ---------------- */
+
+  /** Sky gradient backdrop. */
+  _drawBackdrop(ctx, w, h, theme) {
+    ctx.clearRect(0, 0, w, h);
+    if (typeof ctx.createLinearGradient === 'function') {
+      const sky = ctx.createLinearGradient(0, 0, 0, h);
+      sky.addColorStop(0, theme.sky[0]);
+      sky.addColorStop(1, theme.sky[1]);
+      ctx.fillStyle = sky;
+      ctx.fillRect(0, 0, w, h);
+    }
+  }
+
+  /**
+   * Layered, gently curved soil mound the plant grows out of.
+   * @returns {number} The ground line Y the trunk/seed sits on.
+   */
+  _drawSoil(ctx, w, h, theme) {
+    const groundY = h * 0.88;
+    ctx.fillStyle = theme.soil[0];
+    ctx.beginPath();
+    ctx.ellipse(w / 2, groundY + h * 0.06, w * 0.36, h * 0.10, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = theme.soil[1];
+    ctx.beginPath();
+    ctx.ellipse(w / 2, groundY + h * 0.10, w * 0.30, h * 0.07, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // A soft nutrient ridge so the mound reads as rich soil, not a grey blob.
+    ctx.fillStyle = theme.leaf;
+    ctx.globalAlpha = 0.16;
+    ctx.beginPath();
+    ctx.ellipse(w / 2, groundY + h * 0.015, w * 0.30, h * 0.05, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    return groundY;
+  }
+
+  /** A dormant seed nestled in the mound (P = 0). */
+  _drawSeed(ctx, w, groundY, theme) {
+    const seedRx = w * 0.030;
+    const seedRy = w * 0.021;
+    // Soft dormant vitality: a slow breath that never fully fades.
+    const breath = 0.42 + Math.abs(Math.sin(this.time * 1.2)) * 0.12;
+    if (typeof ctx.createRadialGradient === 'function') {
+      const glow = ctx.createRadialGradient(w / 2, groundY, 0, w / 2, groundY, seedRx * 3);
+      glow.addColorStop(0, theme.fruitGlow);
+      glow.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.globalAlpha = breath;
+      ctx.fillStyle = glow;
+      ctx.beginPath();
+      ctx.arc(w / 2, groundY, seedRx * 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    ctx.fillStyle = theme.trunkDark;
+    ctx.beginPath();
+    ctx.ellipse(w / 2, groundY, seedRx, seedRy, 0.3, 0, Math.PI * 2);
+    ctx.fill();
+    // Inner seam: the hint of the crack the sprout will split open.
+    ctx.strokeStyle = theme.trunk;
+    ctx.lineWidth = Math.max(1, w * 0.003);
+    ctx.beginPath();
+    ctx.ellipse(w / 2, groundY, seedRx * 0.62, seedRy * 0.62, 0.3, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  /** A tender stalk with two drooping cotyledon leaves (0 < P <= 0.15). */
+  _drawSprout(ctx, w, groundY, theme) {
+    const stalkTop = groundY - w * 0.055;
+    const breeze = Math.sin(this.time) * w * 0.006;
+    ctx.strokeStyle = theme.leaf;
+    ctx.lineWidth = Math.max(2, w * 0.006);
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(w / 2, groundY);
+    ctx.quadraticCurveTo(w / 2 + breeze, groundY - w * 0.030, w / 2, stalkTop);
+    ctx.stroke();
+
+    // Two cotyledon leaves, angling out and drooping tenderly.
+    const leafR = w * 0.026;
+    this._foliagePuff(ctx, w / 2 - leafR * 0.95, stalkTop + leafR * 0.20, leafR, theme, 0.95);
+    this._foliagePuff(ctx, w / 2 + leafR * 0.95, stalkTop + leafR * 0.20, leafR, theme, 0.95);
+
+    // Central budding tip.
+    ctx.fillStyle = theme.leafAlt;
+    ctx.beginPath();
+    ctx.arc(w / 2, stalkTop - leafR * 0.18, leafR * 0.34, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  /**
+   * A cluster of overlapping translucent circles with a soft radial gradient —
+   * the volumetric "foliage puff" primitive shared by the sprout and canopy.
+   */
+  _foliagePuff(ctx, x, y, radius, theme, alphaScale = 1) {
+    const blobs = [
+      [0, 0, 1.0, 0.72],
+      [-0.62, 0.34, 0.74, 0.55],
+      [0.60, 0.26, 0.70, 0.60],
+    ];
+    const vitality = this._vitality ?? 1;
+    for (const [ox, oy, scale, alpha] of blobs) {
+      const bx = x + ox * radius;
+      const by = y + oy * radius;
+      const br = radius * scale;
+      if (typeof ctx.createRadialGradient === 'function') {
+        const grad = ctx.createRadialGradient(bx - br * 0.3, by - br * 0.3, br * 0.1, bx, by, br);
+        grad.addColorStop(0, theme.leafAlt);
+        grad.addColorStop(1, theme.leaf);
+        ctx.fillStyle = grad;
+      } else {
+        ctx.fillStyle = theme.leaf;
+      }
+      ctx.globalAlpha = clamp(alpha * alphaScale * (0.7 + vitality * 0.3), 0.15, 0.95);
+      ctx.beginPath();
+      ctx.arc(bx, by, br, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /** One five-petal pastel blossom with a golden pistil. */
+  _drawFlower(ctx, x, y, radius, theme) {
+    const petals = 5;
+    ctx.fillStyle = theme.leafAlt;
+    for (let i = 0; i < petals; i += 1) {
+      const angle = (i / petals) * Math.PI * 2;
+      ctx.beginPath();
+      ctx.arc(x + Math.cos(angle) * radius * 0.7, y + Math.sin(angle) * radius * 0.7, radius * 0.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.fillStyle = '#fbbf24';
+    ctx.beginPath();
+    ctx.arc(x, y, radius * 0.42, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  /** The P = 1.0 celebration: blossoms + drifting golden sparkles on the canopy. */
+  _drawBloom(ctx, w, theme) {
+    const tips = this._tips;
+    if (tips.length === 0) return;
+    const count = Math.min(tips.length, 14);
+
+    for (let i = 0; i < count; i += 1) {
+      const tip = tips[i];
+      this._drawFlower(ctx, tip.x, tip.y - w * 0.012, Math.max(6, w * 0.012), theme);
+    }
+    for (let i = 0; i < count; i += 1) {
+      const tip = tips[(i * 3) % tips.length];
+      const phase = this.time * 2 + i;
+      const sr = Math.max(1.5, w * 0.0035);
+      ctx.fillStyle = '#fde68a';
+      ctx.globalAlpha = 0.5 + 0.45 * Math.abs(Math.sin(phase * 1.7));
+      ctx.beginPath();
+      ctx.arc(tip.x + Math.sin(phase) * w * 0.03, tip.y - w * 0.03 - (i % 3) * w * 0.012, sr, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /** The branch + foliage pass for SAPLING / MATURING / BLOOM. */
+  _drawCanopy(ctx, w, h, groundY, treeData, theme) {
+    const branchPRNG = createPRNG((treeData.seed >>> 0) ^ 0x9e3779b9);
+    // Gentle idle breeze; `time` only advances via startAnimation().
+    const swayOffset = Math.sin(this.time * 0.8) * 1.4;
+    const trunkLength = h * (0.16 + 0.1 * treeData.participation);
+    this.drawBranch(w / 2, groundY, trunkLength, -Math.PI / 2, 0, treeData.maxDepth, branchPRNG, swayOffset);
+    if (this._isFlourished) this._drawBloom(ctx, w, theme);
+  }
+
+  /** Recursive branch pass. Collects leaf tips and paints terminal foliage. */
   drawBranch(x, y, length, angle, depth, maxDepth, branchPRNG, swayOffset) {
     const ctx = this.ctx;
     const theme = this._theme || THEMES[0];
@@ -533,16 +759,32 @@ export class TreeRenderer {
     const endX = x + Math.cos(angle) * length + sway;
     const endY = y + Math.sin(angle) * length;
 
+    // Organic curvature: the trunk leader stays straight, deeper branches bow
+    // under a trigonometric breeze. The END point is unchanged, so tip (and thus
+    // bloom) placement stays a pure function of the seed.
+    const curve = depth === 0 ? 0 : Math.sin(this.time * 1.3 + depth) * length * 0.1;
+    const ctrlX = x + Math.cos(angle) * length * 0.5 - Math.sin(angle) * curve + sway * 0.6;
+    const ctrlY = y + Math.sin(angle) * length * 0.5 + Math.cos(angle) * curve;
+
     ctx.strokeStyle = depth <= 1 ? theme.trunkDark : theme.trunk;
     ctx.lineWidth = Math.max(1, (maxDepth - depth + 1) * this.options.branchWidth * 0.35);
     ctx.lineCap = 'round';
     ctx.beginPath();
     ctx.moveTo(x + sway * 0.6, y);
-    ctx.lineTo(endX, endY);
+    if (typeof ctx.quadraticCurveTo === 'function') {
+      ctx.quadraticCurveTo(ctrlX, ctrlY, endX, endY);
+    } else {
+      ctx.lineTo(endX, endY);
+    }
     ctx.stroke();
 
     if (depth === maxDepth) {
       this._tips.push({ x: endX, y: endY, depth });
+      // Terminal foliage puff — only once the tree has a canopy to speak of.
+      if (this._showFoliage) {
+        const radius = Math.max(7, (this._w || this.options.width) * 0.026 * (0.8 + (this._vitality ?? 1) * 0.4));
+        this._foliagePuff(ctx, endX, endY, radius, theme);
+      }
       return;
     }
 
@@ -566,17 +808,20 @@ export class TreeRenderer {
   }
 
   /**
-   * Draws one fruit. `isHighlighted` is applied by `render()` for hovered/picked
-   * fruits, and `vitality` drives the glow radius so a lively session sparkles.
+   * Draws one knowledge dewdrop: an ethereal glow ring, a translucent teardrop
+   * with a specular highlight, and (when highlighted) a pulsing golden halo.
+   * Radiance scales with vitality and with the submission's word count (via the
+   * anchor's radius).
    */
-  drawFruit(ctx, x, y, fruitData, theme, isHighlighted) {
+  drawDewdrop(ctx, x, y, dewdropData, theme, isHighlighted) {
     if (!ctx) return;
     const palette = theme || THEMES[0];
-    const radius = Math.max(2, fruitData.pixelRadius ?? fruitData.radius ?? 8);
+    const radius = Math.max(2, dewdropData.pixelRadius ?? dewdropData.radius ?? 8);
     const vitality = this._vitality ?? 1;
 
-    // Glow: stronger with vitality, stronger again when highlighted.
-    const glowScale = isHighlighted ? 2.1 : 1.35;
+    // 1. Outer ethereal glow ring — brighter with vitality, brighter again when
+    //    highlighted (the student's own droplet or an inspected one).
+    const glowScale = isHighlighted ? 2.4 : 1.6;
     const glowRadius = radius * glowScale * (0.7 + vitality * 0.5);
     if (typeof ctx.createRadialGradient === 'function') {
       const glow = ctx.createRadialGradient(x, y, radius * 0.2, x, y, glowRadius);
@@ -588,24 +833,45 @@ export class TreeRenderer {
       ctx.fill();
     }
 
-    // Body, then a highlight speck for a spherical read.
+    // 2. Translucent teardrop body: a bulbous base drawn up to a pointed tip.
+    const tipY = y - radius * 1.7;
     ctx.fillStyle = palette.fruit;
+    ctx.globalAlpha = 0.92;
     ctx.beginPath();
-    ctx.arc(x, y, radius, 0, Math.PI * 2);
-    ctx.fill();
-
-    if (isHighlighted) {
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(x, y, radius + 3, 0, Math.PI * 2);
-      ctx.stroke();
+    ctx.moveTo(x, tipY);
+    if (typeof ctx.bezierCurveTo === 'function') {
+      ctx.bezierCurveTo(x + radius * 1.3, y - radius * 0.5, x + radius * 1.0, y + radius * 0.9, x, y + radius * 0.95);
+      ctx.bezierCurveTo(x - radius * 1.0, y + radius * 0.9, x - radius * 1.3, y - radius * 0.5, x, tipY);
+    } else {
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
     }
+    ctx.fill();
+    ctx.globalAlpha = 1;
 
+    // 3. Inner luminous core + specular highlight (white dot top-left).
     ctx.fillStyle = palette.fruitAlt;
     ctx.beginPath();
-    ctx.arc(x - radius * 0.3, y - radius * 0.3, Math.max(1, radius * 0.3), 0, Math.PI * 2);
+    ctx.arc(x, y + radius * 0.15, Math.max(1, radius * 0.45), 0, Math.PI * 2);
     ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.beginPath();
+    ctx.arc(x - radius * 0.34, y - radius * 0.18, Math.max(0.8, radius * 0.24), 0, Math.PI * 2);
+    ctx.fill();
+
+    // 4. Pulsing golden halo for the highlighted droplet.
+    if (isHighlighted) {
+      const pulse = 0.6 + 0.4 * Math.abs(Math.sin(this.time * 3));
+      ctx.strokeStyle = `rgba(251,191,36,${pulse.toFixed(3)})`;
+      ctx.lineWidth = Math.max(2, radius * 0.28);
+      ctx.beginPath();
+      ctx.arc(x, y + radius * 0.15, radius + 4, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
+  /** Back-compat alias for the Phase 7.2 name. */
+  drawFruit(ctx, x, y, fruitData, theme, isHighlighted) {
+    this.drawDewdrop(ctx, x, y, fruitData, theme, isHighlighted);
   }
 
   /** Full render pass for a state produced by `computeTreeState()`. */
@@ -616,79 +882,55 @@ export class TreeRenderer {
     this._treeData = treeData;
     this._theme = treeData.theme || THEMES[0];
     this._vitality = treeData.vitality ?? 1;
+    this._stage = treeData.stage || TREE_STAGES.SEED;
+    this._isFlourished = treeData.isFlourished === true;
     this._tips = [];
 
     const { width, height } = this.resize();
     const w = width || this.options.width;
     const h = height || this.options.height;
     const theme = this._theme;
+    this._w = w;
+    this._h = h;
 
-    // --- backdrop -------------------------------------------------------
-    ctx.clearRect(0, 0, w, h);
-    if (typeof ctx.createLinearGradient === 'function') {
-      const sky = ctx.createLinearGradient(0, 0, 0, h);
-      sky.addColorStop(0, theme.sky[0]);
-      sky.addColorStop(1, theme.sky[1]);
-      ctx.fillStyle = sky;
-      ctx.fillRect(0, 0, w, h);
-    }
+    // Foliage only makes sense once there is a canopy to hang it on.
+    this._showFoliage = this._stage === TREE_STAGES.SAPLING
+      || this._stage === TREE_STAGES.MATURING
+      || this._stage === TREE_STAGES.BLOOM;
 
-    // --- soil mound (always present; the seed rests in it at P = 0) ------
-    const groundY = h * 0.88;
-    ctx.fillStyle = theme.soil[0];
-    ctx.beginPath();
-    ctx.ellipse(w / 2, groundY + h * 0.06, w * 0.34, h * 0.09, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = theme.soil[1];
-    ctx.beginPath();
-    ctx.ellipse(w / 2, groundY + h * 0.1, w * 0.28, h * 0.06, 0, 0, Math.PI * 2);
-    ctx.fill();
+    this._drawBackdrop(ctx, w, h, theme);
+    const groundY = this._drawSoil(ctx, w, h, theme);
 
-    // --- seed stage: nothing above ground but the seed itself ------------
-    if (treeData.maxDepth === 0) {
-      ctx.fillStyle = theme.trunkDark;
-      ctx.beginPath();
-      ctx.ellipse(w / 2, groundY, w * 0.028, w * 0.02, 0.3, 0, Math.PI * 2);
-      ctx.fill();
+    // --- stage-specific plant artwork -------------------------------------
+    if (this._stage === TREE_STAGES.SEED) {
+      this._drawSeed(ctx, w, groundY, theme);
       this.fruitAnchors = [];
       return;
     }
-
-    // --- branches --------------------------------------------------------
-    const branchPRNG = createPRNG((treeData.seed >>> 0) ^ 0x9e3779b9);
-    // Gentle idle breeze; `time` only advances via startAnimation().
-    const swayOffset = Math.sin(this.time * 0.8) * 1.4;
-    const trunkLength = h * (0.16 + 0.1 * treeData.participation);
-    this.drawBranch(w / 2, groundY, trunkLength, -Math.PI / 2, 0, treeData.maxDepth, branchPRNG, swayOffset);
-
-    // --- foliage at the tips, tinted by vitality -------------------------
-    for (const tip of this._tips) {
-      const radius = Math.max(6, w * 0.022 * (0.8 + treeData.vitality * 0.4));
-      ctx.fillStyle = theme.leaf;
-      ctx.globalAlpha = 0.55 + treeData.vitality * 0.25;
-      ctx.beginPath();
-      ctx.arc(tip.x, tip.y, radius, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = theme.leafAlt;
-      ctx.beginPath();
-      ctx.arc(tip.x - radius * 0.25, tip.y - radius * 0.25, radius * 0.55, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.globalAlpha = 1;
+    if (this._stage === TREE_STAGES.SPROUT) {
+      this._drawSprout(ctx, w, groundY, theme);
+    } else {
+      this._drawCanopy(ctx, w, h, groundY, treeData, theme);
     }
 
-    // --- fruits ----------------------------------------------------------
-    this.fruitAnchors = layoutFruitAnchors(treeData.anchors, w, h);
+    // --- knowledge dewdrops ------------------------------------------------
+    this.fruitAnchors = layoutDewdropAnchors(treeData.anchors, w, h);
     this.fruitAnchors.forEach((anchor) => {
-      this.drawFruit(ctx, anchor.x, anchor.y, anchor, theme, anchor.id === this._highlightId);
+      this.drawDewdrop(ctx, anchor.x, anchor.y, anchor, theme, anchor.id === this._highlightId);
     });
   }
 
-  /** Interactive hit-test for tapping/hovering a fruit. */
-  getFruitAt(mouseX, mouseY) {
-    return hitTestFruits(this.fruitAnchors, mouseX, mouseY);
+  /** Interactive hit-test for tapping/hovering a knowledge dewdrop. */
+  getDewdropAt(mouseX, mouseY) {
+    return hitTestDewdrops(this.fruitAnchors, mouseX, mouseY);
   }
 
-  /** Highlights one fruit by id/student_code on the next render. */
+  /** Back-compat alias for the Phase 7.2 name. */
+  getFruitAt(mouseX, mouseY) {
+    return this.getDewdropAt(mouseX, mouseY);
+  }
+
+  /** Highlights one dewdrop by id/student_code on the next render. */
   setHighlight(id) {
     this._highlightId = id;
     if (this._treeData) this.render(this._treeData);

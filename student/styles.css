@@ -223,6 +223,19 @@ body {
 }
 .tree-canvas { display: block; width: 100%; height: 100%; }
 
+/* ---------- Top-level view router (Phase 8.1) ---------- */
+/* `#view-tree` must fully own the viewport: it replaces the exam shell (header,
+   tabs, forms) rather than nesting inside it, so it is pinned above everything
+   and given its own background. */
+.spa-view { width: 100%; }
+#view-tree {
+  position: relative;
+  z-index: 100;
+  width: 100vw;
+  min-height: 100vh;
+  background: var(--bg);
+}
+
 /* ---------- Tree check-in (Phase 7.4) ---------- */
 .tree-checkin { display: flex; justify-content: center; padding: 8px 0; }
 .tree-checkin__card {
