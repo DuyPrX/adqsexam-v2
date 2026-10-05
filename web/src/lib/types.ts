@@ -81,7 +81,50 @@ export interface ExamRow {
    * nothing.
    */
   allow_practice: boolean;
+  /**
+   * Per-exam PIN policy (Phase 6.1/6.2). Defaults to 'INDIVIDUAL' server-side.
+   * The CHECK constraint guarantees only these three values reach the client.
+   */
+  pin_mode: PinMode;
+  /** Shared PIN, meaningful only when `pin_mode === 'GLOBAL'`. */
+  global_pin: string | null;
   created_at: string;
+}
+
+/** Per-exam admission policy (Phase 6.1). */
+export type PinMode = 'NONE' | 'GLOBAL' | 'INDIVIDUAL';
+
+/** A teacher-owned class roster container (Phase 6.1). */
+export interface ClassRow {
+  id: string;
+  user_id: string;
+  name: string;
+  academic_year: string;
+  created_at: string;
+  updated_at: string;
+  /** Nested aggregate from `select('*, class_members(count)')`, when requested. */
+  member_count?: number;
+}
+
+/** One student row inside a class roster (Phase 6.1). */
+export interface ClassMemberRow {
+  id: string;
+  class_id: string;
+  student_code: string;
+  full_name: string;
+  /** ISO `YYYY-MM-DD`, or null. Used as the DDMM PIN fallback. */
+  dob: string | null;
+  /** Explicit PIN; takes precedence over `dob`. Null = fall back to DOB. */
+  pin: string | null;
+  created_at: string;
+}
+
+/** A parsed roster row destined for `class_members` (Phase 6.2 CSV import). */
+export interface ClassMemberInput {
+  student_code: string;
+  full_name: string;
+  dob: string | null;
+  pin: string | null;
 }
 
 export interface QuestionBankRow {

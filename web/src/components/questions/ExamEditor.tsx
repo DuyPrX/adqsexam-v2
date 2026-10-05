@@ -2,18 +2,27 @@
 
 import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { AlertTriangle, Loader2, Plus, Save, ShieldAlert } from 'lucide-react';
+import { AlertTriangle, BookOpen, Loader2, Plus, Save, ShieldAlert } from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
 import {
   PersistenceError,
   updateExamMetadata,
   updateExamQuestionsSafe,
 } from '@/lib/exams';
-import type { ExamRow, ExtractedQuestion, QuestionBankRow, QuestionType } from '@/lib/types';
+import { importClassToExam } from '@/lib/classes';
+import type {
+  ExamRow,
+  ExtractedQuestion,
+  PinMode,
+  QuestionBankRow,
+  QuestionType,
+} from '@/lib/types';
 import { cn, hasResolvedAnswer } from '@/lib/utils';
 import { toLocalDatetimeString, toUtcIsoString } from '@/lib/date';
 import { DeleteExamDialog } from '@/components/DeleteExamDialog';
+import { ClassPickerModal } from '@/components/ClassPickerModal';
 import { QuestionCard } from './QuestionCard';
+import { PinPolicyControl } from './PinPolicyControl';
 
 interface ExamEditorProps {
   exam: ExamRow;
@@ -62,6 +71,11 @@ export function ExamEditor({ exam, initialQuestions, submissionCount }: ExamEdit
   const [durationMinutes, setDurationMinutes] = useState(exam.duration_minutes);
   const [isActive, setIsActive] = useState(exam.is_active);
   const [allowPractice, setAllowPractice] = useState(exam.allow_practice);
+  const [pinMode, setPinMode] = useState<PinMode>(exam.pin_mode);
+  const [globalPin, setGlobalPin] = useState(exam.global_pin ?? '');
+  const [isClassPickerOpen, setIsClassPickerOpen] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
+  const [importMessage, setImportMessage] = useState<string | null>(null);
   const [startsAt, setStartsAt] = useState(toLocalDatetimeString(exam.starts_at));
   const [endsAt, setEndsAt] = useState(toLocalDatetimeString(exam.ends_at));
   const [questions, setQuestions] = useState<ExtractedQuestion[]>(() =>
@@ -97,6 +111,30 @@ export function ExamEditor({ exam, initialQuestions, submissionCount }: ExamEdit
     );
   };
 
+  /**
+   * Imports additional class rosters into the EXISTING exam (Phase 6.2).
+   *
+   * Unlike the creation flow there is nothing to wait for: the exam code already
+   * exists, so the RPC runs immediately. It upserts by `(student_code,
+   * exam_code)`, so re-importing a class updates rather than duplicates.
+   */
+  const handleImportClasses = async (classIds: string[]) => {
+    setImportMessage(null);
+    setIsImporting(true);
+    try {
+      const count = await importClassToExam(createClient(), exam.code, classIds);
+      setImportMessage(`Đã nạp ${count} học sinh từ ${classIds.length} lớp vào đề thi.`);
+      setIsClassPickerOpen(false);
+      router.refresh();
+    } catch (err) {
+      setImportMessage(
+        err instanceof PersistenceError ? err.message : 'Không nạp được danh sách lớp.',
+      );
+    } finally {
+      setIsImporting(false);
+    }
+  };
+
   const handleSave = async () => {
     setError(null);
 
@@ -114,6 +152,10 @@ export function ExamEditor({ exam, initialQuestions, submissionCount }: ExamEdit
         durationMinutes,
         isActive,
         allowPractice,
+        pinMode,
+        // Only sent in GLOBAL mode: in the other modes the stored value is
+        // deliberately left untouched so toggling back restores it.
+        globalPin: pinMode === 'GLOBAL' ? globalPin : undefined,
         startsAt: toUtcIsoString(startsAt),
         endsAt: toUtcIsoString(endsAt),
       });
@@ -223,6 +265,35 @@ export function ExamEditor({ exam, initialQuestions, submissionCount }: ExamEdit
                 : 'Không cho phép luyện tập'}
             </span>
           </label>
+        </div>
+
+        {/* Phase 6.2 — admission policy for this exam. */}
+        <PinPolicyControl
+          mode={pinMode}
+          globalPin={globalPin}
+          onModeChange={setPinMode}
+          onGlobalPinChange={setGlobalPin}
+          disabled={isSaving}
+        />
+
+        {/* Phase 6.2 — import additional class rosters into this exam. */}
+        <div className="flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3">
+          <button
+            type="button"
+            onClick={() => setIsClassPickerOpen(true)}
+            disabled={isImporting}
+            className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
+          >
+            {isImporting ? (
+              <Loader2 size={15} className="animate-spin" />
+            ) : (
+              <BookOpen size={15} />
+            )}
+            📚 Nạp từ Lớp học
+          </button>
+          {importMessage && (
+            <span className="text-xs font-semibold text-slate-600">{importMessage}</span>
+          )}
         </div>
       </div>
 
@@ -335,6 +406,14 @@ export function ExamEditor({ exam, initialQuestions, submissionCount }: ExamEdit
           onDeleted={() => router.push('/')}
         />
       </div>
+
+      {isClassPickerOpen && (
+        <ClassPickerModal
+          isBusy={isImporting}
+          onClose={() => setIsClassPickerOpen(false)}
+          onConfirm={(classIds) => void handleImportClasses(classIds)}
+        />
+      )}
     </div>
   );
 }

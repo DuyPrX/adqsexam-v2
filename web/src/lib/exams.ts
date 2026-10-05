@@ -1,6 +1,12 @@
 import { cache } from 'react';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import type { ExamRow, ExtractedQuestion, QuestionBankRow, RosterEntry } from './types';
+import type {
+  ExamRow,
+  ExtractedQuestion,
+  PinMode,
+  QuestionBankRow,
+  RosterEntry,
+} from './types';
 import { generateExamCode } from './utils';
 
 /**
@@ -20,13 +26,46 @@ const UNIQUE_VIOLATION = '23505';
  * it `undefined` at runtime while TypeScript still believes it is `string | null`.
  */
 export const EXAM_COLUMNS =
-  'id, user_id, code, title, duration_minutes, is_active, starts_at, ends_at, deleted_at, allow_practice, created_at';
+  'id, user_id, code, title, duration_minutes, is_active, starts_at, ends_at, deleted_at, allow_practice, pin_mode, global_pin, created_at';
 
 export class PersistenceError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'PersistenceError';
   }
+}
+
+const PIN_MODES: readonly PinMode[] = ['NONE', 'GLOBAL', 'INDIVIDUAL'];
+
+function isPinMode(value: unknown): value is PinMode {
+  return typeof value === 'string' && (PIN_MODES as readonly string[]).includes(value);
+}
+
+/**
+ * Builds the `pin_mode` / `global_pin` columns for any exams write (Phase 6.2).
+ *
+ * `global_pin` is only *meaningful* in GLOBAL mode (the server ignores it
+ * otherwise), but it is deliberately NOT nulled out when another mode is saved:
+ * the teacher's typed value is preserved so toggling INDIVIDUAL -> GLOBAL brings
+ * their configured PIN back instead of silently discarding it.
+ *
+ * GLOBAL with a blank PIN is rejected here rather than written. Phase 6.1's
+ * `verify_and_acquire_session` fails CLOSED on a NULL/empty `global_pin`, so
+ * saving one would leave an exam that admits nobody — a self-inflicted lockout
+ * the teacher cannot diagnose from the UI.
+ */
+function buildPinFields(
+  pinMode: PinMode | undefined,
+  globalPin: string | null | undefined,
+): { pin_mode: PinMode; global_pin: string | null } {
+  const mode: PinMode = isPinMode(pinMode) ? pinMode : 'INDIVIDUAL';
+  const shared = typeof globalPin === 'string' ? globalPin.trim() : '';
+
+  if (mode === 'GLOBAL' && shared === '') {
+    throw new PersistenceError('Vui lòng nhập mã PIN chung cho đề thi.');
+  }
+
+  return { pin_mode: mode, global_pin: shared === '' ? null : shared };
 }
 
 /** Current authenticated teacher id, or throws when the session is gone. */
@@ -51,6 +90,7 @@ async function insertExamWithFreshCode(
   title: string,
   durationMinutes: number,
   allowPractice: boolean,
+  pinFields: { pin_mode: PinMode; global_pin: string | null },
 ): Promise<ExamRow> {
   for (let attempt = 0; attempt < 10; attempt++) {
     const code = generateExamCode();
@@ -62,6 +102,7 @@ async function insertExamWithFreshCode(
         title,
         duration_minutes: durationMinutes,
         allow_practice: allowPractice,
+        ...pinFields,
       })
       .select(EXAM_COLUMNS)
       .single<ExamRow>();
@@ -81,6 +122,9 @@ export interface SaveExamInput {
   questions: ExtractedQuestion[];
   /** Phase 5.8: let students self-practice this exam (defaults to false). */
   allowPractice?: boolean;
+  /** Phase 6.2: admission policy (defaults to INDIVIDUAL server-side). */
+  pinMode?: PinMode;
+  globalPin?: string | null;
 }
 
 export interface SaveExamResult {
@@ -100,11 +144,12 @@ export async function saveExam(
   supabase: SupabaseClient,
   input: SaveExamInput,
 ): Promise<SaveExamResult> {
-  const { title, durationMinutes, questions, allowPractice = false } = input;
+  const { title, durationMinutes, questions, allowPractice = false, pinMode, globalPin } = input;
 
   if (!title.trim()) throw new PersistenceError('Vui lòng nhập tên đề thi.');
   if (questions.length === 0) throw new PersistenceError('Đề thi chưa có câu hỏi nào.');
 
+  const pinFields = buildPinFields(pinMode, globalPin);
   const userId = await requireUserId(supabase);
   const exam = await insertExamWithFreshCode(
     supabase,
@@ -112,6 +157,7 @@ export async function saveExam(
     title.trim(),
     durationMinutes,
     allowPractice,
+    pinFields,
   );
 
   const rows = questions.map((question, index) => ({
@@ -148,6 +194,9 @@ export interface SaveExamVariantsInput {
   variants: ExamVariantInput[];
   /** Phase 5.8: applies to every generated variant (school-wide opt-in). */
   allowPractice?: boolean;
+  /** Phase 6.2: applies to every generated variant. */
+  pinMode?: PinMode;
+  globalPin?: string | null;
 }
 
 export interface SaveExamVariantsResult {
@@ -168,7 +217,7 @@ export async function saveExamVariants(
   supabase: SupabaseClient,
   input: SaveExamVariantsInput,
 ): Promise<SaveExamVariantsResult> {
-  const { durationMinutes, variants, allowPractice = false } = input;
+  const { durationMinutes, variants, allowPractice = false, pinMode, globalPin } = input;
 
   if (variants.length === 0) throw new PersistenceError('Chưa có mã đề nào để lưu.');
   for (const variant of variants) {
@@ -178,6 +227,7 @@ export async function saveExamVariants(
     }
   }
 
+  const pinFields = buildPinFields(pinMode, globalPin);
   const userId = await requireUserId(supabase);
 
   const examRows = variants.map((variant) => ({
@@ -186,6 +236,7 @@ export async function saveExamVariants(
     title: variant.title.trim(),
     duration_minutes: durationMinutes,
     allow_practice: allowPractice,
+    ...pinFields,
   }));
 
   const examsInsert = await supabase
@@ -342,6 +393,9 @@ export interface ExamMetadataPatch {
   endsAt?: string | null;
   /** Phase 5.8 practice opt-in. */
   allowPractice?: boolean;
+  /** Phase 6.2 admission policy. */
+  pinMode?: PinMode;
+  globalPin?: string | null;
 }
 
 /** Updates exam metadata (Phase 5.4 edit route general-info form). */
@@ -365,6 +419,28 @@ export async function updateExamMetadata(
   if (patch.startsAt !== undefined) row.starts_at = patch.startsAt;
   if (patch.endsAt !== undefined) row.ends_at = patch.endsAt;
   if (patch.allowPractice !== undefined) row.allow_practice = patch.allowPractice;
+
+  // Phase 6.2 — partial patch semantics. Unlike `buildPinFields` (used by the
+  // create paths), a caller may update ONLY `pin_mode` and leave `global_pin`
+  // untouched, so a blank PIN is only rejected when the caller actually supplied
+  // one AND the resulting mode is GLOBAL.
+  if (patch.pinMode !== undefined) {
+    if (!isPinMode(patch.pinMode)) throw new PersistenceError('Loại mã bảo vệ không hợp lệ.');
+    row.pin_mode = patch.pinMode;
+  }
+  if (patch.globalPin !== undefined) {
+    const shared = patch.globalPin === null ? '' : patch.globalPin.trim();
+    const effectiveMode = (row.pin_mode as PinMode | undefined)
+      ?? (patch.pinMode as PinMode | undefined);
+    if (effectiveMode === 'GLOBAL' && shared === '') {
+      throw new PersistenceError('Vui lòng nhập mã PIN chung cho đề thi.');
+    }
+    row.global_pin = shared === '' ? null : shared;
+  } else if (patch.pinMode === 'GLOBAL') {
+    // Switching TO GLOBAL without sending the PIN: the stored value may be
+    // absent, which would leave an exam nobody can enter. Fail loudly.
+    throw new PersistenceError('Vui lòng nhập mã PIN chung cho đề thi.');
+  }
 
   if (Object.keys(row).length === 0) return;
 

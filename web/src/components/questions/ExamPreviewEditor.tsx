@@ -2,9 +2,11 @@
 
 import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import {
   AlertTriangle,
   ArrowLeft,
+  BookOpen,
   CheckCircle2,
   Copy,
   Loader2,
@@ -20,15 +22,19 @@ import {
   saveExamVariants,
   type SaveExamVariantsResult,
 } from '@/lib/exams';
+import { importClassToExam } from '@/lib/classes';
 import { generateExamVariants, shuffleExam } from '@/lib/shuffle';
 import type {
   EngineUsed,
   ExtractedQuestion,
   ExtractionMode,
+  PinMode,
   QuestionType,
 } from '@/lib/types';
 import { QUESTION_TYPE_META, cn, hasResolvedAnswer } from '@/lib/utils';
+import { ClassPickerModal } from '@/components/ClassPickerModal';
 import { QuestionCard } from './QuestionCard';
+import { PinPolicyControl } from './PinPolicyControl';
 
 interface ExamPreviewEditorProps {
   questions: ExtractedQuestion[];
@@ -89,6 +95,17 @@ export function ExamPreviewEditor({
   const [allowPractice, setAllowPractice] = useState(false);
   const [savedVariants, setSavedVariants] = useState<SaveExamVariantsResult | null>(null);
 
+  // Admission policy (Phase 6.2). INDIVIDUAL is the server-side default, so the
+  // UI starts there rather than sending an implicit value.
+  const [pinMode, setPinMode] = useState<PinMode>('INDIVIDUAL');
+  const [globalPin, setGlobalPin] = useState('');
+  // Classes selected for import. The RPC needs an exam code, which only exists
+  // after saving, so the selection is held here and applied afterwards.
+  const [isClassPickerOpen, setIsClassPickerOpen] = useState(false);
+  const [selectedClassIds, setSelectedClassIds] = useState<string[]>([]);
+  const [isImporting, setIsImporting] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
+
   const stats = useMemo(() => {
     const byType = new Map<QuestionType, number>();
     let unresolved = 0;
@@ -131,20 +148,26 @@ export function ExamPreviewEditor({
         const result = await saveExamVariants(supabase, {
           durationMinutes,
           allowPractice,
+          pinMode,
+          globalPin,
           variants: variants.map((variant) => ({
             code: variant.code,
             title,
             questions: variant.questions,
           })),
         });
+        await importSelectedClasses(supabase, result.codes);
         setSavedVariants(result);
       } else {
         const { exam, savedQuestions } = await saveExam(supabase, {
           title,
           durationMinutes,
           allowPractice,
+          pinMode,
+          globalPin,
           questions,
         });
+        await importSelectedClasses(supabase, [exam.code]);
         setSavedCode(`${exam.code} (${savedQuestions} câu hỏi)`);
       }
     } catch (err) {
@@ -153,6 +176,36 @@ export function ExamPreviewEditor({
       );
     } finally {
       setIsSaving(false);
+    }
+  };
+
+  /**
+   * Copies the picked class rosters into every saved exam code.
+   *
+   * Runs AFTER the exam exists because `import_class_to_exam` is keyed on the
+   * exam code. A multi-variant save produces several codes, and a variant
+   * without a roster would admit nobody, so each code is imported.
+   *
+   * A failure is recorded in `importError` rather than thrown: the exam is
+   * already persisted, so aborting the handler would hide the codes from the
+   * teacher and make the save look like it failed.
+   */
+  const importSelectedClasses = async (supabase: SupabaseClient, codes: string[]) => {
+    if (selectedClassIds.length === 0) return;
+    setIsImporting(true);
+    setImportError(null);
+    try {
+      for (const code of codes) {
+        await importClassToExam(supabase, code, selectedClassIds);
+      }
+    } catch (err) {
+      setImportError(
+        err instanceof PersistenceError
+          ? err.message
+          : 'Đề thi đã lưu nhưng chưa nạp được danh sách lớp.',
+      );
+    } finally {
+      setIsImporting(false);
     }
   };
 
@@ -183,6 +236,11 @@ export function ExamPreviewEditor({
             Hãy gửi các mã này cho học sinh. Tiếp theo, tải lên danh sách thí sinh được phép dự thi.
           </p>
         </div>
+        {importError && (
+          <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+            {importError}
+          </p>
+        )}
         <div className="flex justify-center gap-2">
           <button
             type="button"
@@ -217,6 +275,11 @@ export function ExamPreviewEditor({
             Hãy gửi mã này cho học sinh. Tiếp theo, tải lên danh sách thí sinh được phép dự thi.
           </p>
         </div>
+        {importError && (
+          <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+            {importError}
+          </p>
+        )}
         <div className="flex justify-center gap-2">
           <button
             type="button"
@@ -421,6 +484,34 @@ export function ExamPreviewEditor({
             Cho phép dùng để luyện tập (học sinh xem được đáp án &amp; giải thích)
           </label>
 
+          {/* Phase 6.2 — admission policy, applied to every generated variant. */}
+          <PinPolicyControl
+            mode={pinMode}
+            globalPin={globalPin}
+            onModeChange={setPinMode}
+            onGlobalPinChange={setGlobalPin}
+            disabled={isSaving}
+          />
+
+          {/* Phase 6.2 — class roster import. The selection is applied after the
+              exam code exists (see importSelectedClasses). */}
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setIsClassPickerOpen(true)}
+              disabled={isSaving}
+              className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
+            >
+              <BookOpen size={15} />
+              📚 Nạp từ Lớp học
+            </button>
+            {selectedClassIds.length > 0 && (
+              <span className="text-xs font-semibold text-emerald-700">
+                Đã chọn {selectedClassIds.length} lớp — danh sách sẽ được nạp sau khi lưu.
+              </span>
+            )}
+          </div>
+
           <p className="text-[11px] text-slate-500">
             {variantCount > 1
               ? `Mỗi mã đề sẽ bốc ngẫu nhiên ${effectiveK} trên tổng số ${questions.length} câu hỏi và tạo mã đề riêng.`
@@ -462,7 +553,9 @@ export function ExamPreviewEditor({
           >
             {isSaving ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
             {isSaving
-              ? 'Đang lưu…'
+              ? isImporting
+                ? 'Đang nạp danh sách…'
+                : 'Đang lưu…'
               : variantCount > 1
                 ? `Lưu ${variantCount} mã đề`
                 : 'Lưu đề thi'}
@@ -491,6 +584,16 @@ export function ExamPreviewEditor({
             />
           ))}
         </div>
+      )}
+
+      {isClassPickerOpen && (
+        <ClassPickerModal
+          onClose={() => setIsClassPickerOpen(false)}
+          onConfirm={(classIds) => {
+            setSelectedClassIds(classIds);
+            setIsClassPickerOpen(false);
+          }}
+        />
       )}
     </div>
   );

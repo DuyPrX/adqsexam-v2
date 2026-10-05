@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
-import { FileText, LogOut, Pencil, Plus, Trash2, Users } from 'lucide-react';
+import { BookOpen, FileText, LogOut, Pencil, Plus, Trash2, Users } from 'lucide-react';
 import { signOut } from '@/lib/supabase/auth';
 import type { ExamRow } from '@/lib/types';
 import { cn } from '@/lib/utils';
@@ -53,6 +53,13 @@ export function ExamList({ exams, trashedExams, counts, teacherEmail }: ExamList
         </div>
 
         <div className="flex items-center gap-2">
+          <Link
+            href="/classes"
+            className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+          >
+            <BookOpen size={15} />
+            Lớp học
+          </Link>
           <Link
             href="/create"
             className="flex items-center gap-1.5 rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800"

@@ -46,6 +46,13 @@
  *  24. Practice shuffle toggle (Phase 5.9): the student's toggle reorders the
  *      questions while every key/explanation travels with its question, and the
  *      OFF branch enforces the original `position ASC` order.
+ *  25. Class rosters + flexible PIN auth (Phase 6.1): import_class_to_exam
+ *      populates the exam whitelist, and NONE / GLOBAL / INDIVIDUAL are enforced
+ *      by verify_and_acquire_session (custom PIN > DOB DDMM fallback).
+ *  26. Teacher web roster + PIN config (Phase 6.2): EXAM_COLUMNS carries the PIN
+ *      columns, the CSV template ships a UTF-8 BOM + the exact headers and
+ *      round-trips through parseStudentRosterFile, class CRUD works through the
+ *      client SDK, and the saved PIN actually gates admission.
  *
  * Usage:
  *   node v2/tests/e2e_flow_verification.mjs
@@ -158,6 +165,21 @@ const { default: workerApp } = await import(
 const { readFileSync } = await import('node:fs');
 // Step 21 seeds/inspects cron.job_run_details, which is not API-exposed.
 const { execFileSync } = await import('node:child_process');
+
+// Phase 6.2 Step 26 — the teacher-web persistence + template modules. These are
+// dependency-free (or, for excel.ts, borrow the web app's own SheetJS), so the
+// suite asserts against the SAME code the browser ships rather than a copy.
+const { EXAM_COLUMNS, updateExamMetadata, PersistenceError } = await import(
+  new URL('../web/src/lib/exams.ts', import.meta.url).href
+);
+const { STUDENT_TEMPLATE_HEADERS, buildStudentCsvTemplate, studentTemplateFilename } =
+  await import(new URL('../web/src/lib/studentTemplate.ts', import.meta.url).href);
+const { importClassToExam, saveClassMembers, listClasses } = await import(
+  new URL('../web/src/lib/classes.ts', import.meta.url).href
+);
+const { parseStudentRosterFile } = await import(
+  new URL('../web/src/lib/excel.ts', import.meta.url).href
+);
 
 const TEACHER = { email: 'e2e.teacher@adqsexam.local', password: 'e2e-password-123' };
 const EXAM = {
@@ -275,6 +297,24 @@ const PIN_MEMBER_PLAIN  = { code: 'E2EPIN03', fullName: 'Trần Không Pin', dob
 const PIN_GLOBAL_VALUE  = 'SHARED1';
 // The DOB fallback is DDMM, so 2008-09-05 -> '0509'.
 const PIN_DOB_EXPECTED  = '0509';
+
+// Phase 6.2 — teacher-web class roster + PIN configuration.
+// A dedicated exam so the client-SDK assertions never collide with the
+// Step 25 PIN matrix, which leaves PIN_EXAM on INDIVIDUAL.
+const CLASS_EXAM = {
+  code: 'WEB' + String(Math.floor(100 + Math.random() * 900)),
+  title: 'E2E Teacher Web Roster',
+  duration: 30,
+  globalPin: 'ROOM1',
+};
+const CLASS_PICK = {
+  name: 'E2E-WEB-' + String(Math.floor(1000 + Math.random() * 9000)),
+  academicYear: '2026-2027',
+};
+const CLASS_PICK_MEMBERS = [
+  { code: 'E2EWEB01', fullName: 'Bùi Văn Web', dob: '2009-01-02', pin: null },
+  { code: 'E2EWEB02', fullName: 'Đinh Thị Lớp', dob: null, pin: 'X9' },
+];
 
 /* ---------------------------------------------------------------- harness */
 
@@ -2323,6 +2363,247 @@ async function main() {
     legacyCall.data?.success === false && legacyCall.data?.code === 'INVALID_PIN',
     JSON.stringify(legacyCall.data));
 
+  /* --- 26. Teacher web: roster mgmt + CSV template + PIN config (6.2) --- */
+  step(26, 'teacher web class roster, CSV template download, and exam PIN config');
+
+  // --- 26a. EXAM_COLUMNS carries the Phase 6.1 PIN columns --------------
+  // The dashboard/edit loaders select an explicit column list; omitting the PIN
+  // columns would leave `pin_mode` undefined at runtime while TypeScript still
+  // believes it is a valid PinMode. Assert on the real constant, not a copy.
+  const columns = EXAM_COLUMNS.split(',').map((c) => c.trim());
+  check('EXAM_COLUMNS includes pin_mode', columns.includes('pin_mode'), EXAM_COLUMNS);
+  check('EXAM_COLUMNS includes global_pin', columns.includes('global_pin'), EXAM_COLUMNS);
+
+  // --- 26b. CSV template: BOM, headers, filename ------------------------
+  const template = buildStudentCsvTemplate();
+  check('template starts with a UTF-8 BOM', template.charCodeAt(0) === 0xfeff,
+    String(template.charCodeAt(0)));
+  check('template BOM survives as the U+FEFF code point', template[0] === '\uFEFF',
+    JSON.stringify(template[0]));
+
+  const templateHeaderLine = template.slice(1).split(/\r?\n/)[0];
+  check('template header line is exact',
+    templateHeaderLine === 'STT,Ho_va_ten,Ngay_sinh,Ma_hoc_sinh,Ma_PIN', templateHeaderLine);
+  check('template header constant matches the emitted line',
+    STUDENT_TEMPLATE_HEADERS.join(',') === templateHeaderLine,
+    STUDENT_TEMPLATE_HEADERS.join(','));
+
+  const templateRows = template.slice(1).split(/\r?\n/).filter(Boolean);
+  check('template ships a header + 3 sample rows', templateRows.length === 4,
+    String(templateRows.length));
+  check('sample row 1 = name + DOB only (auto code + DDMM PIN)',
+    templateRows[1] === '1,Nguyễn Văn An,05/09/2008,,', templateRows[1]);
+  check('sample row 2 = custom code + custom PIN',
+    templateRows[2] === '2,Trần Thị Bình,12/03/2008,HS001,123456', templateRows[2]);
+  check('sample row 3 = name only', templateRows[3] === '3,Lê Văn Cường,,,', templateRows[3]);
+  check('template filename falls back to "Lop"',
+    studentTemplateFilename() === 'Mau_Danh_Sach_Hoc_Sinh_Lop.csv', studentTemplateFilename());
+  check('template filename embeds the class name',
+    studentTemplateFilename('12A1') === 'Mau_Danh_Sach_Hoc_Sinh_12A1.csv',
+    studentTemplateFilename('12A1'));
+
+  // The Vietnamese sample must survive the round-trip as real diacritics; a
+  // mis-encoded file is exactly the corruption the BOM exists to prevent.
+  check('template keeps Vietnamese diacritics intact',
+    template.includes('Nguyễn Văn An'), JSON.stringify(template.slice(0, 60)));
+
+  // --- 26c. parseStudentRosterFile re-imports the template --------------
+  // The suite feeds the app's OWN template back through the app's OWN parser:
+  // that is the teacher's real flow (download -> fill -> upload).
+  const templateFile = new File([template], 'Mau_Danh_Sach_Hoc_Sinh_12A1.csv', {
+    type: 'text/csv',
+  });
+  const parsed = await parseStudentRosterFile(templateFile, '12A1');
+  check('parser reads all 3 template rows', parsed.length === 3, String(parsed.length));
+
+  const parsedAn = parsed.find((m) => m.full_name === 'Nguyễn Văn An');
+  check('row 1 auto-generates a class-prefixed code', parsedAn?.student_code === '12A1_01',
+    JSON.stringify(parsedAn));
+  // 05/09/2008 must be read as DD/MM (5 September), not US MM/DD (9 May).
+  check('row 1 normalises DD/MM/YYYY to ISO', parsedAn?.dob === '2008-09-05',
+    JSON.stringify(parsedAn?.dob));
+  check('row 1 derives the DDMM PIN from DOB', parsedAn?.pin === '0509',
+    JSON.stringify(parsedAn?.pin));
+
+  const parsedBinh = parsed.find((m) => m.full_name === 'Trần Thị Bình');
+  check('row 2 keeps its explicit student code', parsedBinh?.student_code === 'HS001',
+    JSON.stringify(parsedBinh?.student_code));
+  check('row 2 keeps its explicit PIN', parsedBinh?.pin === '123456',
+    JSON.stringify(parsedBinh?.pin));
+
+  const parsedCuong = parsed.find((m) => m.full_name === 'Lê Văn Cường');
+  check('row 3 auto-generates the next ordinal', parsedCuong?.student_code === '12A1_03',
+    JSON.stringify(parsedCuong?.student_code));
+  check('row 3 has neither DOB nor PIN', parsedCuong?.dob === null && parsedCuong?.pin === null,
+    JSON.stringify(parsedCuong));
+
+  // --- 26d. class roster CRUD through the client SDK --------------------
+  await teacher.from('exams').delete().eq('code', CLASS_EXAM.code);
+
+  const webClass = await teacher
+    .from('classes')
+    .insert({ user_id: teacherId, name: CLASS_PICK.name, academic_year: CLASS_PICK.academicYear })
+    .select('id, name, academic_year')
+    .single();
+  check('26d: class created via client SDK', !webClass.error && !!webClass.data,
+    webClass.error?.message);
+  const webClassId = webClass.data?.id;
+
+  // saveClassMembers is the exact function the "📄 Nhập từ file" button calls.
+  const savedMembers = await saveClassMembers(teacher, webClassId, CLASS_PICK_MEMBERS.map((m) => ({
+    student_code: m.code,
+    full_name: m.fullName,
+    dob: m.dob,
+    pin: m.pin,
+  })));
+  check('26d: saveClassMembers persisted both rows', savedMembers.saved === 2,
+    String(savedMembers.saved));
+
+  // listClasses folds the nested `class_members(count)` aggregate into
+  // member_count, so the roster badge is correct without an N+1 query.
+  const classes = await listClasses(teacher);
+  const listedClass = classes.find((c) => c.id === webClassId);
+  check('26d: listClasses exposes the class', !!listedClass, String(classes.length));
+  check('26d: listClasses reports member_count = 2', listedClass?.member_count === 2,
+    String(listedClass?.member_count));
+
+  // Re-importing the same rows must upsert, not duplicate.
+  await saveClassMembers(teacher, webClassId, CLASS_PICK_MEMBERS.map((m) => ({
+    student_code: m.code,
+    full_name: m.fullName,
+    dob: m.dob,
+    pin: m.pin,
+  })));
+  const afterUpsert = await teacher.from('class_members').select('id').eq('class_id', webClassId);
+  check('26d: re-import upserts instead of duplicating', afterUpsert.data?.length === 2,
+    String(afterUpsert.data?.length));
+
+  // --- 26e. importClassToExam through the client SDK --------------------
+  const webExam = await teacher
+    .from('exams')
+    .insert({
+      user_id: teacherId,
+      code: CLASS_EXAM.code,
+      title: CLASS_EXAM.title,
+      duration_minutes: CLASS_EXAM.duration,
+    })
+    .select('id, code')
+    .single();
+  check('26e: exam created via client SDK', !webExam.error && !!webExam.data,
+    webExam.error?.message);
+
+  const importedCount = await importClassToExam(teacher, CLASS_EXAM.code, [webClassId]);
+  check('26e: importClassToExam returned the row count', importedCount === 2,
+    String(importedCount));
+
+  const webRoster = await teacher
+    .from('students')
+    .select('student_code, full_name, class_name, dob, pin')
+    .eq('exam_code', CLASS_EXAM.code)
+    .order('student_code');
+  check('26e: both members landed on the exam roster', webRoster.data?.length === 2,
+    String(webRoster.data?.length));
+  check('26e: imported rows carry the class name',
+    webRoster.data?.every((s) => s.class_name === CLASS_PICK.name),
+    JSON.stringify(webRoster.data?.map((s) => s.class_name)));
+  check('26e: the DDMM PIN is preserved end-to-end',
+    webRoster.data?.find((s) => s.student_code === 'E2EWEB01')?.pin === null
+      && webRoster.data?.find((s) => s.student_code === 'E2EWEB01')?.dob === '2009-01-02',
+    JSON.stringify(webRoster.data?.find((s) => s.student_code === 'E2EWEB01')));
+
+  // An unknown exam must surface as the translated PersistenceError, which is
+  // what the UI renders (the raw RPC message is an unreadable SQL string).
+  let importRejected = false;
+  try {
+    await importClassToExam(teacher, 'NOPE99', [webClassId]);
+  } catch (err) {
+    importRejected = err instanceof PersistenceError && err.message.includes('quyền truy cập');
+  }
+  check('26e: an unknown exam raises the translated PersistenceError', importRejected);
+
+  // --- 26f. PIN config through updateExamMetadata -----------------------
+  await updateExamMetadata(teacher, CLASS_EXAM.code, { pinMode: 'GLOBAL', globalPin: CLASS_EXAM.globalPin });
+  const afterPin = await teacher
+    .from('exams').select('pin_mode, global_pin').eq('code', CLASS_EXAM.code).single();
+  check('26f: pin_mode persisted as GLOBAL', afterPin.data?.pin_mode === 'GLOBAL',
+    String(afterPin.data?.pin_mode));
+  check('26f: global_pin persisted', afterPin.data?.global_pin === CLASS_EXAM.globalPin,
+    String(afterPin.data?.global_pin));
+
+  // Switching to GLOBAL without supplying a PIN must fail loudly: Phase 6.1's
+  // RPC fails CLOSED on a NULL shared PIN, so a silent write would lock out the
+  // entire room with no diagnosable cause.
+  let blankGlobalRejected = false;
+  try {
+    await updateExamMetadata(teacher, CLASS_EXAM.code, { pinMode: 'GLOBAL', globalPin: '   ' });
+  } catch (err) {
+    blankGlobalRejected = err instanceof PersistenceError;
+  }
+  check('26f: GLOBAL with a blank PIN is rejected client-side', blankGlobalRejected);
+
+  // A partial patch (mode only) must not clobber the stored PIN.
+  await updateExamMetadata(teacher, CLASS_EXAM.code, { pinMode: 'NONE' });
+  const afterNone = await teacher
+    .from('exams').select('pin_mode, global_pin').eq('code', CLASS_EXAM.code).single();
+  check('26f: pin_mode NONE persisted', afterNone.data?.pin_mode === 'NONE',
+    String(afterNone.data?.pin_mode));
+  // The stored PIN is intentionally retained so the editor can resend it.
+  check('26f: global_pin is retained when leaving GLOBAL (so it can be restored)',
+    afterNone.data?.global_pin === CLASS_EXAM.globalPin, String(afterNone.data?.global_pin));
+
+  // Switching TO GLOBAL without supplying a PIN is refused even though a value
+  // is stored: the write path cannot know whether a concurrent change cleared
+  // it, and a NULL shared PIN locks out the whole room (Phase 6.1 fails CLOSED).
+  let modeOnlyRejected = false;
+  try {
+    await updateExamMetadata(teacher, CLASS_EXAM.code, { pinMode: 'GLOBAL' });
+  } catch (err) {
+    modeOnlyRejected = err instanceof PersistenceError;
+  }
+  check('26f: switching to GLOBAL without a PIN is refused (fail-closed)', modeOnlyRejected);
+
+  // The editor resends the retained value, which is the path that succeeds.
+  await updateExamMetadata(teacher, CLASS_EXAM.code, {
+    pinMode: 'GLOBAL',
+    globalPin: CLASS_EXAM.globalPin,
+  });
+  const afterRestore = await teacher
+    .from('exams').select('pin_mode, global_pin').eq('code', CLASS_EXAM.code).single();
+  check('26f: re-sending the retained PIN restores GLOBAL',
+    afterRestore.data?.pin_mode === 'GLOBAL'
+      && afterRestore.data?.global_pin === CLASS_EXAM.globalPin,
+    JSON.stringify(afterRestore.data));
+
+  // --- 26g. the saved PIN actually gates admission ----------------------
+  // Proves the teacher-web configuration is wired to the Phase 6.1 auth gate
+  // end-to-end, not merely persisted.
+  const webAdmin = createClient(SB_URL, SB_SECRET, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const tryWebLogin = async (student, pin) => {
+    await webAdmin.from('active_sessions').delete()
+      .eq('exam_code', CLASS_EXAM.code).eq('student_code', student.code);
+    return createClient(SB_URL, SB_PUBLISHABLE, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    }).rpc('verify_and_acquire_session', {
+      p_exam_code: CLASS_EXAM.code,
+      p_student_code: student.code,
+      p_full_name: student.fullName,
+      p_class_name: CLASS_PICK.name,
+      p_device_info: 'e2e-web/1.0',
+      p_existing_token: null,
+      p_pin: pin,
+    });
+  };
+
+  const webWrong = await tryWebLogin(CLASS_PICK_MEMBERS[0], 'NOPE');
+  check('26g: the web-configured GLOBAL PIN refuses a wrong value',
+    webWrong.data?.success === false && webWrong.data?.code === 'INVALID_PIN',
+    JSON.stringify(webWrong.data));
+  const webRight = await tryWebLogin(CLASS_PICK_MEMBERS[0], CLASS_EXAM.globalPin);
+  check('26g: the web-configured GLOBAL PIN admits the correct value',
+    webRight.data?.success === true, JSON.stringify(webRight.data));
+
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);
   await teacher.from('exams').delete().eq('code', EXAM.code); // cascades
@@ -2332,8 +2613,10 @@ async function main() {
   await teacher.from('exams').delete().eq('code', SOFT_DEL_EXAM.code);
   await teacher.from('exams').delete().eq('code', PRACTICE_EXAM.code);
   await teacher.from('exams').delete().eq('code', PIN_EXAM.code);
+  await teacher.from('exams').delete().eq('code', CLASS_EXAM.code);
   // The class outlives its exams; delete it explicitly (members cascade).
   await teacher.from('classes').delete().eq('id', classId);
+  await teacher.from('classes').delete().eq('id', webClassId);
 
   console.log(`\n${'='.repeat(74)}`);
   console.log(`RESULT: ${passed} passed, ${failed} failed`);
