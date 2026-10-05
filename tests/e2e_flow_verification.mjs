@@ -53,6 +53,11 @@
  *      columns, the CSV template ships a UTF-8 BOM + the exact headers and
  *      round-trips through parseStudentRosterFile, class CRUD works through the
  *      client SDK, and the saved PIN actually gates admission.
+ *  27. Student roster picker (Phase 6.3): get_exam_roster serves a sanitised
+ *      candidate list (NEVER pin/dob) for an OPEN exam and refuses trashed /
+ *      closed / not-yet-open / ended / unknown ones, and the identity picked from
+ *      that roster plus the typed PIN passes verify_and_acquire_session — including
+ *      the reload path, which must resend the PIN.
  *
  * Usage:
  *   node v2/tests/e2e_flow_verification.mjs
@@ -315,6 +320,46 @@ const CLASS_PICK_MEMBERS = [
   { code: 'E2EWEB01', fullName: 'Bùi Văn Web', dob: '2009-01-02', pin: null },
   { code: 'E2EWEB02', fullName: 'Đinh Thị Lớp', dob: null, pin: 'X9' },
 ];
+
+// Phase 6.3 — get_exam_roster powering the student SPA's roster picker.
+// Two classes so the picker's class -> student cascade has something to group
+// by, plus a member carrying BOTH a custom pin and a dob: if either key ever
+// leaked into the payload, that row is where it would show.
+const ROSTER_EXAM = {
+  code: 'ROS' + String(Math.floor(100 + Math.random() * 900)),
+  title: 'E2E Roster Picker',
+  duration: 30,
+  globalPin: 'ROSTER1',
+};
+const ROSTER_CLASS_A = 'E2E-ROSA-' + String(Math.floor(1000 + Math.random() * 9000));
+const ROSTER_CLASS_B = 'E2E-ROSB-' + String(Math.floor(1000 + Math.random() * 9000));
+const ROSTER_MEMBERS = [
+  { code: 'E2EROS01', fullName: 'A Văn Nhất', className: ROSTER_CLASS_A, dob: '2008-09-05', pin: 'SECRET1' },
+  { code: 'E2EROS02', fullName: 'B Thị Hai',  className: ROSTER_CLASS_A, dob: null,         pin: null },
+  { code: 'E2EROS03', fullName: 'C Văn Ba',   className: ROSTER_CLASS_B, dob: '2009-01-02', pin: null },
+];
+// A trashed exam and a closed exam, to prove the roster is not an oracle for
+// exams the student must not see.
+const ROSTER_TRASH_EXAM = {
+  code: 'ROT' + String(Math.floor(100 + Math.random() * 900)),
+  title: 'E2E Roster Trashed',
+  duration: 30,
+};
+const ROSTER_CLOSED_EXAM = {
+  code: 'ROC' + String(Math.floor(100 + Math.random() * 900)),
+  title: 'E2E Roster Closed',
+  duration: 30,
+};
+const ROSTER_NOT_STARTED_EXAM = {
+  code: 'RON' + String(Math.floor(100 + Math.random() * 900)),
+  title: 'E2E Roster Not Started',
+  duration: 30,
+};
+const ROSTER_ENDED_EXAM = {
+  code: 'ROE' + String(Math.floor(100 + Math.random() * 900)),
+  title: 'E2E Roster Ended',
+  duration: 30,
+};
 
 /* ---------------------------------------------------------------- harness */
 
@@ -2604,6 +2649,260 @@ async function main() {
   check('26g: the web-configured GLOBAL PIN admits the correct value',
     webRight.data?.success === true, JSON.stringify(webRight.data));
 
+  /* --- 27. Student roster picker: get_exam_roster (6.3) ---------------- */
+  step(27, 'student URL prefill, roster picker, and PIN auth flow');
+
+  // --- 27a. fixtures ----------------------------------------------------
+  await teacher.from('exams').delete().in('code', [
+    ROSTER_EXAM.code,
+    ROSTER_TRASH_EXAM.code,
+    ROSTER_CLOSED_EXAM.code,
+    ROSTER_NOT_STARTED_EXAM.code,
+    ROSTER_ENDED_EXAM.code,
+  ]);
+
+  // NOTE: PostgREST sends a multi-row INSERT as ONE statement, so any column
+  // omitted from a row is filled with NULL rather than the column DEFAULT. Every
+  // row therefore states `pin_mode` explicitly instead of relying on the default.
+  const rosterExamsInsert = await teacher.from('exams').insert([
+    {
+      user_id: teacherId,
+      code: ROSTER_EXAM.code,
+      title: ROSTER_EXAM.title,
+      duration_minutes: ROSTER_EXAM.duration,
+      is_active: true,
+      pin_mode: 'GLOBAL',
+      global_pin: ROSTER_EXAM.globalPin,
+    },
+    {
+      user_id: teacherId,
+      code: ROSTER_TRASH_EXAM.code,
+      title: ROSTER_TRASH_EXAM.title,
+      duration_minutes: ROSTER_TRASH_EXAM.duration,
+      is_active: true,
+      pin_mode: 'INDIVIDUAL',
+    },
+    {
+      user_id: teacherId,
+      code: ROSTER_CLOSED_EXAM.code,
+      title: ROSTER_CLOSED_EXAM.title,
+      duration_minutes: ROSTER_CLOSED_EXAM.duration,
+      is_active: false,
+      pin_mode: 'INDIVIDUAL',
+    },
+    {
+      user_id: teacherId,
+      code: ROSTER_NOT_STARTED_EXAM.code,
+      title: ROSTER_NOT_STARTED_EXAM.title,
+      duration_minutes: ROSTER_NOT_STARTED_EXAM.duration,
+      is_active: true,
+      pin_mode: 'INDIVIDUAL',
+      starts_at: new Date(Date.now() + 3_600_000).toISOString(),
+    },
+    {
+      user_id: teacherId,
+      code: ROSTER_ENDED_EXAM.code,
+      title: ROSTER_ENDED_EXAM.title,
+      duration_minutes: ROSTER_ENDED_EXAM.duration,
+      is_active: true,
+      pin_mode: 'INDIVIDUAL',
+      ends_at: new Date(Date.now() - 3_600_000).toISOString(),
+    },
+  ]);
+  check('27a: roster exams created', !rosterExamsInsert.error, rosterExamsInsert.error?.message);
+
+  // Trash the trash fixture: EXAMS is only soft-deleted, so `deleted_at` is what
+  // get_exam_roster must treat as invisible.
+  await teacher.from('exams')
+    .update({ deleted_at: new Date().toISOString() })
+    .eq('code', ROSTER_TRASH_EXAM.code);
+
+  await teacher.from('students').insert(
+    ROSTER_MEMBERS.map((member) => ({
+      exam_code: ROSTER_EXAM.code,
+      student_code: member.code,
+      full_name: member.fullName,
+      class_name: member.className,
+      dob: member.dob,
+      pin: member.pin,
+    })),
+  );
+
+  // Anon client — the roster RPC is the student-facing entry point.
+  const rosterAnon = createClient(SB_URL, SB_PUBLISHABLE, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const callRoster = (code) => rosterAnon.rpc('get_exam_roster', { p_exam_code: code });
+
+  // --- 27b. happy path + shape ------------------------------------------
+  const rosterOk = await callRoster(ROSTER_EXAM.code);
+  check('27b: get_exam_roster succeeds for an open exam',
+    rosterOk.data?.success === true, JSON.stringify(rosterOk.data));
+  check('27b: it echoes the exam code',
+    rosterOk.data?.exam_code === ROSTER_EXAM.code, String(rosterOk.data?.exam_code));
+  check('27b: it echoes the exam title',
+    rosterOk.data?.title === ROSTER_EXAM.title, String(rosterOk.data?.title));
+  // The SPA decides whether to render the PIN field from this value.
+  check('27b: it reports pin_mode so the SPA can show the PIN field',
+    rosterOk.data?.pin_mode === 'GLOBAL', String(rosterOk.data?.pin_mode));
+
+  const rosterCandidates = Array.isArray(rosterOk.data?.candidates) ? rosterOk.data.candidates : [];
+  check('27b: all three candidates are returned', rosterCandidates.length === 3,
+    String(rosterCandidates.length));
+  check('27b: each candidate carries exactly student_code/full_name/class_name',
+    rosterCandidates.every((c) => {
+      const keys = Object.keys(c).sort();
+      return keys.length === 3
+        && keys[0] === 'class_name' && keys[1] === 'full_name' && keys[2] === 'student_code';
+    }),
+    JSON.stringify(rosterCandidates.map((c) => Object.keys(c).sort())));
+  check('27b: ordered by class_name then student_code',
+    rosterCandidates[0]?.student_code === 'E2EROS01' && rosterCandidates[1]?.student_code === 'E2EROS02'
+      && rosterCandidates[2]?.student_code === 'E2EROS03',
+    JSON.stringify(rosterCandidates.map((c) => c.student_code)));
+
+  // --- 27c. THE credential-leak assertions ------------------------------
+  // Asserting on the serialised payload (not field-by-field) is deliberate: it
+  // catches the key appearing anywhere, including nested, if the projection is
+  // ever widened to `s.*`.
+  const rosterJson = JSON.stringify(rosterOk.data);
+  check('27c: the payload NEVER contains a "pin" key',
+    !Object.prototype.hasOwnProperty.call(rosterCandidates[0] ?? {}, 'pin')
+      && !rosterJson.includes('"pin"'),
+    rosterJson.slice(0, 200));
+  check('27c: the payload NEVER contains a "dob" key',
+    !Object.prototype.hasOwnProperty.call(rosterCandidates[0] ?? {}, 'dob')
+      && !rosterJson.includes('"dob"'),
+    rosterJson.slice(0, 200));
+  // Belt-and-braces: the actual SECRET VALUES must not appear either, so a
+  // future re-shaping (e.g. `student_pin`) cannot slip through a key-name check.
+  check('27c: the custom PIN value never appears in the payload',
+    !rosterJson.includes('SECRET1'), rosterJson.slice(0, 200));
+  check('27c: a DOB value never appears in the payload',
+    !rosterJson.includes('2008-09-05') && !rosterJson.includes('2009-01-02'),
+    rosterJson.slice(0, 200));
+
+  // --- 27d. rejection matrix --------------------------------------------
+  const trashRes = await callRoster(ROSTER_TRASH_EXAM.code);
+  check('27d: a trashed exam reports EXAM_NOT_FOUND (Trash stays invisible)',
+    trashRes.data?.success === false && trashRes.data?.code === 'EXAM_NOT_FOUND',
+    JSON.stringify(trashRes.data));
+
+  const closedRes = await callRoster(ROSTER_CLOSED_EXAM.code);
+  check('27d: an inactive exam reports EXAM_INACTIVE',
+    closedRes.data?.success === false && closedRes.data?.code === 'EXAM_INACTIVE',
+    JSON.stringify(closedRes.data));
+
+  const notStartedRes = await callRoster(ROSTER_NOT_STARTED_EXAM.code);
+  check('27d: an exam before starts_at reports EXAM_NOT_STARTED',
+    notStartedRes.data?.success === false && notStartedRes.data?.code === 'EXAM_NOT_STARTED',
+    JSON.stringify(notStartedRes.data));
+
+  const endedRes = await callRoster(ROSTER_ENDED_EXAM.code);
+  check('27d: an exam past ends_at reports EXAM_EXPIRED',
+    endedRes.data?.success === false && endedRes.data?.code === 'EXAM_EXPIRED',
+    JSON.stringify(endedRes.data));
+
+  const missingRes = await callRoster('ZZZ999');
+  check('27d: an unknown code reports EXAM_NOT_FOUND',
+    missingRes.data?.success === false && missingRes.data?.code === 'EXAM_NOT_FOUND',
+    JSON.stringify(missingRes.data));
+
+  const blankRes = await callRoster('   ');
+  check('27d: a blank code is refused, not scanned',
+    blankRes.data?.success === false && blankRes.data?.code === 'EXAM_NOT_FOUND',
+    JSON.stringify(blankRes.data));
+
+  // Lowercase + surrounding whitespace must resolve, because the SPA uppercases
+  // only after trimming and a paste can easily carry either.
+  const looseRes = await callRoster(`  ${ROSTER_EXAM.code.toLowerCase()}  `);
+  check('27d: a lowercase/whitespace-padded code still resolves',
+    looseRes.data?.success === true, JSON.stringify(looseRes.data));
+
+  // An empty roster is a SUCCESS with an empty array — not an error. The SPA
+  // relies on this to fall back to manual entry rather than showing a refusal.
+  const rosterEmptyExam = await teacher.from('exams').insert({
+    user_id: teacherId,
+    code: 'ROZ' + String(Math.floor(100 + Math.random() * 900)),
+    title: 'E2E Roster Empty',
+    duration_minutes: 30,
+    is_active: true,
+    pin_mode: 'INDIVIDUAL',
+  }).select('code').single();
+  const rosterEmptyRes = await callRoster(rosterEmptyExam.data?.code);
+  check('27d: an empty roster is success:true with candidates:[]',
+    rosterEmptyRes.data?.success === true && Array.isArray(rosterEmptyRes.data?.candidates)
+      && rosterEmptyRes.data.candidates.length === 0,
+    JSON.stringify(rosterEmptyRes.data));
+
+  // --- 27e. the SPA's PIN flow against the roster it just rendered ------
+  // End-to-end: pick a candidate exactly as the picker would (code + class from
+  // the RPC payload), then submit that identity + PIN.
+  const rosterAdmin = createClient(SB_URL, SB_SECRET, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const tryRosterLogin = async (candidate, pin) => {
+    await rosterAdmin.from('active_sessions').delete()
+      .eq('exam_code', ROSTER_EXAM.code).eq('student_code', candidate.student_code);
+    return rosterAnon.rpc('verify_and_acquire_session', {
+      p_exam_code: ROSTER_EXAM.code,
+      p_student_code: candidate.student_code,
+      p_full_name: candidate.full_name,
+      p_class_name: candidate.class_name,
+      p_device_info: 'e2e-roster/1.0',
+      p_existing_token: null,
+      p_pin: pin,
+    });
+  };
+
+  const rosterPicked = rosterCandidates.find((c) => c.student_code === 'E2EROS01');
+  const rosterWrongPin = await tryRosterLogin(rosterPicked, 'WRONG');
+  check('27e: the PIN typed by the student is enforced (wrong value refused)',
+    rosterWrongPin.data?.success === false && rosterWrongPin.data?.code === 'INVALID_PIN',
+    JSON.stringify(rosterWrongPin.data));
+
+  const omittedPin = await tryRosterLogin(rosterPicked, null);
+  check('27e: an omitted PIN is refused for a GLOBAL exam (fail-closed)',
+    omittedPin.data?.success === false && omittedPin.data?.code === 'INVALID_PIN',
+    JSON.stringify(omittedPin.data));
+
+  const rosterRightPin = await tryRosterLogin(rosterPicked, ROSTER_EXAM.globalPin);
+  check('27e: the identity picked from the roster + correct PIN is admitted',
+    rosterRightPin.data?.success === true, JSON.stringify(rosterRightPin.data));
+
+  // --- 27f. the reload path must resend the PIN -------------------------
+  // The Phase 6.1 PIN gate runs BEFORE the session lock, so a resume without the
+  // PIN fails as INVALID_PIN — and the NEXT attempt would then hit the live
+  // session row. Reproducing it here pins the reason the SPA persists the PIN.
+  const resumeWithoutPin = await rosterAnon.rpc('verify_and_acquire_session', {
+    p_exam_code: ROSTER_EXAM.code,
+    p_student_code: rosterPicked.student_code,
+    p_full_name: rosterPicked.full_name,
+    p_class_name: rosterPicked.class_name,
+    p_device_info: 'e2e-roster/1.0',
+    p_existing_token: rosterRightPin.data?.session_token,
+    p_pin: null,
+  });
+  check('27f: a PIN-less resume is refused (hence the SPA must resend it)',
+    resumeWithoutPin.data?.success === false
+      && resumeWithoutPin.data?.code === 'INVALID_PIN',
+    JSON.stringify(resumeWithoutPin.data));
+
+  const resumeWithPin = await rosterAnon.rpc('verify_and_acquire_session', {
+    p_exam_code: ROSTER_EXAM.code,
+    p_student_code: rosterPicked.student_code,
+    p_full_name: rosterPicked.full_name,
+    p_class_name: rosterPicked.class_name,
+    p_device_info: 'e2e-roster/1.0',
+    p_existing_token: rosterRightPin.data?.session_token,
+    p_pin: ROSTER_EXAM.globalPin,
+  });
+  check('27f: resending the stored PIN resumes the same session',
+    resumeWithPin.data?.success === true
+      && resumeWithPin.data?.message === 'SESSION_RESUMED'
+      && resumeWithPin.data?.session_token === rosterRightPin.data?.session_token,
+    JSON.stringify(resumeWithPin.data));
+
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);
   await teacher.from('exams').delete().eq('code', EXAM.code); // cascades
@@ -2614,6 +2913,17 @@ async function main() {
   await teacher.from('exams').delete().eq('code', PRACTICE_EXAM.code);
   await teacher.from('exams').delete().eq('code', PIN_EXAM.code);
   await teacher.from('exams').delete().eq('code', CLASS_EXAM.code);
+  // Phase 6.3 — roster-picker fixtures. The empty-roster exam is deleted by its
+  // random code; the rest are named constants. `filter(Boolean)` keeps a failed
+  // insert (undefined code) from serialising a bogus `null` into the IN list.
+  await teacher.from('exams').delete().in('code', [
+    ROSTER_EXAM.code,
+    ROSTER_TRASH_EXAM.code,
+    ROSTER_CLOSED_EXAM.code,
+    ROSTER_NOT_STARTED_EXAM.code,
+    ROSTER_ENDED_EXAM.code,
+    rosterEmptyExam.data?.code,
+  ].filter(Boolean));
   // The class outlives its exams; delete it explicitly (members cascade).
   await teacher.from('classes').delete().eq('id', classId);
   await teacher.from('classes').delete().eq('id', webClassId);

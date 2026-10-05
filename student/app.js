@@ -38,6 +38,8 @@ const RPC_MESSAGES = {
   EXAM_EXPIRED: 'Đề thi đã hết thời gian mở. Vui lòng liên hệ giáo viên.',
   STUDENT_NOT_WHITELISTED: 'Mã học sinh không có trong danh sách dự thi của đề này.',
   IDENTITY_MISMATCH: 'Họ tên hoặc lớp không khớp với danh sách dự thi.',
+  // Phase 6.3 — the PIN gate (Phase 6.1) refuses an absent/wrong credential.
+  INVALID_PIN: 'Mã PIN hoặc ngày sinh không đúng. Vui lòng thử lại!',
   ALREADY_SUBMITTED: 'Bạn đã nộp bài cho đề thi này rồi.',
   SESSION_ACTIVE_ELSEWHERE: 'Tài khoản của bạn đang được đăng nhập trên một thiết bị khác.',
   INVALID_SESSION: 'Phiên làm bài không còn hợp lệ.',
@@ -80,6 +82,8 @@ const state = {
   fullName: '',
   className: '',
   sessionToken: null,
+  /** Phase 6.3 — the PIN submitted at login, reused when a reload resumes. */
+  pin: null,
   // exam
   exam: null,
   questions: [],
@@ -127,6 +131,17 @@ const state = {
    * mode, where the original order is preserved verbatim.
    */
   displayOrder: null,
+  /**
+   * Phase 6.3 — the roster fetched by `get_exam_roster` for the entered exam
+   * code. `null` means "no roster loaded" (manual entry); an array (possibly
+   * empty) means the picker is authoritative for this code. Cleared whenever
+   * the code changes so a stale roster can never validate a new exam.
+   */
+  roster: null,
+  /** `pin_mode` from the roster RPC: 'NONE' | 'GLOBAL' | 'INDIVIDUAL'. */
+  rosterPinMode: null,
+  /** Guards against out-of-order responses when the student retypes the code. */
+  rosterRequestId: 0,
 };
 
 /* =====================================================================
@@ -155,6 +170,19 @@ function writeSession() {
       session_token: state.sessionToken,
       started_at: state.startedAt,
       saved_at: Date.now(),
+      // Phase 6.3 — the PIN is persisted so a same-device reload can resume.
+      //
+      // The Phase 6.1 PIN gate runs BEFORE the session lock inside
+      // verify_and_acquire_session, so a resume that omits `p_pin` is rejected
+      // as INVALID_PIN — and the follow-up attempt then sees the still-live
+      // session row and returns SESSION_ACTIVE_ELSEWHERE, locking the student
+      // out for 60s after a stray F5. F5 reload tolerance is an explicit
+      // architecture guarantee, so the credential must be resendable.
+      //
+      // Exposure: this blob already holds the bearer session token, so it
+      // already grants exam access to anyone who can read localStorage. The PIN
+      // is cleared by clearSession() on submit, eviction and restart.
+      pin: state.pin,
     }));
   } catch { /* storage unavailable — the exam still works, reload recovery is lost */ }
 }
@@ -285,15 +313,235 @@ const TYPE_BADGE_CLASS = {
    Login → session acquisition
    ===================================================================== */
 
+/* =====================================================================
+   Roster picker (Phase 6.3)
+   =====================================================================
+   Once the student enters an exam code, `get_exam_roster` returns the sanitised
+   candidate list (student_code / full_name / class_name — never pin or dob) plus
+   the exam's `pin_mode`. The student picks their class and name instead of
+   typing them, so the identity submitted is byte-identical to the roster row the
+   server compares against.
+
+   Degradation is deliberate: any failure (blank roster, closed exam, no network)
+   falls back to the Phase 5 manual inputs. A student must never be unable to sit
+   an exam because an optimisation failed.
+   ===================================================================== */
+
+const EXAM_CODE_LENGTH = 6;
+
+function rosterStatus(message, isError) {
+  const node = $('rosterStatus');
+  if (!message) { hide(node); node.textContent = ''; node.classList.remove('is-error'); return; }
+  node.textContent = message;
+  node.classList.toggle('is-error', isError === true);
+  show(node);
+}
+
+/** Clears the picker back to its empty, unselected state. */
+function resetRosterPicker() {
+  const classSelect = $('class-select');
+  const studentSelect = $('student-select');
+  clear(classSelect);
+  classSelect.appendChild(el('option', { text: '-- Chọn Lớp --', attrs: { value: '' } }));
+  clear(studentSelect);
+  studentSelect.appendChild(el('option', { text: '-- Chọn Học sinh --', attrs: { value: '' } }));
+  $('student-code-hidden').value = '';
+}
+
+/**
+ * Switches the form between the roster picker and the manual inputs.
+ *
+ * The two field sets are mutually exclusive and fully separated in the DOM, so
+ * a value can never be read from a hidden, stale half of the form.
+ */
+function setRosterMode(mode) {
+  const usePicker = mode === 'picker';
+  if (usePicker) { show($('rosterFields')); hide($('manualFields')); }
+  else { hide($('rosterFields')); show($('manualFields')); }
+
+  // `required` is kept in sync with visibility. The form is `novalidate`, so
+  // this is not what enforces the choice (readIdentity does that) — it keeps the
+  // semantics honest for assistive tech instead of marking hidden fields required.
+  $('student-code-input').required = !usePicker;
+  $('class-name-input').required = !usePicker;
+  $('student-name-input').required = !usePicker;
+  $('class-select').required = usePicker;
+  $('student-select').required = usePicker;
+}
+
+/** Shows or hides the PIN field for the exam's policy. */
+function applyPinVisibility(pinMode) {
+  // Manual fallback: leave it visible, since pin_mode is unknown there and a
+  // GLOBAL exam would otherwise be impossible to enter.
+  const visible = pinMode !== 'NONE';
+  const group = $('pin-field-group');
+  if (visible) show(group); else hide(group);
+}
+
+/**
+ * Fetches and renders the roster for `examCode`.
+ *
+ * Any failure is non-fatal: the form silently reverts to manual entry with a
+ * short status note. The ONE exception is a real server refusal (closed /
+ * trashed / not-yet-open exam), which is surfaced loudly because retyping the
+ * identity will not help.
+ */
+async function loadExamRoster(examCode) {
+  const code = String(examCode || '').trim().toUpperCase();
+  const requestId = ++state.rosterRequestId;
+
+  // A new code invalidates whatever was loaded before.
+  state.roster = null;
+  state.rosterPinMode = null;
+  resetRosterPicker();
+
+  if (code.length !== EXAM_CODE_LENGTH) {
+    setRosterMode('manual');
+    applyPinVisibility(null);
+    rosterStatus('');
+    return;
+  }
+
+  rosterStatus('Đang tải danh sách dự thi…', false);
+
+  const result = await callRpc('get_exam_roster', { p_exam_code: code });
+
+  // A slower earlier request must not overwrite a newer one's result.
+  if (requestId !== state.rosterRequestId) return;
+
+  if (!result.ok) {
+    setRosterMode('manual');
+    applyPinVisibility(null);
+    rosterStatus('Không tải được danh sách dự thi. Vui lòng nhập thông tin thủ công.', false);
+    return;
+  }
+
+  const payload = result.data || {};
+  if (payload.success !== true) {
+    // A definitive server refusal — manual entry cannot work either.
+    setRosterMode('manual');
+    applyPinVisibility(null);
+    rosterStatus(rpcMessage(payload.code, payload.message), true);
+    return;
+  }
+
+  state.rosterPinMode = payload.pin_mode || null;
+  applyPinVisibility(state.rosterPinMode);
+
+  const candidates = Array.isArray(payload.candidates) ? payload.candidates : [];
+  state.roster = candidates;
+
+  if (candidates.length === 0) {
+    setRosterMode('manual');
+    rosterStatus('Đề thi chưa có danh sách dự thi. Vui lòng nhập thông tin thủ công.', false);
+    return;
+  }
+
+  setRosterMode('picker');
+  populateClassSelect(candidates);
+  rosterStatus(`Đã tải ${candidates.length} học sinh. Chọn lớp và tên của bạn.`, false);
+}
+
+/** Fills #class-select with the distinct class names, in server order. */
+function populateClassSelect(candidates) {
+  const classSelect = $('class-select');
+  clear(classSelect);
+  classSelect.appendChild(el('option', { text: '-- Chọn Lớp --', attrs: { value: '' } }));
+
+  // The RPC already orders by class_name, so a Set preserves that order and
+  // dedupes without a second sort.
+  const seen = new Set();
+  candidates.forEach((candidate) => {
+    const name = String(candidate.class_name || '');
+    if (!name || seen.has(name)) return;
+    seen.add(name);
+    classSelect.appendChild(el('option', { text: name, attrs: { value: name } }));
+  });
+
+  // A single class is the common case — preselect it so the student only picks
+  // their own name.
+  if (seen.size === 1) classSelect.value = [...seen][0];
+  populateStudentSelect();
+}
+
+/** Fills #student-select with the candidates of the selected class. */
+function populateStudentSelect() {
+  const className = $('class-select').value;
+  const studentSelect = $('student-select');
+  clear(studentSelect);
+  studentSelect.appendChild(el('option', { text: '-- Chọn Học sinh --', attrs: { value: '' } }));
+  $('student-code-hidden').value = '';
+  $('student-pin').value = '';
+
+  if (!className) { studentSelect.disabled = true; return; }
+  studentSelect.disabled = false;
+
+  (state.roster || [])
+    .filter((candidate) => candidate.class_name === className)
+    .forEach((candidate) => {
+      // The option VALUE is the student code (what the server matches on); the
+      // visible label is the human name.
+      studentSelect.appendChild(el('option', {
+        text: candidate.full_name,
+        attrs: { value: candidate.student_code },
+      }));
+    });
+}
+
+/** Copies the picked candidate into the hidden code field. */
+function onStudentSelected() {
+  const studentCode = $('student-select').value;
+  $('student-code-hidden').value = studentCode;
+  // Clearing the PIN on identity change prevents a value typed for one student
+  // being submitted for another.
+  $('student-pin').value = '';
+}
+
+/**
+ * Reads the identity from whichever mode is active.
+ *
+ * Returns `{ studentCode, className, fullName }` or `{ error }`. The picker
+ * branch reads the authoritative roster row so `full_name`/`class_name` come
+ * from the server, not from anything the student can type.
+ */
+function readIdentity() {
+  if (state.roster !== null && !$('rosterFields').classList.contains('hidden')) {
+    const studentCode = $('student-code-hidden').value.trim();
+    const className = $('class-select').value.trim();
+
+    if (!className) return { error: 'Vui lòng chọn lớp của bạn.' };
+    if (!studentCode) return { error: 'Vui lòng chọn tên của bạn trong danh sách.' };
+
+    const candidate = (state.roster || []).find(
+      (row) => row.student_code === studentCode && row.class_name === className,
+    );
+    if (!candidate) return { error: 'Không tìm thấy học sinh đã chọn. Vui lòng chọn lại.' };
+
+    return {
+      studentCode: candidate.student_code,
+      className: candidate.class_name,
+      fullName: candidate.full_name,
+    };
+  }
+
+  return {
+    studentCode: $('student-code-input').value.trim(),
+    className: $('class-name-input').value.trim(),
+    fullName: $('student-name-input').value.trim(),
+  };
+}
+
 async function handleLoginSubmit(event) {
   event.preventDefault();
   loginError('');
 
-  const examCode = $('examCode').value.trim();
-  const studentCode = $('studentCode').value.trim();
-  const fullName = $('fullName').value.trim();
-  const className = $('className').value.trim();
+  const examCode = $('exam-code').value.trim();
+  const identity = readIdentity();
+  const pin = $('student-pin').value.trim();
 
+  if (identity.error) { loginError(identity.error); return; }
+
+  const { studentCode, className, fullName } = identity;
   if (!examCode || !studentCode || !fullName || !className) {
     loginError('Vui lòng nhập đầy đủ Mã đề, Mã học sinh, Họ tên và Lớp.');
     return;
@@ -307,6 +555,8 @@ async function handleLoginSubmit(event) {
   state.studentCode = studentCode;
   state.fullName = fullName;
   state.className = className;
+  // Held for the resume path only (see writeSession); never rendered.
+  state.pin = pin === '' ? null : pin;
 
   // Request fullscreen synchronously: the user gesture is consumed once we
   // await the network call below.
@@ -326,6 +576,9 @@ async function handleLoginSubmit(event) {
       p_class_name: state.className,
       p_device_info: deviceInfo(),
       p_existing_token: isUuid(existingToken) ? existingToken : null,
+      // Phase 6.3 — the Phase 6.1 PIN gate reads this. Null/empty is correct for
+      // pin_mode = NONE, and fails closed for GLOBAL/INDIVIDUAL.
+      p_pin: pin === '' ? null : pin,
     });
 
     if (!result.ok) {
@@ -335,7 +588,9 @@ async function handleLoginSubmit(event) {
 
     const payload = result.data || {};
     if (payload.success !== true) {
-      loginError(rpcMessage(payload.message));
+      // The RPC reports INVALID_PIN both as `code` and `message` depending on the
+      // branch; rpcMessage resolves either.
+      loginError(rpcMessage(payload.code || payload.message, payload.message));
       return;
     }
 
@@ -1805,6 +2060,9 @@ async function tryResumeSession() {
   state.className = stored.class_name || '';
   state.sessionToken = stored.session_token;
   state.startedAt = stored.started_at || Date.now();
+  // Phase 6.3 — must be resendable: the PIN gate precedes the session lock, so
+  // omitting it would turn an F5 into a 60s lockout (see writeSession).
+  state.pin = stored.pin || null;
 
   busy(true, 'Đang khôi phục phiên làm bài…');
   try {
@@ -1815,6 +2073,7 @@ async function tryResumeSession() {
       p_class_name: state.className,
       p_device_info: deviceInfo(),
       p_existing_token: state.sessionToken,
+      p_pin: state.pin,
     });
 
     if (!result.ok || !result.data || result.data.success !== true) {
@@ -1834,15 +2093,50 @@ async function tryResumeSession() {
   }
 }
 
+/**
+ * Phase 6.3 — pre-fills the exam code from the URL and loads its roster.
+ *
+ * Accepts `?code=` (canonical) and `?c=` (short link for SMS/QR). Deliberately
+ * does NOT auto-start the exam: the student still has to confirm their identity
+ * and PIN, and a URL must never be able to open a sitting on its own.
+ *
+ * The roster load is fired-and-forgotten here because `boot()` continues to wire
+ * the rest of the form; `loadExamRoster` handles its own errors.
+ */
 function prefillFromUrl() {
   const params = new URLSearchParams(window.location.search);
-  const code = params.get('code');
-  if (code) $('examCode').value = code.slice(0, 6);
+  const codeParam = params.get('code') || params.get('c');
+  if (!codeParam) return;
+
+  const input = $('exam-code');
+  if (!input) return;
+
+  // The code is 6 digits, but a hand-edited URL could carry anything — cap it
+  // rather than letting a long string reach the RPC.
+  const code = codeParam.trim().toUpperCase().slice(0, EXAM_CODE_LENGTH);
+  if (!code) return;
+
+  input.value = code;
+  loadExamRoster(code);
+}
+
+/**
+ * Wires up the roster picker's change handlers (Phase 6.3).
+ *
+ * `change` (not `input`) on the exam code: the roster RPC should fire once the
+ * student finishes typing, not on every keystroke. The listener re-runs
+ * `loadExamRoster` for ANY edit, which is also what clears a stale roster.
+ */
+function bindRosterControls() {
+  $('exam-code').addEventListener('change', () => {
+    loadExamRoster($('exam-code').value);
+  });
+  $('class-select').addEventListener('change', populateStudentSelect);
+  $('student-select').addEventListener('change', onStudentSelected);
 }
 
 async function boot() {
   initTheme();
-  prefillFromUrl();
 
   try {
     state.supabase = initSupabase();
@@ -1853,6 +2147,7 @@ async function boot() {
   }
 
   $('loginForm').addEventListener('submit', handleLoginSubmit);
+  bindRosterControls();
   $('practiceForm').addEventListener('submit', handlePracticeSubmit);
   $('tabOfficial').addEventListener('click', () => selectModeTab('official'));
   $('tabPractice').addEventListener('click', () => selectModeTab('practice'));
@@ -1878,7 +2173,13 @@ async function boot() {
   document.addEventListener('keydown', onKeyDown);
 
   const resumed = await tryResumeSession();
-  if (!resumed) show($('loginScreen'));
+  if (!resumed) {
+    show($('loginScreen'));
+    // Phase 6.3 — only prefill when we are actually showing the login form; a
+    // resumed session skips the landing screen entirely, so the roster fetch
+    // would be wasted work.
+    prefillFromUrl();
+  }
 }
 
 boot();

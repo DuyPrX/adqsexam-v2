@@ -1738,6 +1738,87 @@ end;
 $$;
 
 
+-- ----------------------------------------------------------------------------
+-- C.15  get_exam_roster  (student — anon, Phase 6.3)
+--       Powers the student SPA's class + student picker. Returns the candidate
+--       list for an OPEN exam so the student selects their own name instead of
+--       typing it, which is what makes the Phase 6.1 PIN flow usable.
+--
+--       Returning: { success: true, exam_code, title, pin_mode, candidates: [
+--                      { student_code, full_name, class_name } ] }
+--              or: { success: false, code, message }
+--       Codes: EXAM_NOT_FOUND / EXAM_INACTIVE / EXAM_NOT_STARTED / EXAM_EXPIRED
+--
+--       NEVER returns `pin` or `dob` — both are exam credentials (dob is the
+--       DDMM fallback PIN). The projection is written as three explicit keys,
+--       never `s.*`.
+--
+--       This is the ONE anon RPC that answers BEFORE the caller proves roster
+--       membership (the picker exists so they can find themselves). The trade-off
+--       is documented in migration 20261005110000: a live exam code reveals that
+--       exam's names/codes/classes, but no secret. An empty roster is not an
+--       error — the SPA falls back to manual entry.
+-- ----------------------------------------------------------------------------
+create or replace function public.get_exam_roster(
+    p_exam_code varchar
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+    v_exam       public.exams%rowtype;
+    v_candidates jsonb;
+begin
+    if p_exam_code is null or trim(p_exam_code) = '' then
+        return jsonb_build_object('success', false, 'code', 'EXAM_NOT_FOUND', 'message', 'Đề thi không tồn tại.');
+    end if;
+
+    select * into v_exam from public.exams where code = upper(trim(p_exam_code));
+    if not found then
+        return jsonb_build_object('success', false, 'code', 'EXAM_NOT_FOUND', 'message', 'Đề thi không tồn tại.');
+    end if;
+
+    -- Trashed exams stay invisible to students (mirrors verify_and_acquire_session).
+    if v_exam.deleted_at is not null then
+        return jsonb_build_object('success', false, 'code', 'EXAM_NOT_FOUND', 'message', 'Đề thi không tồn tại.');
+    end if;
+
+    if v_exam.is_active is not true then
+        return jsonb_build_object('success', false, 'code', 'EXAM_INACTIVE', 'message', 'Đề thi hiện đang đóng.');
+    end if;
+
+    if v_exam.starts_at is not null and now() < v_exam.starts_at then
+        return jsonb_build_object('success', false, 'code', 'EXAM_NOT_STARTED', 'message', 'Chưa đến giờ làm bài.');
+    end if;
+    if v_exam.ends_at is not null and now() > v_exam.ends_at then
+        return jsonb_build_object('success', false, 'code', 'EXAM_EXPIRED', 'message', 'Đề thi đã kết thúc.');
+    end if;
+
+    -- Three display keys ONLY: `pin`/`dob` must never leave the server here.
+    select jsonb_agg(
+               jsonb_build_object(
+                   'student_code', s.student_code,
+                   'full_name',    s.full_name,
+                   'class_name',   s.class_name
+               )
+               order by s.class_name asc, s.student_code asc
+           )
+      into v_candidates
+      from public.students s
+     where s.exam_code = v_exam.code;
+
+    return jsonb_build_object(
+        'success',    true,
+        'exam_code',  v_exam.code,
+        'title',      v_exam.title,
+        'pin_mode',   v_exam.pin_mode,
+        'candidates', coalesce(v_candidates, '[]'::jsonb)
+    );
+end;
+$$;
+
+
 -- ============================================================================
 -- SECTION D — EXECUTE GRANTS
 -- ----------------------------------------------------------------------------
@@ -1761,6 +1842,8 @@ revoke all on function public.restore_exam(varchar)                             
 revoke all on function public.purge_expired_exams()                                                        from public;
 revoke all on function public.recalculate_exam_scores(varchar)                                             from public;
 revoke all on function public.get_practice_exam_payload(varchar, varchar, varchar)                          from public;
+-- Phase 6.3 — student-facing. Returns a sanitised roster (no pin/dob).
+revoke all on function public.get_exam_roster(varchar)                                                    from public;
 
 grant execute on function public.verify_and_acquire_session(varchar, varchar, varchar, varchar, text, uuid, varchar)   to anon, authenticated;
 grant execute on function public.record_student_heartbeat(varchar, varchar, uuid, integer, integer, integer, integer) to anon, authenticated;
@@ -1771,6 +1854,9 @@ grant execute on function public.get_certificate_verification(uuid)             
 grant execute on function public.verify_student_practice(varchar, varchar)                                     to anon, authenticated;
 -- Phase 5.8: student-facing, but the body gates on the exam roster + allow_practice.
 grant execute on function public.get_practice_exam_payload(varchar, varchar, varchar)                          to anon, authenticated;
+-- Phase 6.3 — student-facing: the roster picker must work BEFORE the student has
+-- an identity, so this is anon-executable by design.
+grant execute on function public.get_exam_roster(varchar)                                                     to anon, authenticated;
 -- Teacher-only: never exposed to anon (ownership is enforced inside the body).
 grant execute on function public.update_exam_questions_safe(varchar, jsonb)                                    to authenticated;
 grant execute on function public.delete_exam(varchar)                                                          to authenticated;

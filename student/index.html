@@ -57,26 +57,67 @@
 
           <form id="loginForm" class="login__form" novalidate>
             <div class="field">
-              <label for="examCode">Mã đề thi</label>
-              <input id="examCode" name="examCode" type="text" inputmode="numeric"
+              <label for="exam-code">Mã đề thi</label>
+              <input id="exam-code" name="examCode" type="text" inputmode="numeric"
                      autocomplete="off" maxlength="6" placeholder="6 chữ số" required />
             </div>
-            <div class="field">
-              <label for="studentCode">Mã học sinh</label>
-              <input id="studentCode" name="studentCode" type="text"
-                     autocomplete="off" maxlength="50" placeholder="VD: HS001" required />
-            </div>
-            <div class="field">
-              <label for="fullName">Họ và tên</label>
-              <input id="fullName" name="fullName" type="text"
-                     autocomplete="off" maxlength="150" placeholder="VD: Nguyễn Văn A" required />
-            </div>
-            <div class="field">
-              <label for="className">Lớp</label>
-              <input id="className" name="className" type="text"
-                     autocomplete="off" maxlength="50" placeholder="VD: 12A1" required />
+
+            <!-- Phase 6.3 — roster picker. Populated by get_exam_roster() once a
+                 valid 6-digit code is entered. Replaces typing the identity, so
+                 what the student submits is exactly the row the server checks. -->
+            <div id="rosterFields" class="hidden">
+              <div class="field">
+                <label for="class-select">Lớp</label>
+                <select id="class-select" class="form-control">
+                  <option value="">-- Chọn Lớp --</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="student-select">Họ và tên</label>
+                <select id="student-select" class="form-control">
+                  <option value="">-- Chọn Học sinh --</option>
+                </select>
+              </div>
             </div>
 
+            <!-- Fallback: shown when the exam has no roster, or the roster RPC is
+                 unavailable. Kept completely separate from the picker so switching
+                 between the two can never leave a stale half-selected value. -->
+            <div id="manualFields">
+              <div class="field">
+                <label for="student-code-input">Mã học sinh</label>
+                <input id="student-code-input" name="studentCode" type="text"
+                       autocomplete="off" maxlength="50" placeholder="VD: HS001" required />
+              </div>
+              <div class="field">
+                <label for="class-name-input">Lớp</label>
+                <input id="class-name-input" name="className" type="text"
+                       autocomplete="off" maxlength="50" placeholder="VD: 12A1" required />
+              </div>
+              <div class="field">
+                <label for="student-name-input">Họ và tên</label>
+                <input id="student-name-input" name="fullName" type="text"
+                       autocomplete="off" maxlength="150" placeholder="VD: Nguyễn Văn A" required />
+              </div>
+            </div>
+
+            <!-- Set from the student picker; never typed directly. -->
+            <input type="hidden" id="student-code-hidden" />
+
+            <!-- Phase 6.3 — PIN. Hidden when the exam's pin_mode is NONE. Left
+                 VISIBLE in the manual fallback, where pin_mode is unknown and a
+                 GLOBAL exam would otherwise be impossible to enter. -->
+            <div id="pin-field-group" class="field">
+              <label for="student-pin">Mã PIN bảo vệ</label>
+              <input id="student-pin" name="studentPin" type="password"
+                     autocomplete="current-password" maxlength="50"
+                     placeholder="Nhập PIN hoặc ngày sinh DDMM" />
+              <small class="hint-text">
+                Nhập mã PIN do giáo viên cấp, hoặc ngày sinh dạng DDMM (VD: 0509 nếu sinh 05/09).
+              </small>
+            </div>
+
+            <p id="rosterStatus" class="roster-status hidden" role="status"></p>
             <p id="loginError" class="alert alert--error hidden" role="alert"></p>
 
             <button id="startBtn" type="submit" class="btn btn--primary btn--block">
