@@ -116,6 +116,8 @@ export interface ClassMemberRow {
   dob: string | null;
   /** Explicit PIN; takes precedence over `dob`. Null = fall back to DOB. */
   pin: string | null;
+  /** Phase 8.4 — competition team (Tổ) 1..4. */
+  team_number: TeamNumber;
   created_at: string;
 }
 
@@ -125,7 +127,15 @@ export interface ClassMemberInput {
   full_name: string;
   dob: string | null;
   pin: string | null;
+  /** Phase 8.4 — competition team (Tổ) 1..4, defaulted by the parser. */
+  team_number: TeamNumber;
 }
+
+/** Phase 8.4 — a competition team index (Tổ 1..4). */
+export type TeamNumber = 1 | 2 | 3 | 4;
+
+/** Phase 8.4 — per-team class sizes: `{ 1: n1, 2: n2, 3: n3, 4: n4 }`. */
+export type TeamCounts = Record<TeamNumber, number>;
 
 /**
  * A row of `public.tree_sessions` — one "Cây tri thức" activity (Phase 7.1).
@@ -165,6 +175,8 @@ export interface TreeSubmissionRow {
   word_count: number;
   submitted_at: string;
   fruit_index: number;
+  /** Phase 8.4 — the author's competition team (Tổ) 1..4. */
+  team_number: number;
 }
 
 /** A tree session plus the class context the projector needs (Phase 7.3). */
@@ -172,6 +184,8 @@ export interface TreeSessionDetail extends TreeSessionRow {
   class_name: string;
   /** Class size `N` — the participation denominator. */
   total_students: number;
+  /** Phase 8.4 — per-team class sizes for the arena's four denominators. */
+  team_counts: TeamCounts;
 }
 
 export interface QuestionBankRow {

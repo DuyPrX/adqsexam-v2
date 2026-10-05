@@ -15,7 +15,7 @@ import type { ClassMemberInput, ClassMemberRow, ClassRow } from './types';
 
 /** Columns read for a class row. */
 const CLASS_COLUMNS = 'id, user_id, name, academic_year, created_at, updated_at';
-const MEMBER_COLUMNS = 'id, class_id, student_code, full_name, dob, pin, created_at';
+const MEMBER_COLUMNS = 'id, class_id, student_code, full_name, dob, pin, team_number, created_at';
 
 /** Shape of the nested aggregate `class_members(count)`. */
 interface ClassRowWithCount extends ClassRow {
@@ -132,6 +132,8 @@ export async function saveClassMembers(
     full_name: member.full_name,
     dob: member.dob,
     pin: member.pin,
+    // Phase 8.4 — the parser always assigns a team (explicit or round-robin).
+    team_number: member.team_number,
   }));
 
   const { error } = await supabase

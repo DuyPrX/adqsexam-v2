@@ -16,7 +16,7 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { orderPracticeQuestions, readShuffleToggle, shuffledOrder } from './practice-order.js';
-import { TreeRenderer, computeTreeState, hitTestFruits } from './tree-engine.js';
+import { TreeRenderer, clampTeamNumber, computeTreeState, getTeamSeed, hitTestFruits } from './tree-engine.js';
 import { countTreeWords, normalizeAnswerText, treeWordCounterLabel } from './tree-words.js';
 import {
   isAudioMuted, playBloomFanfare, playDewdropSound, resumeAudioContext, toggleAudioMute,
@@ -220,6 +220,23 @@ const state = {
    * somehow exceeds N) cannot replay the celebration.
    */
   treeFlourished: false,
+  /**
+   * Phase 8.4 — the student's own team (Tổ 1..4), resolved from the check-in
+   * roster. The workspace renders ONLY this team's tree (`myTeamSubs`), so a
+   * student watches their own Tổ grow rather than the whole class's.
+   */
+  studentTeam: 1,
+  /**
+   * Phase 8.4 — per-team roster sizes from `get_public_tree_session`
+   * (`{ "1": n1, ... "4": n4 }`). Used as each tree's participation denominator
+   * and to drive the mini-leaderboard percentages.
+   */
+  treeTeamCounts: null,
+  /**
+   * Phase 8.4 — latches the FIRST team to reach 100% so its 🏆 badge is drawn
+   * once and never transferred to a later finisher.
+   */
+  treeChampionTeam: null,
 };
 
 /* =====================================================================
@@ -2454,35 +2471,53 @@ function onTreePointerDown(event) {
 }
 
 /**
- * Renders a tree session and updates the participation/vitality badges.
+ * Renders the STUDENT'S OWN TEAM's tree and updates the team badges.
  *
- * @param {object} session  Normalised: `{ seed, totalStudents, timeLimitMinutes, createdAt }`.
- * @param {object[]} submissions  Rows from `tree_submissions`.
+ * Phase 8.4 — the tree is no longer class-wide: only rows whose `team_number`
+ * matches `state.studentTeam` are fed to the engine, the roster denominator is
+ * that team's size, and the seed is derived with `getTeamSeed()` so the four
+ * teams each grow a visually distinct tree. The class-wide `submissions`
+ * argument is passed in unfiltered (Realtime merges every team's rows) and
+ * narrowed here, so every caller stays team-agnostic.
+ *
+ * @param {object} session  Normalised: `{ seed, className, timeLimitMinutes, createdAt }`.
+ * @param {object[]} submissions  All session rows; filtered down to the team.
  * @param {boolean} animate Whether to start the idle breeze.
  */
 function renderTree(session, submissions, animate) {
   const renderer = treeRenderer();
   if (!renderer || !session) return null;
 
+  const team = clampTeamNumber(state.studentTeam);
+  const teamSubmissions = submissions.filter(
+    (row) => clampTeamNumber(row.team_number) === team,
+  );
+  // Fall back to a quarter of the class when the RPC did not return a breakdown
+  // (older session payload), so the denominator is never 0.
+  const teamTotal = state.treeTeamCounts
+    ? Number(state.treeTeamCounts[team]) || 0
+    : Math.ceil((Number(session.totalStudents) || 0) / 4);
+
   const treeData = computeTreeState({
-    totalStudents: session.totalStudents,
-    submissions,
+    totalStudents: Math.max(teamTotal, 1),
+    submissions: teamSubmissions,
     timeLimitMinutes: session.timeLimitMinutes,
     createdAt: session.createdAt,
-    seed: session.seed,
+    seed: getTeamSeed(session.seed, team),
   });
 
   state.treeData = treeData;
 
   const subtitle = $('treeSubtitle');
   if (subtitle) {
-    subtitle.textContent = `Lớp ${session.className || ''}`.trim();
+    subtitle.textContent = `Lớp ${session.className || ''} · Tổ ${team}`.trim();
   }
 
   const progressBadge = $('treeProgressBadge');
   if (progressBadge) {
-    const percent = Math.round(treeData.participation * 100);
-    progressBadge.textContent = `🌿 ${treeData.k}/${treeData.n} bạn đã nộp (${percent}%)`;
+    const percent = Math.round((teamSubmissions.length / Math.max(teamTotal, 1)) * 100);
+    progressBadge.textContent =
+      `🌿 Tổ ${team}: ${teamSubmissions.length}/${teamTotal} bạn đã nộp (${percent}%)`;
   }
   const vitalityBadge = $('treeVitalityBadge');
   if (vitalityBadge) {
@@ -2495,14 +2530,69 @@ function renderTree(session, submissions, animate) {
     renderer.startAnimation(treeData);
   }
 
-  // Phase 8.3 — chime the ONE moment the class completes the tree. Latched via
+  // Phase 8.3 — chime the ONE moment the team's tree completes. Latched via
   // `state.treeFlourished` so a repaint or a later event cannot replay it.
   if (treeData.isFlourished && !state.treeFlourished) {
     state.treeFlourished = true;
     playBloomFanfare();
   }
 
+  // Phase 8.4 — refresh the mini-leaderboard from the SAME data the tree uses.
+  latchTreeChampion();
+  renderLeaderboard();
+
   return treeData;
+}
+
+/**
+ * Phase 8.4 — latches the FIRST team to reach full participation.
+ *
+ * Evaluated over ALL teams (not just the student's) because the 🏆 belongs to
+ * whichever Tổ finished first. Once set it never moves, so a team finishing
+ * later does not steal the crown.
+ */
+function latchTreeChampion() {
+  if (state.treeChampionTeam !== null) return;
+  const counts = state.treeTeamCounts;
+  if (!counts) return;
+
+  for (let team = 1; team <= 4; team += 1) {
+    const total = Number(counts[team]) || 0;
+    if (total <= 0) continue;
+    const done = state.treeSubmissions.filter(
+      (row) => clampTeamNumber(row.team_number) === team,
+    ).length;
+    if (done >= total) { state.treeChampionTeam = team; return; }
+  }
+}
+
+/** Phase 8.4 — renders the sticky 4-team mini-leaderboard. */
+function renderLeaderboard() {
+  const host = $('treeTeamLeaderboard');
+  if (!host) return;
+  clear(host);
+
+  const counts = state.treeTeamCounts;
+  const myTeam = clampTeamNumber(state.studentTeam);
+
+  for (let team = 1; team <= 4; team += 1) {
+    const total = counts ? Number(counts[team]) || 0 : 0;
+    const done = state.treeSubmissions.filter(
+      (row) => clampTeamNumber(row.team_number) === team,
+    ).length;
+    const percent = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+
+    const isMine = team === myTeam;
+    const isChampion = state.treeChampionTeam === team;
+    const label = isMine ? `★ Tổ ${team} của bạn: ${percent}%` : `Tổ ${team}: ${percent}%`;
+
+    host.appendChild(el('span', {
+      className: 'tree-leaderboard__badge'
+        + (isMine ? ' is-my-team' : '')
+        + (isChampion ? ' is-champion' : ''),
+      text: isChampion ? `${label} 🏆` : label,
+    }));
+  }
 }
 
 /** Shows the tree screen and renders into it. */
@@ -2618,6 +2708,11 @@ async function loadTreeActivity(sessionId) {
   // Phase 8.3 — the session was just (re)loaded, so the fanfare latch must start
   // fresh; otherwise a previously-flourished class would never celebrate again.
   state.treeFlourished = false;
+  // Phase 8.4 — per-team roster sizes and the champion latch both restart with
+  // the session; the team itself is only known after check-in.
+  state.treeTeamCounts = payload.team_counts || null;
+  state.studentTeam = 1;
+  state.treeChampionTeam = null;
 
   // Check-in copy.
   $('treeCheckinTitle').textContent = state.treeSession.title;
@@ -2669,7 +2764,7 @@ function populateTreeStudentSelect() {
 async function loadTreeSubmissions(sessionId) {
   const { data, error } = await state.supabase
     .from('tree_submissions')
-    .select('id, session_id, student_code, student_name, answer_text, word_count, submitted_at, fruit_index')
+    .select('id, session_id, student_code, student_name, answer_text, word_count, submitted_at, fruit_index, team_number')
     .eq('session_id', sessionId)
     .order('fruit_index', { ascending: true });
 
@@ -2771,6 +2866,9 @@ function enterTreeWorkspace() {
   if (!member) { treeCheckinError('Vui lòng chọn tên của bạn trong danh sách.'); return; }
 
   state.treeIdentity = { student_code: member.student_code, full_name: member.full_name };
+  // Phase 8.4 — the student's Tổ drives which of the four trees they watch and
+  // which leaderboard badge is highlighted as their own.
+  state.studentTeam = clampTeamNumber(member.team_number);
   treeCheckinError('');
   setTreeView('workspace');
 

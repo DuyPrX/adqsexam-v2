@@ -116,6 +116,15 @@ export declare function createPRNG(seed: number): () => number;
 /** `seed % 4`, normalised for negative/non-finite input. */
 export declare function themeIndexForSeed(seed: number): number;
 export declare function themeForSeed(seed: number): TreeTheme;
+/** The four competition teams (Tổ 1..4). */
+export declare const TEAM_NUMBERS: readonly [1, 2, 3, 4];
+/**
+ * Derives an independent, deterministic seed for one team's tree:
+ * `(baseSeed + teamNumber * 7919) >>> 0`.
+ */
+export declare function getTeamSeed(baseSeed: number, teamNumber: number): number;
+/** Clamps any input to a valid team index 1..4. */
+export declare function clampTeamNumber(value: unknown): 1 | 2 | 3 | 4;
 export declare function clamp(value: number, lo: number, hi: number): number;
 export declare function stageForParticipation(p: number): TreeStage;
 /** `radius = baseRadius + clamp(wordCount / 12, 1.5, 6)`, in pixels. */

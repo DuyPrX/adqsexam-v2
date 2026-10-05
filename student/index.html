@@ -314,6 +314,12 @@
                   title="Bật/Tắt âm thanh" aria-label="Bật/Tắt âm thanh" aria-pressed="true">🔊</button>
         </div>
 
+        <!-- Phase 8.4 — sticky 4-team mini-leaderboard. `renderLeaderboard()`
+             writes one badge per Tổ and marks the student's own with
+             `.is-my-team` and the first finisher with `.is-champion` (🏆). -->
+        <div id="treeTeamLeaderboard" class="tree-leaderboard" role="status"
+             aria-label="Bảng thi đua 4 tổ"></div>
+
         <div class="tree-screen__stage">
           <canvas id="tree-preview-canvas" class="tree-canvas" width="800" height="600"
                   aria-label="Cây tri thức của lớp"></canvas>

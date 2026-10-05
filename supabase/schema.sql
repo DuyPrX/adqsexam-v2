@@ -145,12 +145,15 @@ create table if not exists public.students (
     dob          date,
     pin          varchar(50),
     created_at   timestamptz not null default now(),
+    -- Phase 8.4 — competition team (Tổ) 1..4, carried over from the class roster.
+    team_number  smallint    not null default 1 check (team_number between 1 and 4),
     constraint students_code_exam_uniq unique (student_code, exam_code)
 );
 
--- Idempotency for databases created before Phase 6.1.
+-- Idempotency for databases created before Phase 6.1 / 8.4.
 alter table public.students add column if not exists dob date;
 alter table public.students add column if not exists pin varchar(50);
+alter table public.students add column if not exists team_number smallint not null default 1 check (team_number between 1 and 4);
 
 comment on table public.students is 'Per-exam candidate whitelist used by verify_and_acquire_session().';
 
@@ -238,10 +241,18 @@ create table if not exists public.class_members (
     dob          date,
     pin          varchar(50),
     created_at   timestamptz  default now(),
+    -- Phase 8.4 — competition team (Tổ) 1..4 for the Tree of Knowledge arena.
+    team_number  smallint     not null default 1 check (team_number between 1 and 4),
     constraint class_members_class_code_uniq unique (class_id, student_code)
 );
 
+-- Idempotency for databases created before Phase 8.4. The column's inline CHECK
+-- is created only when the column itself is added, so a fresh database (which
+-- already got it above) does not end up with two identical constraints.
+alter table public.class_members add column if not exists team_number smallint not null default 1 check (team_number between 1 and 4);
+
 comment on table public.class_members is 'Roster rows for a class. `pin` NULL -> DOB (DDMM) fallback; both NULL -> no PIN required.';
+comment on column public.class_members.team_number is 'Competition team (Tổ) 1..4 for the Tree of Knowledge arena (Phase 8.4).';
 
 -- ----------------------------------------------------------------------------
 -- A.9  tree_sessions — teacher-owned "Cây tri thức" activity (Phase 7.1).
@@ -291,12 +302,18 @@ create table if not exists public.tree_submissions (
     word_count   integer      not null,
     submitted_at timestamptz  not null default now(),
     fruit_index  integer      not null,
+    -- Phase 8.4 — the author's team (Tổ) 1..4, resolved by submit_tree_answer.
+    team_number  smallint     not null default 1 check (team_number between 1 and 4),
     constraint tree_submissions_session_student_uniq unique (session_id, student_code),
     constraint tree_submissions_fruit_index_positive check (fruit_index > 0),
     constraint tree_submissions_word_count_nonneg check (word_count >= 0)
 );
 
+-- Idempotency for databases created before Phase 8.4.
+alter table public.tree_submissions add column if not exists team_number smallint not null default 1 check (team_number between 1 and 4);
+
 comment on table public.tree_submissions is 'Student answers ("fruits") for a tree session. UNIQUE(session_id, student_code) makes resubmission an update, not a new fruit.';
+comment on column public.tree_submissions.team_number is 'Team the author belonged to when they submitted (Phase 8.4).';
 
 
 -- ============================================================================
@@ -320,6 +337,8 @@ create index if not exists idx_tree_sessions_user_id          on public.tree_ses
 create index if not exists idx_tree_submissions_session_id    on public.tree_submissions (session_id);
 -- Orders the tree in one pass (the client sorts by fruit_index).
 create index if not exists idx_tree_submissions_session_fruit on public.tree_submissions (session_id, fruit_index);
+-- Phase 8.4 — the arena projector filters each of its four trees by team.
+create index if not exists idx_tree_submissions_session_team  on public.tree_submissions (session_id, team_number);
 -- Trigram index backing similarity() lookups. The operator class lives in the
 -- `extensions` schema, so it MUST be schema-qualified: an unqualified
 -- `gin_trgm_ops` resolves against the current search_path at CREATE INDEX time.
@@ -2022,12 +2041,13 @@ $$;
 
 
 -- ----------------------------------------------------------------------------
--- C.16  submit_tree_answer  (student — anon, Phase 7.1)
+-- C.16  submit_tree_answer  (student — anon, Phase 7.1 / 8.4)
 --       The single write path for the Tree of Knowledge. Validates the session
 --       window, enforces the minimum word count, rejects text too similar to an
 --       existing answer, then upserts and returns the fruit ordinal.
 --
---       Returns { success: true, submission_id, fruit_index, word_count, message }
+--       Returns { success: true, submission_id, fruit_index, team_number,
+--                 word_count, message }
 --            or { success: false, code, ... }
 --       Codes: SESSION_NOT_FOUND / SESSION_INACTIVE / SESSION_EXPIRED /
 --              IDENTITY_REQUIRED / MIN_WORDS_NOT_MET / SIMILARITY_EXCEEDED
@@ -2035,6 +2055,16 @@ $$;
 --       The similarity check EXCLUDES the caller's own prior submission
 --       (student_code <>), otherwise a student editing their answer would be
 --       compared against their own previous text and could never improve it.
+--       It deliberately spans the WHOLE session, so cross-team plagiarism is
+--       rejected exactly like a classmate's copy.
+--
+--       Phase 8.4 — the author's `team_number` is read from `class_members` and
+--       recorded, with a deterministic round-robin fallback for a walk-in who is
+--       not on the roster.
+--
+--       `fruit_index` is NOT updated on resubmission (the fruit keeps its place),
+--       and the RETURNING clause reads the row's REAL value back, so the returned
+--       ordinal is correct for both an insert and an update.
 --
 --       similarity() is schema-qualified (`extensions.similarity`) because
 --       search_path is pinned to public,pg_temp and pg_trgm lives in `extensions`.
@@ -2060,6 +2090,7 @@ declare
     v_submission_id     uuid;
     v_student_code      varchar(50);
     v_student_name      varchar(100);
+    v_team_number       smallint;
 begin
     v_student_code := trim(coalesce(p_student_code, ''));
     v_student_name := trim(coalesce(p_student_name, ''));
@@ -2082,6 +2113,24 @@ begin
 
     if now() > v_session.created_at + make_interval(mins => v_session.time_limit_minutes) then
         return jsonb_build_object('success', false, 'code', 'SESSION_EXPIRED', 'message', 'Đã hết thời gian làm bài.');
+    end if;
+
+    -- Phase 8.4 — resolve the author's team from the class roster.
+    select cm.team_number
+      into v_team_number
+      from public.class_members cm
+     where cm.class_id = v_session.class_id
+       and cm.student_code = v_student_code
+     limit 1;
+
+    -- Not on the roster: a deterministic round-robin team from the number of
+    -- answers already recorded, so a walk-in lands somewhere sensible rather
+    -- than always piling onto team 1.
+    if v_team_number is null then
+        select (((count(*)) % 4) + 1)::smallint
+          into v_team_number
+          from public.tree_submissions
+         where session_id = p_session_id;
     end if;
 
     -- Normalise all whitespace (newlines/tabs) to single spaces, then count.
@@ -2125,14 +2174,15 @@ begin
 
     -- On resubmission fruit_index is NOT updated: the fruit keeps its place.
     insert into public.tree_submissions (
-        session_id, student_code, student_name, answer_text, word_count, fruit_index
+        session_id, student_code, student_name, answer_text, word_count, fruit_index, team_number
     ) values (
-        p_session_id, v_student_code, v_student_name, v_clean_text, v_word_count, v_next_fruit_index
+        p_session_id, v_student_code, v_student_name, v_clean_text, v_word_count, v_next_fruit_index, v_team_number
     )
     on conflict (session_id, student_code) do update
         set answer_text  = excluded.answer_text,
             word_count   = excluded.word_count,
             student_name = excluded.student_name,
+            team_number  = excluded.team_number,
             submitted_at = now()
     returning id, fruit_index into v_submission_id, v_next_fruit_index;
 
@@ -2140,25 +2190,30 @@ begin
         'success',       true,
         'submission_id', v_submission_id,
         'fruit_index',   v_next_fruit_index,
+        'team_number',   v_team_number,
         'word_count',    v_word_count,
-        'message',       'Đóng góp thành công! Cây tri thức đang phát triển thêm quả mới. 🌱🍎'
+        'message',       'Đóng góp thành công! Giọt sương tri thức đã hòa vào cây của Tổ bạn. 🌱💧'
     );
 end;
 $$;
 
 
 -- ----------------------------------------------------------------------------
--- C.17  get_public_tree_session  (student — anon, Phase 7.4)
+-- C.17  get_public_tree_session  (student — anon, Phase 7.4 / 8.4)
 --       Powers the student SPA's tree check-in screen: opens a session from a
 --       link (`?session=`/`?tree=`) and returns the question, the word minimum,
 --       the renderer seed and the class roster to pick a name from.
 --
---       Returns { success: true, class_name, total_students,
+--       Returns { success: true, class_name, total_students, team_counts,
 --                 session: { id, title, question_text, min_words,
 --                            time_limit_minutes, tree_seed, created_at },
---                 candidates: [ { student_code, full_name } ] }
+--                 candidates: [ { student_code, full_name, team_number } ] }
 --            or { success: false, code, message }
 --       Codes: SESSION_NOT_FOUND / SESSION_INACTIVE / SESSION_EXPIRED
+--
+--       Phase 8.4 — `team_counts` is `{ "1": n1, ... "4": n4 }`, the per-team
+--       participation denominator the arena needs, and every candidate carries
+--       its `team_number`.
 --
 --       `tree_seed` is NOT a credential — it is the shared input every client
 --       feeds the deterministic renderer so the whole class sees the same tree.
@@ -2173,6 +2228,8 @@ $$;
 --       requires a SECURITY DEFINER function: Section B revokes every table
 --       privilege from anon, so tree_sessions/class_members are unreadable directly.
 -- ----------------------------------------------------------------------------
+drop function if exists public.get_public_tree_session(uuid);
+
 create or replace function public.get_public_tree_session(
     p_session_id uuid
 ) returns jsonb
@@ -2184,6 +2241,7 @@ declare
     v_session        record;
     v_class_name     varchar;
     v_total_students integer;
+    v_team_counts    jsonb;
     v_candidates     jsonb;
 begin
     if p_session_id is null then
@@ -2215,13 +2273,33 @@ begin
      where c.id = v_session.class_id
      group by c.id, c.name;
 
-    -- Two display keys ONLY: `pin`/`dob` must never leave the server here.
+    -- Per-team class size. generate_series guarantees all four keys exist, so the
+    -- SPA never has to defend against a missing team.
+    select coalesce(
+               jsonb_object_agg(t.team_num::text, coalesce(t.cnt, 0)),
+               '{"1":0,"2":0,"3":0,"4":0}'::jsonb
+           )
+      into v_team_counts
+      from (
+          select g.team_num, tc.cnt
+            from generate_series(1, 4) as g(team_num)
+            left join (
+                select cm.team_number, count(*)::integer as cnt
+                  from public.class_members cm
+                 where cm.class_id = v_session.class_id
+                 group by cm.team_number
+            ) tc on tc.team_number = g.team_num
+      ) t;
+
+    -- `student_code` + `full_name` + `team_number` ONLY: `pin`/`dob` must never
+    -- leave the server here.
     select jsonb_agg(
                jsonb_build_object(
                    'student_code', cm.student_code,
-                   'full_name',    cm.full_name
+                   'full_name',    cm.full_name,
+                   'team_number',  coalesce(cm.team_number, 1)
                )
-               order by cm.student_code asc
+               order by cm.team_number asc, cm.student_code asc
            )
       into v_candidates
       from public.class_members cm
@@ -2240,6 +2318,7 @@ begin
         ),
         'class_name', v_class_name,
         'total_students', greatest(coalesce(v_total_students, 0), 1),
+        'team_counts', coalesce(v_team_counts, '{"1":0,"2":0,"3":0,"4":0}'::jsonb),
         'candidates', coalesce(v_candidates, '[]'::jsonb)
     );
 end;

@@ -206,6 +206,7 @@ const {
   computeTreeState, createPRNG, layoutFruitAnchors, hitTestFruits,
   layoutDewdropAnchors, hitTestDewdrops,
   themeForSeed, themeIndexForSeed, MAX_BRANCH_DEPTH, TREE_STAGES, STAGE_LADDER,
+  TEAM_NUMBERS, getTeamSeed, clampTeamNumber,
 } = await import(new URL('../student/tree-engine.js', import.meta.url).href);
 
 // Phase 5.5 Step 15 exercises the timezone helpers. `date.ts` has no imports of
@@ -397,8 +398,8 @@ const CLASS_PICK = {
   academicYear: '2026-2027',
 };
 const CLASS_PICK_MEMBERS = [
-  { code: 'E2EWEB01', fullName: 'Bùi Văn Web', dob: '2009-01-02', pin: null },
-  { code: 'E2EWEB02', fullName: 'Đinh Thị Lớp', dob: null, pin: 'X9' },
+  { code: 'E2EWEB01', fullName: 'Bùi Văn Web', dob: '2009-01-02', pin: null, team: 1 },
+  { code: 'E2EWEB02', fullName: 'Đinh Thị Lớp', dob: null, pin: 'X9', team: 2 },
 ];
 
 // Phase 6.3 — get_exam_roster powering the student SPA's roster picker.
@@ -448,11 +449,11 @@ const ROSTER_ENDED_EXAM = {
 //                          different one accepted (measured 0.20 locally)
 const TREE_CLASS = 'E2E-TREE-' + String(Math.floor(1000 + Math.random() * 9000));
 const TREE_MEMBERS = [
-  { code: 'E2ETREE01', name: 'Trần Văn Một' },
-  { code: 'E2ETREE02', name: 'Lê Thị Hai' },
-  { code: 'E2ETREE03', name: 'Phạm Văn Ba' },
-  { code: 'E2ETREE04', name: 'Hoàng Thị Bốn' },
-  { code: 'E2ETREE05', name: 'Ngô Văn Năm' },
+  { code: 'E2ETREE01', name: 'Trần Văn Một', team: 1 },
+  { code: 'E2ETREE02', name: 'Lê Thị Hai', team: 1 },
+  { code: 'E2ETREE03', name: 'Phạm Văn Ba', team: 2 },
+  { code: 'E2ETREE04', name: 'Hoàng Thị Bốn', team: 2 },
+  { code: 'E2ETREE05', name: 'Ngô Văn Năm', team: 3 },
 ];
 const TREE_SESSION = {
   title: 'E2E Cây tri thức',
@@ -2561,7 +2562,7 @@ async function main() {
 
   const templateHeaderLine = template.slice(1).split(/\r?\n/)[0];
   check('template header line is exact',
-    templateHeaderLine === 'STT,Ho_va_ten,Ngay_sinh,Ma_hoc_sinh,Ma_PIN', templateHeaderLine);
+    templateHeaderLine === 'STT,Ho_va_ten,Ngay_sinh,Ma_hoc_sinh,Ma_PIN,To_nhom', templateHeaderLine);
   check('template header constant matches the emitted line',
     STUDENT_TEMPLATE_HEADERS.join(',') === templateHeaderLine,
     STUDENT_TEMPLATE_HEADERS.join(','));
@@ -2569,11 +2570,12 @@ async function main() {
   const templateRows = template.slice(1).split(/\r?\n/).filter(Boolean);
   check('template ships a header + 3 sample rows', templateRows.length === 4,
     String(templateRows.length));
-  check('sample row 1 = name + DOB only (auto code + DDMM PIN)',
-    templateRows[1] === '1,Nguyễn Văn An,05/09/2008,,', templateRows[1]);
-  check('sample row 2 = custom code + custom PIN',
-    templateRows[2] === '2,Trần Thị Bình,12/03/2008,HS001,123456', templateRows[2]);
-  check('sample row 3 = name only', templateRows[3] === '3,Lê Văn Cường,,,', templateRows[3]);
+  check('sample row 1 = name + DOB only (auto code + DDMM PIN + round-robin team)',
+    templateRows[1] === '1,Nguyễn Văn An,05/09/2008,,,', templateRows[1]);
+  check('sample row 2 = custom code + custom PIN + explicit team 2',
+    templateRows[2] === '2,Trần Thị Bình,12/03/2008,HS001,123456,2', templateRows[2]);
+  check('sample row 3 = name only + explicit team 3',
+    templateRows[3] === '3,Lê Văn Cường,,,,3', templateRows[3]);
   check('template filename falls back to "Lop"',
     studentTemplateFilename() === 'Mau_Danh_Sach_Hoc_Sinh_Lop.csv', studentTemplateFilename());
   check('template filename embeds the class name',
@@ -2615,6 +2617,18 @@ async function main() {
   check('row 3 has neither DOB nor PIN', parsedCuong?.dob === null && parsedCuong?.pin === null,
     JSON.stringify(parsedCuong));
 
+  // Phase 8.4 — team assignment. Row 1 omits `To_nhom`, so the parser assigns it
+  // round-robin from the row's 0-based index: ((index % 4) + 1).
+  check('row 1 with a blank To_nhom is assigned team 1 round-robin',
+    parsedAn?.team_number === 1, JSON.stringify(parsedAn?.team_number));
+  check('row 2 keeps its explicit To_nhom = 2',
+    parsedBinh?.team_number === 2, JSON.stringify(parsedBinh?.team_number));
+  check('row 3 keeps its explicit To_nhom = 3',
+    parsedCuong?.team_number === 3, JSON.stringify(parsedCuong?.team_number));
+  check('every parsed member carries a team_number in 1..4',
+    parsed.every((m) => Number.isInteger(m.team_number) && m.team_number >= 1 && m.team_number <= 4),
+    JSON.stringify(parsed.map((m) => m.team_number)));
+
   // --- 26d. class roster CRUD through the client SDK --------------------
   await teacher.from('exams').delete().eq('code', CLASS_EXAM.code);
 
@@ -2633,6 +2647,7 @@ async function main() {
     full_name: m.fullName,
     dob: m.dob,
     pin: m.pin,
+    team_number: m.team,
   })));
   check('26d: saveClassMembers persisted both rows', savedMembers.saved === 2,
     String(savedMembers.saved));
@@ -2651,6 +2666,7 @@ async function main() {
     full_name: m.fullName,
     dob: m.dob,
     pin: m.pin,
+    team_number: m.team,
   })));
   const afterUpsert = await teacher.from('class_members').select('id').eq('class_id', webClassId);
   check('26d: re-import upserts instead of duplicating', afterUpsert.data?.length === 2,
@@ -3052,7 +3068,7 @@ async function main() {
   const treeMembers = await saveClassMembers(
     teacher,
     treeClassId,
-    TREE_MEMBERS.map((m) => ({ student_code: m.code, full_name: m.name, dob: null, pin: null })),
+    TREE_MEMBERS.map((m) => ({ student_code: m.code, full_name: m.name, dob: null, pin: null, team_number: m.team })),
   );
   check('28a: the class has 5 members', treeMembers.saved === 5, String(treeMembers.saved));
 
@@ -3536,9 +3552,9 @@ async function main() {
 
   const TREE_WEB_CLASS = 'E2E-TREEWEB-' + String(Math.floor(1000 + Math.random() * 9000));
   const TREE_WEB_MEMBERS = [
-    { code: 'E2EWEB01', name: 'Đinh Văn Một' },
-    { code: 'E2EWEB02', name: 'Bùi Thị Hai' },
-    { code: 'E2EWEB03', name: 'Dương Văn Ba' },
+    { code: 'E2EWEB01', name: 'Đinh Văn Một', team: 1 },
+    { code: 'E2EWEB02', name: 'Bùi Thị Hai', team: 2 },
+    { code: 'E2EWEB03', name: 'Dương Văn Ba', team: 3 },
   ];
 
   const webTreeClass = await teacher
@@ -3553,7 +3569,7 @@ async function main() {
   const webTreeMembers = await saveClassMembers(
     teacher,
     webTreeClassId,
-    TREE_WEB_MEMBERS.map((m) => ({ student_code: m.code, full_name: m.name, dob: null, pin: null })),
+    TREE_WEB_MEMBERS.map((m) => ({ student_code: m.code, full_name: m.name, dob: null, pin: null, team_number: m.team })),
   );
   check('30a: the projector class has 3 members', webTreeMembers.saved === 3,
     String(webTreeMembers.saved));
@@ -3615,6 +3631,16 @@ async function main() {
   // a projector that had to fetch it separately would paint an incomplete tree.
   check('30c: getTreeSession returns the class member count as total_students',
     loadedSession?.total_students === 3, String(loadedSession?.total_students));
+  // Phase 8.4 — the arena needs each team's roster size to draw four independent
+  // participation denominators. The three members sit one per Tổ 1/2/3, so the
+  // tally must mirror that split exactly.
+  check('30c: getTreeSession returns a team_counts breakdown of {1,2,3,4}',
+    loadedSession?.team_counts
+      && loadedSession.team_counts[1] === 1
+      && loadedSession.team_counts[2] === 1
+      && loadedSession.team_counts[3] === 1
+      && loadedSession.team_counts[4] === 0,
+    JSON.stringify(loadedSession?.team_counts));
   check('30c: an unknown session id yields null rather than throwing',
     (await getTreeSession(teacher, '00000000-0000-0000-0000-000000000000')) === null);
 
@@ -3645,6 +3671,12 @@ async function main() {
   check('30d: each submission carries the identity and word count the renderer needs',
     webSubmissions.every((row) => row.student_code && row.student_name && row.word_count > 0),
     JSON.stringify(webSubmissions.map((row) => [row.student_code, row.word_count])));
+  // Phase 8.4 — `submit_tree_answer` resolves the author's team from the roster
+  // (round-robin fallback) and records it, so the arena can route the row.
+  check('30d: each submission carries a team_number in 1..4',
+    webSubmissions.every((row) => Number.isInteger(row.team_number)
+      && row.team_number >= 1 && row.team_number <= 4),
+    JSON.stringify(webSubmissions.map((row) => row.team_number)));
   check('30d: getTreeSubmissions excludes another session\'s rows',
     (await getTreeSubmissions(teacher, '00000000-0000-0000-0000-000000000000')).length === 0);
 
@@ -3683,7 +3715,7 @@ async function main() {
   const submissionColumns = TREE_SUBMISSION_COLUMNS.split(',').map((column) => column.trim());
   check('30e: TREE_SUBMISSION_COLUMNS covers every field the renderer reads',
     ['id', 'session_id', 'student_code', 'student_name', 'answer_text', 'word_count',
-     'submitted_at', 'fruit_index']
+     'submitted_at', 'fruit_index', 'team_number']
       .every((column) => submissionColumns.includes(column)),
     TREE_SUBMISSION_COLUMNS);
 
@@ -3761,9 +3793,9 @@ async function main() {
 
   const TREE_JOIN_CLASS = 'E2E-TREEJOIN-' + String(Math.floor(1000 + Math.random() * 9000));
   const TREE_JOIN_MEMBERS = [
-    { code: 'E2EJOIN01', name: 'Vũ Văn Nhất', dob: '2008-09-05', pin: '2468' },
-    { code: 'E2EJOIN02', name: 'Đỗ Thị Nhị', dob: '2008-01-17', pin: '1357' },
-    { code: 'E2EJOIN03', name: 'Hồ Văn Tam', dob: '2008-12-31', pin: '9081' },
+    { code: 'E2EJOIN01', name: 'Vũ Văn Nhất', dob: '2008-09-05', pin: '2468', team: 1 },
+    { code: 'E2EJOIN02', name: 'Đỗ Thị Nhị', dob: '2008-01-17', pin: '1357', team: 2 },
+    { code: 'E2EJOIN03', name: 'Hồ Văn Tam', dob: '2008-12-31', pin: '9081', team: 3 },
   ];
 
   const joinClass = await teacher
@@ -3778,7 +3810,7 @@ async function main() {
   const joinMembers = await saveClassMembers(
     teacher,
     joinClassId,
-    TREE_JOIN_MEMBERS.map((m) => ({ student_code: m.code, full_name: m.name, dob: m.dob, pin: m.pin })),
+    TREE_JOIN_MEMBERS.map((m) => ({ student_code: m.code, full_name: m.name, dob: m.dob, pin: m.pin, team_number: m.team })),
   );
   check('31a: the class has 3 members with pin + dob stored', joinMembers.saved === 3,
     String(joinMembers.saved));
@@ -3830,13 +3862,19 @@ async function main() {
     Array.isArray(publicCandidates) && publicCandidates.length === 3
       && publicCandidates.every((c) => c.student_code && c.full_name),
     JSON.stringify(publicCandidates));
-  check('31b: candidates are ordered by student_code',
+  check('31b: candidates are ordered by team then student_code',
     JSON.stringify(publicCandidates?.map((c) => c.student_code))
       === JSON.stringify(['E2EJOIN01', 'E2EJOIN02', 'E2EJOIN03']),
     JSON.stringify(publicCandidates?.map((c) => c.student_code)));
-  check('31b: each candidate exposes EXACTLY student_code + full_name',
-    publicCandidates?.every((c) => Object.keys(c).sort().join(',') === 'full_name,student_code'),
+  // Phase 8.4 — every candidate also carries the team the four-tree arena needs
+  // to route the submission, and NOTHING else (no pin/dob leak).
+  check('31b: each candidate exposes EXACTLY student_code + full_name + team_number',
+    publicCandidates?.every((c) => Object.keys(c).sort().join(',') === 'full_name,student_code,team_number'),
     JSON.stringify(publicCandidates?.[0] && Object.keys(publicCandidates[0])));
+  check('31b: every candidate reports a team_number in 1..4',
+    publicCandidates?.every((c) => Number.isInteger(c.team_number)
+      && c.team_number >= 1 && c.team_number <= 4),
+    JSON.stringify(publicCandidates?.map((c) => c.team_number)));
 
   // --- 31c. credential leak ----------------------------------------------
   // Asserted on the SERIALISED payload rather than on key names, so a future
@@ -4541,14 +4579,15 @@ async function main() {
   const projectorSource = readFileSync(new URL('../web/src/components/tree/TreeProjector.tsx', import.meta.url), 'utf8');
   const studentAppSource = readFileSync(new URL('../student/app.js', import.meta.url), 'utf8');
   check('33e: the projector tooltip is titled "Giọt sương tri thức"',
-    projectorSource.includes('Giọt sương tri thức')
-      && projectorSource.includes('Giọt sương #{fruit.fruit_index}'),
+    projectorSource.includes('Giọt sương tri thức'),
     'projector copy not renamed');
   check('33e: the projector progress badge celebrates contributing "dưỡng chất"',
     projectorSource.includes('đã góp dưỡng chất'), 'badge copy not renamed');
-  check('33e: the projector shows the whole-class bloom banner at P = 1.0',
-    projectorSource.includes('Cả lớp đã chung sức nuôi dưỡng Cây Tri Thức đơm hoa kết trái rực rỡ'),
-    'bloom banner missing');
+  // Phase 8.4 superseded the single class-wide bloom banner: the P = 1.0
+  // celebration is now the per-Tổ champion banner on the winning tree.
+  check('33e: the projector celebrates the first Tổ to flourish',
+    projectorSource.includes('QUÁN QUÂN: TỔ') && projectorSource.includes('VỀ ĐÍCH ĐẦU TIÊN'),
+    'per-team bloom banner missing');
   check('33e: the student SPA success message speaks of a knowledge dewdrop',
     studentAppSource.includes('Giọt sương tri thức của bạn đã hòa vào cây'),
     'student success copy not renamed');
@@ -4829,6 +4868,246 @@ async function main() {
     'SPA audio wiring missing');
   check('34g: the SPA workspace header exposes the audio toggle button',
     studentHtmlAudio.includes('id="btnTreeAudioToggle"'), 'toggle button missing');
+
+  /* --- 35. 4-team competition arena (8.4) ------------------------------ */
+  // One class of EIGHT members, exactly two per Tổ, so every team's 100% is a
+  // 2/2 rather than a trivial 1/1. This is the smallest shape that exercises the
+  // whole arena: four independent denominators, four distinct seeds, and one
+  // team racing ahead of the other three.
+  step(35, 'tree of knowledge four-team arena and first-to-finish champion');
+
+  const TEAM_CLASS = 'E2E-TEAM-' + String(Math.floor(1000 + Math.random() * 9000));
+  const TEAM_MEMBERS = [
+    { code: 'E2ETEAM01', name: 'Tổ Một Bạn A', team: 1 },
+    { code: 'E2ETEAM02', name: 'Tổ Một Bạn B', team: 1 },
+    { code: 'E2ETEAM03', name: 'Tổ Hai Bạn A', team: 2 },
+    { code: 'E2ETEAM04', name: 'Tổ Hai Bạn B', team: 2 },
+    { code: 'E2ETEAM05', name: 'Tổ Ba Bạn A', team: 3 },
+    { code: 'E2ETEAM06', name: 'Tổ Ba Bạn B', team: 3 },
+    { code: 'E2ETEAM07', name: 'Tổ Bốn Bạn A', team: 4 },
+    { code: 'E2ETEAM08', name: 'Tổ Bốn Bạn B', team: 4 },
+  ];
+
+  const teamClass = await teacher
+    .from('classes')
+    .insert({ user_id: teacherId, name: TEAM_CLASS, academic_year: '2026-2027' })
+    .select('id')
+    .single();
+  check('35a: the 4-team class was created', !teamClass.error && !!teamClass.data,
+    teamClass.error?.message);
+  const teamClassId = teamClass.data?.id;
+
+  const teamRoster = await saveClassMembers(
+    teacher,
+    teamClassId,
+    TEAM_MEMBERS.map((m) => ({
+      student_code: m.code, full_name: m.name, dob: null, pin: null, team_number: m.team,
+    })),
+  );
+  check('35a: the class has 8 members (2 per Tổ)', teamRoster.saved === 8,
+    String(teamRoster.saved));
+
+  // A permissive ceiling: the ONLY refusal this step wants is the deliberate
+  // cross-team duplicate, so every genuine answer must clear the gate.
+  const teamSession = await teacher
+    .from('tree_sessions')
+    .insert({
+      user_id: teacherId,
+      class_id: teamClassId,
+      title: 'E2E Đấu trường 4 Tổ',
+      question_text: 'Vì sao sức mạnh tập thể lại quan trọng trong học tập?',
+      min_words: 5,
+      time_limit_minutes: 45,
+      max_similarity: 0.50,
+    })
+    .select('id, tree_seed')
+    .single();
+  check('35a: the arena session was created', !teamSession.error && !!teamSession.data,
+    teamSession.error?.message);
+  const teamSessionId = teamSession.data?.id;
+  const teamSeed = Number(teamSession.data?.tree_seed);
+
+  const teamAnon = createClient(SB_URL, SB_PUBLISHABLE, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+
+  // --- 35b. team_counts + per-candidate team_number ---------------------
+  const teamPublic = await teamAnon.rpc('get_public_tree_session', { p_session_id: teamSessionId });
+  check('35b: anon can load the arena session', teamPublic.data?.success === true,
+    JSON.stringify(teamPublic.data));
+
+  const teamCounts = teamPublic.data?.team_counts;
+  check('35b: team_counts reports exactly 2 members per Tổ',
+    teamCounts?.[1] === 2 && teamCounts?.[2] === 2
+      && teamCounts?.[3] === 2 && teamCounts?.[4] === 2,
+    JSON.stringify(teamCounts));
+  check('35b: the four team_counts sum to the class size',
+    Object.values(teamCounts || {}).reduce((sum, n) => sum + Number(n), 0) === 8,
+    JSON.stringify(teamCounts));
+
+  const teamCandidates = teamPublic.data?.candidates || [];
+  check('35b: every candidate carries a valid team_number',
+    teamCandidates.length === 8
+      && teamCandidates.every((c) => Number.isInteger(c.team_number)
+        && c.team_number >= 1 && c.team_number <= 4),
+    JSON.stringify(teamCandidates.map((c) => [c.student_code, c.team_number])));
+  check('35b: candidates are ordered team-first, so Tổ 1 leads the roster',
+    JSON.stringify(teamCandidates.slice(0, 2).map((c) => c.student_code))
+      === JSON.stringify(['E2ETEAM01', 'E2ETEAM02']),
+    JSON.stringify(teamCandidates.map((c) => c.student_code)));
+
+  // --- 35c. seed derivation ---------------------------------------------
+  check('35c: TEAM_NUMBERS enumerates exactly the four Tổ',
+    JSON.stringify(TEAM_NUMBERS) === JSON.stringify([1, 2, 3, 4]),
+    JSON.stringify(TEAM_NUMBERS));
+  const teamSeeds = TEAM_NUMBERS.map((team) => getTeamSeed(teamSeed, team));
+  check('35c: getTeamSeed yields four DISTINCT seeds from one base seed',
+    new Set(teamSeeds).size === 4, JSON.stringify(teamSeeds));
+  check('35c: the derived seeds are deterministic and unsigned 32-bit',
+    teamSeeds.every((s) => Number.isInteger(s) && s >= 0 && s <= 0xffffffff)
+      && getTeamSeed(teamSeed, 2) === teamSeeds[1],
+    JSON.stringify(teamSeeds));
+  check('35c: clampTeamNumber folds out-of-range input back into 1..4',
+    clampTeamNumber(0) === 1 && clampTeamNumber(9) === 4
+      && clampTeamNumber('3') === 3 && clampTeamNumber(null) === 1,
+    [clampTeamNumber(0), clampTeamNumber(9), clampTeamNumber('3'), clampTeamNumber(null)].join(','));
+
+  // --- 35d. Team 1 races to 100%; submit_tree_answer tags the Tổ --------
+  const TEAM1_TEXTS = [
+    'Suc manh tap the den tu viec moi nguoi bo sung cho nhau nhung diem manh rieng',
+    'Hoc nhom giup chung ta hieu sau hon vi phai giai thich lai cho ban be hieu',
+  ];
+  const team1Submits = [];
+  for (let i = 0; i < 2; i += 1) {
+    const member = TEAM_MEMBERS[i];
+    const res = await teamAnon.rpc('submit_tree_answer', {
+      p_session_id: teamSessionId,
+      p_student_code: member.code,
+      p_student_name: member.name,
+      p_answer_text: TEAM1_TEXTS[i],
+    });
+    team1Submits.push(res.data);
+    check(`35d: ${member.code} (Tổ 1) submitted successfully`,
+      res.data?.success === true, JSON.stringify(res.data));
+  }
+  check('35d: submit_tree_answer returns the author\'s team_number = 1',
+    team1Submits.every((d) => d?.team_number === 1),
+    JSON.stringify(team1Submits.map((d) => d?.team_number)));
+
+  // The stored rows must carry the same tag the RPC reported.
+  const teamRows = await teamAnon
+    .from('tree_submissions')
+    .select('student_code, team_number, fruit_index')
+    .eq('session_id', teamSessionId)
+    .order('fruit_index');
+  check('35d: both Tổ 1 rows are recorded with team_number = 1',
+    teamRows.data?.length === 2 && teamRows.data.every((r) => r.team_number === 1),
+    JSON.stringify(teamRows.data));
+
+  // --- 35e. Team 1 blooms while 2-4 stay at SEED ------------------------
+  const teamStateFor = (team) => {
+    const subs = (teamRows.data || []).filter((r) => r.team_number === team);
+    return computeTreeState({
+      totalStudents: Math.max(teamCounts?.[team] ?? 0, 1),
+      submissions: subs,
+      timeLimitMinutes: 45,
+      createdAt: teamPublic.data?.session?.created_at,
+      seed: getTeamSeed(teamSeed, team),
+    });
+  };
+
+  const team1State = teamStateFor(1);
+  check('35e: Tổ 1 at 2/2 reaches BLOOM with isFlourished = true',
+    team1State.participation === 1 && team1State.stage === TREE_STAGES.BLOOM
+      && team1State.isFlourished === true,
+    JSON.stringify({ p: team1State.participation, stage: team1State.stage }));
+
+  const laggingStates = [2, 3, 4].map(teamStateFor);
+  check('35e: Tổ 2, 3 and 4 remain at SEED with participation 0',
+    laggingStates.every((s) => s.participation === 0
+      && s.stage === TREE_STAGES.SEED && s.isFlourished === false),
+    JSON.stringify(laggingStates.map((s) => ({ p: s.participation, stage: s.stage }))));
+
+  // The champion latch belongs to the FIRST finisher only — asserted here as the
+  // same rule the projector runs, so a later Tổ could never steal the 🏆.
+  const finishedTeams = TEAM_NUMBERS.filter((team) => {
+    const total = teamCounts?.[team] ?? 0;
+    const done = (teamRows.data || []).filter((r) => r.team_number === team).length;
+    return total > 0 && done >= total;
+  });
+  check('35e: exactly one Tổ has finished, so the champion is unambiguous',
+    finishedTeams.length === 1 && finishedTeams[0] === 1,
+    JSON.stringify(finishedTeams));
+
+  // --- 35f. cross-team plagiarism is refused ----------------------------
+  // A Tổ 2 member copying a Tổ 1 answer verbatim must be rejected: the
+  // similarity check spans the WHOLE session, not just the author's team.
+  const crossTeamCopy = await teamAnon.rpc('submit_tree_answer', {
+    p_session_id: teamSessionId,
+    p_student_code: TEAM_MEMBERS[2].code,
+    p_student_name: TEAM_MEMBERS[2].name,
+    p_answer_text: `${TEAM1_TEXTS[0]} nhe`,
+  });
+  check('35f: a Tổ 2 answer copied from Tổ 1 is refused with SIMILARITY_EXCEEDED',
+    crossTeamCopy.data?.success === false
+      && crossTeamCopy.data?.code === 'SIMILARITY_EXCEEDED'
+      && typeof crossTeamCopy.data?.similarity_percent === 'number',
+    JSON.stringify(crossTeamCopy.data));
+
+  // A genuinely distinct answer from the same Tổ 2 member is accepted and lands
+  // on Tổ 2's tree — proving the refusal above was similarity, not team routing.
+  const team2Answer = await teamAnon.rpc('submit_tree_answer', {
+    p_session_id: teamSessionId,
+    p_student_code: TEAM_MEMBERS[2].code,
+    p_student_name: TEAM_MEMBERS[2].name,
+    p_answer_text: 'Lam viec nhom re chia khoi luong va giup moi thanh vien tien bo cung nhau',
+  });
+  check('35f: a distinct Tổ 2 answer is accepted and tagged team_number = 2',
+    team2Answer.data?.success === true && team2Answer.data?.team_number === 2,
+    JSON.stringify(team2Answer.data));
+  check('35f: Tổ 1 remains the sole finisher after Tổ 2\'s submission',
+    computeTreeState({
+      totalStudents: teamCounts?.[2] ?? 1,
+      submissions: [{ student_code: TEAM_MEMBERS[2].code, team_number: 2, fruit_index: 3 }],
+      timeLimitMinutes: 45,
+      createdAt: teamPublic.data?.session?.created_at,
+      seed: getTeamSeed(teamSeed, 2),
+    }).isFlourished === false,
+    'a partially-submitted Tổ must not flourish');
+
+  // --- 35g. the projector + SPA are wired for the arena ------------------
+  const projectorArenaSrc = readFileSync(
+    new URL('../web/src/components/tree/TreeProjector.tsx', import.meta.url), 'utf8');
+  const studentArenaSrc = readFileSync(new URL('../student/app.js', import.meta.url), 'utf8');
+  const studentArenaHtml = readFileSync(new URL('../student/index.html', import.meta.url), 'utf8');
+
+  check('35g: the projector derives a per-team seed and renders a 2x2 arena',
+    projectorArenaSrc.includes('getTeamSeed(session.tree_seed, team)')
+      && projectorArenaSrc.includes('sm:grid-cols-2'),
+    'arena grid or per-team seed missing');
+  check('35g: the projector latches the first finisher and fires the fanfare',
+    projectorArenaSrc.includes('firstFinishedTeam') && projectorArenaSrc.includes('firstFinishedRef')
+      && projectorArenaSrc.includes('playBloomFanfare()'),
+    'champion latch missing');
+  check('35g: the projector crowns the champion with the trophy banner',
+    projectorArenaSrc.includes('QUÁN QUÂN: TỔ') && projectorArenaSrc.includes('Trophy'),
+    'champion banner missing');
+  check('35g: the SPA filters submissions to the student\'s own Tổ',
+    studentArenaSrc.includes('state.studentTeam')
+      && studentArenaSrc.includes('getTeamSeed(session.seed, team)')
+      && studentArenaSrc.includes('clampTeamNumber(row.team_number) === team'),
+    'SPA team filter missing');
+  check('35g: the SPA renders a sticky mini-leaderboard with an is-my-team badge',
+    studentArenaSrc.includes('renderLeaderboard')
+      && studentArenaSrc.includes('is-my-team')
+      && studentArenaHtml.includes('id="treeTeamLeaderboard"'),
+    'leaderboard missing');
+
+  // --- 35h. cleanup ------------------------------------------------------
+  await teacher.from('tree_sessions').delete().eq('id', teamSessionId);
+  const teamClassDelete = await teacher.from('classes').delete().eq('id', teamClassId);
+  check('35h: the arena class deletes once its session is gone',
+    !teamClassDelete.error, teamClassDelete.error?.message);
 
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);

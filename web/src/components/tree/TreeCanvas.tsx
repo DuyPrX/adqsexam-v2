@@ -19,6 +19,12 @@ interface TreeCanvasProps {
   /** Class size `N` — the participation denominator. */
   totalStudents: number;
   submissions: TreeSubmissionRow[];
+  /**
+   * Phase 8.4 — overrides `session.tree_seed`. The arena passes
+   * `getTeamSeed(session.tree_seed, teamNumber)` so its four canvases each draw a
+   * different tree; the single-tree views leave it undefined.
+   */
+  seed?: number;
   /** Fires when a fruit is tapped (null when the tap lands on empty space). */
   onFruitClick?: (fruit: LayoutFruitAnchor | null) => void;
   /** Fires as the pointer moves over the fruits, for the hover tooltip. */
@@ -40,11 +46,15 @@ const EXPORT_HEIGHT = 1800;
  * and re-running the engine can never drift from a cold render.
  */
 export const TreeCanvas = forwardRef<TreeCanvasHandle, TreeCanvasProps>(function TreeCanvas(
-  { session, totalStudents, submissions, onFruitClick, onFruitHover },
+  { session, totalStudents, submissions, seed, onFruitClick, onFruitHover },
   ref,
 ) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<TreeRenderer | null>(null);
+
+  // Phase 8.4 — a team tree uses its own derived seed; the single-tree views fall
+  // back to the session seed, so this is a no-op for them.
+  const effectiveSeed = seed ?? session.tree_seed;
 
   /**
    * The full visual state. Recomputed only when an input actually changes;
@@ -59,9 +69,9 @@ export const TreeCanvas = forwardRef<TreeCanvasHandle, TreeCanvasProps>(function
         submissions,
         timeLimitMinutes: session.time_limit_minutes,
         createdAt: session.created_at,
-        seed: session.tree_seed,
+        seed: effectiveSeed,
       }),
-    [totalStudents, submissions, session.time_limit_minutes, session.created_at, session.tree_seed],
+    [totalStudents, submissions, session.time_limit_minutes, session.created_at, effectiveSeed],
   );
 
   // --- renderer lifecycle --------------------------------------------------

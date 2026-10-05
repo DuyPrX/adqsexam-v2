@@ -6,6 +6,7 @@ import type {
   ExamRow,
   QuestionBankRow,
   RosterEntry,
+  TeamNumber,
 } from './types';
 
 /**
@@ -79,6 +80,22 @@ const PIN_HEADERS = [
   'ma bao ve',
   'mật khẩu',
   'mat khau',
+];
+
+/**
+ * Phase 8.4 — competition-team column (Tổ). Accepts the template's `To_nhom`
+ * spelling plus the natural Vietnamese variants a teacher might type.
+ */
+const TEAM_HEADERS = [
+  'to_nhom',
+  'tổ nhóm',
+  'to nhom',
+  'tổ',
+  'to',
+  'nhóm',
+  'nhom',
+  'team',
+  'team_number',
 ];
 
 function normalizeHeader(value: unknown): string {
@@ -223,6 +240,24 @@ export function deriveDobPin(isoDob: string | null): string | null {
 }
 
 /**
+ * Phase 8.4 — normalises a `To_nhom` cell to a team index 1..4, or null.
+ *
+ * Returns null (rather than a default) for a blank or out-of-range value so the
+ * caller can decide between an explicit team and the round-robin fallback; that
+ * keeps this a pure "read what the teacher wrote" function.
+ */
+export function normalizeTeamNumber(value: unknown): TeamNumber | null {
+  if (value === null || value === undefined || value === '') return null;
+  // Accept the bare number, and the common "Tổ 2" / "2" / "2.0" spellings.
+  const text = cellText(value);
+  const match = text.match(/(\d+)/);
+  if (!match) return null;
+  const n = Number(match[1]);
+  if (!Number.isFinite(n) || n < 1 || n > 4) return null;
+  return n as TeamNumber;
+}
+
+/**
  * Parses an RFC 4180 CSV document into rows.
  *
  * `.csv` is read as TEXT rather than handed to SheetJS because `XLSX.read`
@@ -324,6 +359,7 @@ export async function parseStudentRosterFile(
   const nameCol = headers.findIndex((h) => FULL_NAME_HEADERS.includes(h));
   const dobCol = headers.findIndex((h) => DOB_HEADERS.includes(h));
   const pinCol = headers.findIndex((h) => PIN_HEADERS.includes(h));
+  const teamCol = headers.findIndex((h) => TEAM_HEADERS.includes(h));
 
   const members: ClassMemberInput[] = [];
   const seen = new Set<string>();
@@ -348,7 +384,13 @@ export async function parseStudentRosterFile(
     const rawPin = pinCol === -1 ? '' : cellText(row[pinCol]);
     const pin = rawPin || deriveDobPin(dob);
 
-    members.push({ student_code: studentCode, full_name: fullName, dob, pin });
+    // Phase 8.4 — an explicit `To_nhom` wins; otherwise assign round-robin over
+    // the ACCEPTED rows, so a sheet without the column still produces a balanced
+    // four-team split instead of putting everyone on Tổ 1.
+    const explicitTeam = teamCol === -1 ? null : normalizeTeamNumber(row[teamCol]);
+    const teamNumber: TeamNumber = explicitTeam ?? (((members.length % 4) + 1) as TeamNumber);
+
+    members.push({ student_code: studentCode, full_name: fullName, dob, pin, team_number: teamNumber });
   }
 
   if (members.length === 0) {

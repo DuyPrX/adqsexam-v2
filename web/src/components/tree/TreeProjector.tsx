@@ -11,16 +11,14 @@ import {
   Radio,
   Sparkles,
   StopCircle,
+  Trophy,
   Users,
 } from 'lucide-react';
 import type { RealtimeChannel, RealtimePostgresChangesPayload } from '@supabase/supabase-js';
 import { createClient } from '@/lib/supabase/client';
 import { PersistenceError } from '@/lib/exams';
-import { endTreeSession } from '@/lib/tree';
-import {
-  computeTreeState,
-  type LayoutFruitAnchor,
-} from '@/lib/tree-engine';
+import { clampTeamNumber, endTreeSession, getTeamSeed } from '@/lib/tree';
+import { computeTreeState, type LayoutFruitAnchor, type TreeState } from '@/lib/tree-engine';
 import {
   isAudioMuted,
   playBloomFanfare,
@@ -28,7 +26,7 @@ import {
   resumeAudioContext,
   toggleAudioMute,
 } from '@/lib/tree-audio';
-import type { TreeSessionDetail, TreeSubmissionRow } from '@/lib/types';
+import type { TeamCounts, TeamNumber, TreeSessionDetail, TreeSubmissionRow } from '@/lib/types';
 import { TreeCanvas, type TreeCanvasHandle } from './TreeCanvas';
 import { TreeQrCode } from './TreeQrCode';
 
@@ -37,6 +35,9 @@ interface TreeProjectorProps {
   /** Submissions at first paint; Realtime deltas are layered on top. */
   initialSubmissions: TreeSubmissionRow[];
 }
+
+/** The four teams, in display order. */
+const TEAMS: TeamNumber[] = [1, 2, 3, 4];
 
 /**
  * Builds the URL a student scans to join.
@@ -76,25 +77,31 @@ function formatRemaining(ms: number): string {
 }
 
 /**
- * TreeProjector — the classroom projector view for one tree session (Phase 7.3).
+ * TreeProjector — the classroom projector view for one tree session.
  *
- * Live growth is driven purely by the `submissions` array: the engine derives
- * the whole tree from `tree_seed` + data on every render, so a Realtime event
- * only has to merge one row into state and the tree redraws itself. No stored
- * geometry and no incremental animation bookkeeping means a late-joining
- * projector and a live one show the identical tree.
+ * Phase 7.3 rendered one class-wide tree. Phase 8.4 turns the stage into a 2×2
+ * "competition arena": each Tổ gets its OWN tree, seeded by
+ * `getTeamSeed(session.tree_seed, teamNumber)` so the four trees are visually
+ * distinct, and fed only that team's submissions. The FIRST team to reach 100%
+ * of its roster is latched as the champion.
+ *
+ * Live growth is still driven purely by the `submissions` array: the engine
+ * derives each tree from its seed + that team's data on every render, so a
+ * Realtime event only merges one row into state and all four trees redraw
+ * themselves. No stored geometry and no incremental animation bookkeeping means
+ * a late-joining projector and a live one show the identical arena.
  */
 export function TreeProjector({ session, initialSubmissions }: TreeProjectorProps) {
   const [submissions, setSubmissions] = useState<TreeSubmissionRow[]>(initialSubmissions);
   const [isActive, setIsActive] = useState(session.is_active);
   const [connection, setConnection] = useState<'connecting' | 'live' | 'error'>('connecting');
-  const [hovered, setHovered] = useState<LayoutFruitAnchor | null>(null);
+  const [hovered, setHovered] = useState<{ team: TeamNumber; anchor: LayoutFruitAnchor } | null>(null);
   const [pinnedId, setPinnedId] = useState<string | null>(null);
   const [showAnswer, setShowAnswer] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isEnding, setIsEnding] = useState(false);
   const [muted, setMuted] = useState(false);
-  const canvasRef = useRef<TreeCanvasHandle>(null);
+  const [firstFinishedTeam, setFirstFinishedTeam] = useState<TeamNumber | null>(null);
 
   // Phase 8.3 — sound is opt-out and its state lives in localStorage, but the
   // value can only be read on the client, so it is synced after mount rather
@@ -147,7 +154,7 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
       const row = payload.new as TreeSubmissionRow;
       if (!row?.id) return;
       // Guard against a missing server-side filter: a row for another session
-      // must never be merged into this tree.
+      // must never be merged into this arena.
       if (row.session_id !== session.id) return;
 
       setSubmissions((previous) => {
@@ -181,17 +188,48 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
     };
   }, [session.id]);
 
-  // --- derived stats -------------------------------------------------------
-  const totalStudents = Math.max(session.total_students, 1);
-  const k = submissions.length;
-  const percent = Math.min(100, Math.round((k / totalStudents) * 100));
-  // Phase 8.2 — the whole-class flourish. The engine keys it off participation
-  // reaching 1.0, which is exactly `k >= totalStudents`.
-  const isFlourished = k >= totalStudents;
+  // --- per-team projections -----------------------------------------------
+  /**
+   * One entry per team: its roster size, its submissions, the derived tree state
+   * and whether it has finished. `useMemo` keyed on `submissions` keeps a tooltip
+   * re-render from recomputing four anchor relaxations.
+   */
+  const teamStats = useMemo(() => {
+    const counts: TeamCounts = session.team_counts ?? { 1: 0, 2: 0, 3: 0, 4: 0 };
+    return TEAMS.map((team) => {
+      const teamSubmissions = submissions.filter(
+        (row) => clampTeamNumber(row.team_number) === team,
+      );
+      // Floor the denominator at 1: `computeTreeState` divides by it, and an
+      // empty team would otherwise yield Infinity/NaN for the ratio. A team with
+      // no members can never finish, so guard `isFinished` on the raw count.
+      const rawTotal = counts[team] ?? 0;
+      const treeState: TreeState = computeTreeState({
+        totalStudents: Math.max(rawTotal, 1),
+        submissions: teamSubmissions,
+        timeLimitMinutes: session.time_limit_minutes,
+        createdAt: session.created_at,
+        seed: getTeamSeed(session.tree_seed, team),
+      });
+      const done = teamSubmissions.length;
+      return {
+        team,
+        rawTotal,
+        done,
+        percent: rawTotal > 0 ? Math.min(100, Math.round((done / rawTotal) * 100)) : 0,
+        treeState,
+        isFinished: rawTotal > 0 && done >= rawTotal,
+        teamSubmissions,
+      };
+    });
+  }, [submissions, session.team_counts, session.time_limit_minutes, session.created_at, session.tree_seed]);
 
-  // Phase 8.3 — vitality modulates the dewdrop chime's brightness. Derived the
-  // same way TreeCanvas derives it (same pure engine, same inputs), so the
-  // sound always matches the tree on screen.
+  const k = submissions.length;
+  const totalStudents = Math.max(session.total_students, 1);
+  const percent = Math.min(100, Math.round((k / totalStudents) * 100));
+
+  // Phase 8.3 — vitality for the dewdrop chime, from the class-wide tree so the
+  // sound tracks the overall pace rather than any single team's.
   const vitality = useMemo(
     () =>
       computeTreeState({
@@ -204,14 +242,14 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
     [totalStudents, submissions, session.time_limit_minutes, session.created_at, session.tree_seed],
   );
 
+  // --- first-to-finish latch (Tổ cán đích đầu tiên) ------------------------
   // Sound is edge-triggered, not level-triggered: a chirp per NEW submission and
-  // a fanfare on the single false→true flourish transition. Comparing against a
-  // ref (rather than driving an effect off `submissions.length`) means an UPDATE
-  // echo or a re-render can never replay a sound.
+  // a fanfare on the single first-finish transition. Comparing against refs means
+  // an UPDATE echo or a re-render can never replay a sound.
   const previousCountRef = useRef(submissions.length);
-  const wasFlourishedRef = useRef(isFlourished);
   const vitalityRef = useRef(vitality);
   vitalityRef.current = vitality;
+  const firstFinishedRef = useRef<TeamNumber | null>(null);
 
   useEffect(() => {
     const previousCount = previousCountRef.current;
@@ -226,11 +264,16 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
   }, [k]);
 
   useEffect(() => {
-    if (isFlourished && !wasFlourishedRef.current) {
-      playBloomFanfare();
-    }
-    wasFlourishedRef.current = isFlourished;
-  }, [isFlourished]);
+    // The champion is whichever team finished first and is not yet latched. Once
+    // set it never changes, so a later team reaching 100% does not steal the 🏆.
+    if (firstFinishedRef.current !== null) return;
+    const finishing = teamStats.find((stat) => stat.isFinished);
+    if (!finishing) return;
+
+    firstFinishedRef.current = finishing.team;
+    setFirstFinishedTeam(finishing.team);
+    playBloomFanfare();
+  }, [teamStats]);
 
   const handleToggleMute = useCallback(() => {
     // Resume first: the toggle button is itself a gesture, so this is the
@@ -244,18 +287,23 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
   const activeFruit = useMemo(() => {
     if (pinnedId) return submissions.find((row) => row.id === pinnedId) ?? null;
     if (!hovered) return null;
-    return submissions.find((row) => row.id === hovered.id) ?? null;
+    return submissions.find((row) => row.id === hovered.anchor.id) ?? null;
   }, [pinnedId, hovered, submissions]);
+
+  /** Which team card should host the detail card: the pinned fruit's, else the hovered one. */
+  const tooltipTeam = useMemo<{ team: TeamNumber; anchor: LayoutFruitAnchor | null } | null>(() => {
+    if (pinnedId && activeFruit) {
+      return { team: clampTeamNumber(activeFruit.team_number), anchor: null };
+    }
+    if (hovered) return { team: hovered.team, anchor: hovered.anchor };
+    return null;
+  }, [pinnedId, activeFruit, hovered]);
 
   useEffect(() => {
     // Reset the answer reveal whenever a different fruit is selected — an
     // inherited "revealed" state would leak one student's answer over another's.
     setShowAnswer(false);
   }, [activeFruit?.id]);
-
-  const handleFruitClick = useCallback((fruit: LayoutFruitAnchor | null) => {
-    setPinnedId((current) => (fruit && fruit.id !== current ? fruit.id : null));
-  }, []);
 
   const handleEndSession = async () => {
     if (!window.confirm('Kết thúc hoạt động? Học sinh sẽ không thể nộp thêm câu trả lời.')) return;
@@ -272,7 +320,7 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
   };
 
   const handleSaveImage = () => {
-    const dataUrl = canvasRef.current?.exportImage();
+    const dataUrl = canvasRefs.current[1]?.current?.exportImage();
     if (!dataUrl) {
       setError('Không tạo được ảnh. Vui lòng thử lại.');
       return;
@@ -285,21 +333,31 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
     link.remove();
   };
 
+  // One ref per team card, so the "memory picture" can export a single tree.
+  const canvasRefs = useRef<Record<TeamNumber, { current: TreeCanvasHandle | null }>>({
+    1: { current: null },
+    2: { current: null },
+    3: { current: null },
+    4: { current: null },
+  });
+
+  const champion = firstFinishedTeam;
+
   return (
     <div className="flex min-h-screen flex-col bg-slate-950 text-slate-100 lg:h-screen lg:flex-row">
       {/* ---------------- Sidebar ---------------- */}
-      <aside className="flex w-full shrink-0 flex-col gap-4 overflow-y-auto border-slate-800 p-5 lg:w-[26rem] lg:border-r">
+      <aside className="flex w-full shrink-0 flex-col gap-4 overflow-y-auto border-slate-800 p-5 lg:w-[24rem] lg:border-r">
         <div>
           <p className="text-xs font-semibold uppercase tracking-widest text-emerald-400">
-            Cây Tri Thức
+            Đấu trường Cây Tri Thức
           </p>
           <h1 className="mt-1 text-2xl font-bold leading-tight">{session.title}</h1>
-          <p className="mt-1 text-xs text-slate-400">Lớp {session.class_name}</p>
+          <p className="mt-1 text-xs text-slate-400">Lớp {session.class_name} · 4 Tổ thi đua</p>
         </div>
 
         <div className="rounded-xl bg-slate-900 p-4">
           <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Câu hỏi</p>
-          <p className="mt-2 whitespace-pre-wrap text-lg font-semibold leading-snug text-slate-50">
+          <p className="mt-2 whitespace-pre-wrap text-base font-semibold leading-snug text-slate-50">
             {session.question_text}
           </p>
         </div>
@@ -313,7 +371,7 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
           </span>
         </div>
 
-        {/* Timer + progress */}
+        {/* Timer + progress + champion */}
         <div className="space-y-3 rounded-xl bg-slate-900 p-4">
           <div className="flex items-center justify-between">
             <span className="flex items-center gap-1.5 text-sm font-semibold text-slate-300">
@@ -348,13 +406,26 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
             </div>
           </div>
 
+          {champion ? (
+            <div className="flex items-center gap-2 rounded-lg border border-amber-400/60 bg-amber-500/15 px-3 py-2">
+              <Trophy size={16} className="shrink-0 text-amber-300" />
+              <p className="text-xs font-bold text-amber-100">
+                QUÁN QUÂN: TỔ {champion} về đích đầu tiên!
+              </p>
+            </div>
+          ) : (
+            <p className="text-xs font-semibold text-slate-400">
+              Chưa có Tổ nào cán đích. Cùng chung sức nhé!
+            </p>
+          )}
+
           <ConnectionBadge state={connection} />
         </div>
 
         {/* QR */}
         <div className="flex flex-col items-center gap-2 rounded-xl bg-slate-900 p-4">
           <p className="text-sm font-semibold text-slate-200">Quét mã để tham gia</p>
-          <TreeQrCode value={joinUrl} size={180} />
+          <TreeQrCode value={joinUrl} size={160} />
           <p className="break-all text-center text-[11px] leading-tight text-slate-400">{joinUrl}</p>
         </div>
 
@@ -370,9 +441,7 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
           {!isOpen && (
             <p className="flex items-center gap-1.5 rounded-lg bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-300">
               <CheckCircle2 size={14} />
-              {isExpired && isActive
-                ? 'Đã hết thời gian làm bài.'
-                : 'Hoạt động đã kết thúc.'}
+              {isExpired && isActive ? 'Đã hết thời gian làm bài.' : 'Hoạt động đã kết thúc.'}
             </p>
           )}
 
@@ -407,44 +476,135 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
         </div>
       </aside>
 
-      {/* ---------------- Canvas stage ---------------- */}
-      <main className="relative min-h-[60vh] flex-1 overflow-hidden lg:min-h-0">
+      {/* ---------------- Arena stage (2x2) ---------------- */}
+      <main className="grid flex-1 grid-cols-1 gap-3 overflow-y-auto p-3 sm:grid-cols-2 lg:min-h-0">
+        {teamStats.map((stat) => (
+          <TeamCard
+            key={stat.team}
+            session={session}
+            stat={stat}
+            isChampion={champion === stat.team}
+            canvasRef={canvasRefs.current[stat.team]}
+            onFruitHover={(anchor) =>
+              setHovered(anchor ? { team: stat.team, anchor } : null)
+            }
+            onFruitClick={(anchor) =>
+              setPinnedId((current) => (anchor && anchor.id !== current ? anchor.id : null))
+            }
+            tooltip={
+              tooltipTeam?.team === stat.team && activeFruit ? (
+                <FruitTooltip
+                  anchor={tooltipTeam.anchor}
+                  fruit={activeFruit}
+                  showAnswer={showAnswer}
+                  onToggleAnswer={() => setShowAnswer((value) => !value)}
+                  onClose={() => {
+                    setPinnedId(null);
+                    setHovered(null);
+                  }}
+                />
+              ) : null
+            }
+          />
+        ))}
+      </main>
+    </div>
+  );
+}
+
+/** One team's card: header, tree canvas and (optionally) the detail card. */
+function TeamCard({
+  session,
+  stat,
+  isChampion,
+  canvasRef,
+  onFruitHover,
+  onFruitClick,
+  tooltip,
+}: {
+  session: TreeSessionDetail;
+  stat: {
+    team: TeamNumber;
+    rawTotal: number;
+    done: number;
+    percent: number;
+    treeState: TreeState;
+    isFinished: boolean;
+    teamSubmissions: TreeSubmissionRow[];
+  };
+  isChampion: boolean;
+  canvasRef: { current: TreeCanvasHandle | null };
+  onFruitHover: (anchor: LayoutFruitAnchor | null) => void;
+  onFruitClick: (anchor: LayoutFruitAnchor | null) => void;
+  tooltip: React.ReactNode;
+}) {
+  const { team, treeState, done, rawTotal, percent, teamSubmissions } = stat;
+  const vitalityPercent = Math.round(treeState.vitality * 100);
+
+  return (
+    <section
+      className={`relative flex min-h-[42vh] flex-col overflow-hidden rounded-2xl border bg-slate-900/60 transition-shadow lg:min-h-0 ${
+        isChampion
+          ? 'border-amber-400 ring-4 ring-amber-400 shadow-xl shadow-amber-500/20'
+          : 'border-slate-800'
+      }`}
+    >
+      <header className="flex items-center justify-between gap-2 border-b border-slate-800/80 px-3 py-2">
+        <div className="flex items-center gap-2">
+          <span
+            className={`rounded-lg px-2.5 py-1 text-sm font-extrabold ${
+              isChampion ? 'bg-amber-400 text-amber-950' : 'bg-emerald-600 text-white'
+            }`}
+          >
+            Tổ {team}
+          </span>
+          {isChampion && (
+            <span className="flex items-center gap-1 text-xs font-bold text-amber-300">
+              <Trophy size={14} />
+              Quán quân
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2 text-[11px] font-semibold">
+          <span className="rounded-full bg-slate-800 px-2 py-0.5 text-slate-200">
+            {done}/{rawTotal} ({percent}%)
+          </span>
+          <span className="rounded-full bg-slate-800 px-2 py-0.5 text-teal-300">
+            Sức sống {vitalityPercent}%
+          </span>
+        </div>
+      </header>
+
+      <div className="relative flex-1">
         <TreeCanvas
           ref={canvasRef}
           session={session}
-          totalStudents={totalStudents}
-          submissions={submissions}
-          onFruitClick={handleFruitClick}
-          onFruitHover={setHovered}
+          totalStudents={Math.max(rawTotal, 1)}
+          submissions={teamSubmissions}
+          seed={getTeamSeed(session.tree_seed, team)}
+          onFruitClick={onFruitClick}
+          onFruitHover={onFruitHover}
         />
 
-        {activeFruit && (
-          <FruitTooltip
-            anchor={hovered ?? null}
-            fruit={activeFruit}
-            showAnswer={showAnswer}
-            onToggleAnswer={() => setShowAnswer((value) => !value)}
-            onClose={() => setPinnedId(null)}
-          />
-        )}
-
-        {isFlourished && (
-          <div className="pointer-events-none absolute inset-x-0 top-6 flex justify-center px-4">
-            <p className="animate-pulse rounded-full border border-amber-400/60 bg-amber-500/20 px-5 py-2.5 text-center text-sm font-bold text-amber-100 shadow-lg backdrop-blur">
-              🎉 Cả lớp đã chung sức nuôi dưỡng Cây Tri Thức đơm hoa kết trái rực rỡ!
+        {isChampion && (
+          <div className="pointer-events-none absolute inset-x-0 top-2 flex justify-center px-2">
+            <p className="animate-pulse rounded-full border border-amber-400/70 bg-amber-500/25 px-4 py-1.5 text-center text-xs font-extrabold text-amber-50 shadow-lg backdrop-blur">
+              🏆 QUÁN QUÂN: TỔ {team} VỀ ĐÍCH ĐẦU TIÊN! 🌸
             </p>
           </div>
         )}
 
-        {k === 0 && (
-          <div className="pointer-events-none absolute inset-x-0 bottom-8 text-center">
-            <p className="inline-block rounded-full bg-slate-900/80 px-4 py-2 text-sm font-semibold text-slate-300">
-              Chưa có câu trả lời nào. Cây đang chờ những hạt mầm đầu tiên…
+        {done === 0 && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-3 text-center">
+            <p className="inline-block rounded-full bg-slate-950/70 px-3 py-1.5 text-[11px] font-semibold text-slate-400">
+              Tổ {team} chưa có câu trả lời nào…
             </p>
           </div>
         )}
-      </main>
-    </div>
+
+        {tooltip}
+      </div>
+    </section>
   );
 }
 
@@ -487,21 +647,21 @@ interface FruitTooltipProps {
 }
 
 /**
- * Floating fruit detail card.
+ * Floating fruit detail card, hosted inside the owning team's card.
  *
- * Positioned from the hovered anchor's pixel coordinates, clamped inside the
- * stage so a fruit near an edge does not push the card off-screen. When a fruit
- * is pinned (no hover) the card docks to a fixed corner instead of tracking a
- * pointer that is no longer there.
+ * Positioned from the hovered anchor's pixel coordinates (which are already in
+ * that card's canvas space), clamped inside the card so a fruit near an edge does
+ * not push the card off-screen. When a fruit is pinned (no hover) the card docks
+ * to a fixed corner instead of tracking a pointer that is no longer there.
  */
 function FruitTooltip({ anchor, fruit, showAnswer, onToggleAnswer, onClose }: FruitTooltipProps) {
   return (
     <div
-      className="absolute z-20 w-72 max-w-[85vw] rounded-xl border border-slate-700 bg-slate-900/95 p-4 shadow-2xl backdrop-blur"
+      className="absolute z-20 w-72 max-w-[85%] rounded-xl border border-slate-700 bg-slate-900/95 p-4 shadow-2xl backdrop-blur"
       style={
         anchor
           ? { left: `min(max(${anchor.x + 12}px, 8px), calc(100% - 18rem - 8px))`, top: `${anchor.y + 12}px` }
-          : { right: '1rem', bottom: '1rem' }
+          : { right: '0.75rem', bottom: '0.75rem' }
       }
     >
       <div className="flex items-start justify-between gap-2">
@@ -513,7 +673,7 @@ function FruitTooltip({ anchor, fruit, showAnswer, onToggleAnswer, onClose }: Fr
           <p className="font-mono text-[11px] text-slate-400">{fruit.student_code}</p>
         </div>
         <span className="shrink-0 rounded-full bg-emerald-600/20 px-2 py-0.5 text-[11px] font-bold text-emerald-300">
-          Giọt sương #{fruit.fruit_index}
+          Tổ {clampTeamNumber(fruit.team_number)} · #{fruit.fruit_index}
         </span>
       </div>
 

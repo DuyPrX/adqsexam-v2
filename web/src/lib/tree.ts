@@ -1,6 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { PersistenceError } from './exams';
-import type { TreeSessionDetail, TreeSessionRow, TreeSubmissionRow } from './types';
+import { clampTeamNumber } from './tree-engine.js';
+import type { TeamCounts, TeamNumber, TreeSessionDetail, TreeSessionRow, TreeSubmissionRow } from './types';
 
 /**
  * Tree of Knowledge persistence (Phase 7.3) for `public.tree_sessions` /
@@ -14,7 +15,14 @@ import type { TreeSessionDetail, TreeSessionRow, TreeSubmissionRow } from './typ
  */
 
 /**
- * Canonical `tree_sessions` column list.
+ * Phase 8.4 — re-exported so callers can obtain a team's deterministic seed from
+ * this module (`@/lib/tree`) alongside the rest of the tree persistence API. The
+ * implementation lives in the engine, which is the single source of truth shared
+ * with the student SPA.
+ */
+export { getTeamSeed, clampTeamNumber, TEAM_NUMBERS } from './tree-engine.js';
+
+/** Canonical `tree_sessions` column list.
  *
  * Centralised for the same reason as `EXAM_COLUMNS`: `select('*')` would make a
  * future column appear at runtime while TypeScript still believes the row has
@@ -23,9 +31,14 @@ import type { TreeSessionDetail, TreeSessionRow, TreeSubmissionRow } from './typ
 export const TREE_SESSION_COLUMNS =
   'id, user_id, class_id, title, question_text, min_words, time_limit_minutes, max_similarity, tree_seed, is_active, created_at, ended_at';
 
-/** Canonical `tree_submissions` column list (the renderer consumes every field). */
+/**
+ * Canonical `tree_submissions` column list (the renderer consumes every field).
+ *
+ * `team_number` (Phase 8.4) is what lets the projector split one session's
+ * answers into four per-team trees.
+ */
 export const TREE_SUBMISSION_COLUMNS =
-  'id, session_id, student_code, student_name, answer_text, word_count, submitted_at, fruit_index';
+  'id, session_id, student_code, student_name, answer_text, word_count, submitted_at, fruit_index, team_number';
 
 /** Defaults surfaced by the creation modal, mirrored here so both agree. */
 export const TREE_SESSION_DEFAULTS = {
@@ -111,15 +124,30 @@ export async function createTreeSession(
 
 /** Shape of the PostgREST-embedded class aggregate. */
 interface TreeSessionWithClass extends TreeSessionRow {
-  classes?: { name: string; class_members?: Array<{ count: number }> } | null;
+  classes?: {
+    name: string;
+    class_members?: Array<{ team_number: number | null }>;
+  } | null;
+}
+
+/** Tallies per-team class sizes into the `{ 1: n, 2: n, 3: n, 4: n }` shape. */
+function tallyTeamCounts(members: Array<{ team_number: number | null }>): TeamCounts {
+  const counts: TeamCounts = { 1: 0, 2: 0, 3: 0, 4: 0 };
+  for (const member of members) {
+    const team = clampTeamNumber(member.team_number) as TeamNumber;
+    counts[team] += 1;
+  }
+  return counts;
 }
 
 /**
  * Loads one session with the class context the projector needs.
  *
- * `classes!inner(...)` fetches the class name and — critically — `N`, the class
- * size, in the SAME round-trip. `N` is the participation denominator, so a
- * second query would make the projector paint an incomplete tree on first load.
+ * `classes!inner(...)` fetches the class name, the per-team roster split and —
+ * critically — `N`, the class size, in the SAME round-trip. `N` is the
+ * participation denominator, so a second query would make the projector paint an
+ * incomplete tree on first load. Phase 8.4's arena additionally needs each team's
+ * own size, which is tallied from the same nested rows.
  */
 export async function getTreeSession(
   supabase: SupabaseClient,
@@ -127,7 +155,7 @@ export async function getTreeSession(
 ): Promise<TreeSessionDetail | null> {
   const { data, error } = await supabase
     .from('tree_sessions')
-    .select(`${TREE_SESSION_COLUMNS}, classes!inner(name, class_members(count))`)
+    .select(`${TREE_SESSION_COLUMNS}, classes!inner(name, class_members(team_number))`)
     .eq('id', id)
     .maybeSingle<TreeSessionWithClass>();
 
@@ -135,12 +163,14 @@ export async function getTreeSession(
   if (!data) return null;
 
   const { classes, ...session } = data;
+  const members = classes?.class_members ?? [];
   return {
     ...session,
     class_name: classes?.name ?? '',
     // Floor at 1: the engine divides by N, and an empty roster would otherwise
     // yield Infinity/NaN for the participation ratio.
-    total_students: Math.max(classes?.class_members?.[0]?.count ?? 0, 1),
+    total_students: Math.max(members.length, 1),
+    team_counts: tallyTeamCounts(members),
   };
 }
 

@@ -283,6 +283,32 @@ body {
 .btn-icon-muted:hover { background: var(--surface-2); color: var(--text); border-color: var(--border-strong); }
 .btn-icon-muted[aria-pressed="false"] { opacity: .6; }
 
+/* Phase 8.4 — sticky 4-team mini-leaderboard. Sticks under the workspace header
+   so a student typing down the page still sees the live Tổ standings. */
+.tree-leaderboard {
+  position: sticky; top: 0; z-index: 6;
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding: 8px; border-radius: var(--radius-sm);
+  background: var(--surface); border: 1px solid var(--border);
+}
+.tree-leaderboard__badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px 9px; border-radius: 999px;
+  font-size: 12px; font-weight: 700;
+  background: var(--surface-2); color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+/* The student's own Tổ is highlighted so it is findable at a glance. */
+.tree-leaderboard__badge.is-my-team {
+  background: var(--accent-weak); color: var(--accent-text);
+  border-color: var(--accent);
+}
+/* The first team to reach 100% keeps the crown. */
+.tree-leaderboard__badge.is-champion {
+  background: var(--warn-weak); color: var(--warn);
+  border-color: var(--warn);
+}
+
 /* The stage is sticky on a tall screen so the tree stays visible while the
    student types, but collapses to a comfortable 35vh on mobile where a sticky
    header would eat the whole viewport. */

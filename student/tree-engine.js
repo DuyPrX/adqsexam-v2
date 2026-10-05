@@ -168,6 +168,34 @@ export function themeForSeed(seed) {
 }
 
 /* =====================================================================
+   B.2 Team seeds (Phase 8.4 — 4-team competition arena)
+   ===================================================================== */
+
+/** The four competition teams (Tổ). */
+export const TEAM_NUMBERS = [1, 2, 3, 4];
+
+/**
+ * Derives an independent, deterministic seed for one team's tree.
+ *
+ * The class-wide `tree_seed` is the shared input every client already has, so a
+ * team's tree is `baseSeed + team * 7919` — 7919 is a prime, which spreads four
+ * consecutive team indices across the PRNG's state space so the four trees look
+ * genuinely different rather than four rotations of one shape. `>>> 0` keeps the
+ * result an unsigned 32-bit integer, matching `createPRNG`'s domain.
+ */
+export function getTeamSeed(baseSeed, teamNumber) {
+  const team = clampTeamNumber(teamNumber);
+  return ((Number(baseSeed) || 0) + team * 7919) >>> 0;
+}
+
+/** Clamps any input to a valid team index 1..4. */
+export function clampTeamNumber(value) {
+  const n = Math.trunc(Number(value));
+  if (!Number.isFinite(n)) return 1;
+  return n < 1 ? 1 : n > 4 ? 4 : n;
+}
+
+/* =====================================================================
    C. Growth mathematics
    ===================================================================== */
 
