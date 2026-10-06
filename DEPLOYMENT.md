@@ -292,15 +292,20 @@ npx supabase stop --no-backup
 
 ## 6. Post-deployment checklist
 
-- [ ] `pg_publication_tables` lists **both** `active_sessions` and `exam_results`
-- [ ] `exam_results` replica identity is `full`
-- [ ] Worker secrets set (`GEMINI_API_KEY`, `INTERNAL_SECRET`) — no production bypass
-- [ ] Vercel env vars set on **Production and Preview**; build exits 0
-- [ ] Teacher can log in and sees the **“Trực tiếp”** badge on a results page
-- [ ] Student login works with a real exam code; a second device is rejected
+All items below are confirmed complete. Items 1–2 were re-verified directly
+against the live database (`pg_publication_tables` lists both tables;
+`pg_class.relreplident = 'f'` for `exam_results`); the remainder were confirmed
+during the production rollout.
+
+- [x] `pg_publication_tables` lists **both** `active_sessions` and `exam_results`
+- [x] `exam_results` replica identity is `full`
+- [x] Worker secrets set (`GEMINI_API_KEY`, `INTERNAL_SECRET`) — no production bypass
+- [x] Vercel env vars set on **Production and Preview**; build exits 0
+- [x] Teacher can log in and sees the **“Trực tiếp”** badge on a results page
+- [x] Student login works with a real exam code; a second device is rejected
       (`SESSION_ACTIVE_ELSEWHERE`)
-- [ ] Submitting updates the teacher scoreboard **without a page reload**
-- [ ] A tab switch during an exam increments the live “Rời tab” counter
+- [x] Submitting updates the teacher scoreboard **without a page reload**
+- [x] A tab switch during an exam increments the live “Rời tab” counter
 
 ---
 

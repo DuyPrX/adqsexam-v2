@@ -139,8 +139,11 @@ The spec has it `RETURNS INTEGER` and `RAISE EXCEPTION
 contract in the task and all-or-nothing failure is the desired behaviour for a
 teacher-side batch import. Tested via the error message.
 
-### D-J. Not in scope: the student SPA PIN input
-The task scoped this phase to the migration + tests (`git add supabase/ tests/`).
-The SPA does not yet send `p_pin`, which is safe here (see D-F) but means a
-teacher who enables `GLOBAL`/custom `INDIVIDUAL` PINs has no student-facing entry
-path yet. Presumably a Phase 6.2 UI deliverable.
+### D-J. RESOLVED — the student SPA PIN input
+This phase was scoped to the migration + tests (`git add supabase/ tests/`), so the
+SPA did not yet send `p_pin`, which was safe here (see D-F) but meant a teacher who
+enabled `GLOBAL`/custom `INDIVIDUAL` PINs had no student-facing entry path.
+**Phase 6.3 delivered it:** the roster picker reads `pin_mode` from
+`get_exam_roster` and the SPA now sends `p_pin` on both the acquire
+(`app.js`, `verify_and_acquire_session`) and resume paths — `null` when blank,
+which is correct for `NONE` and fails closed for `GLOBAL`/`INDIVIDUAL`.
