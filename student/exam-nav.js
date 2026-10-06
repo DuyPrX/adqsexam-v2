@@ -15,8 +15,24 @@
 /** Theme cycle order for the "Giao diện" button. */
 export const THEME_CYCLE = ['light', 'dark', 'sepia'];
 
-/** Font-size ladder: base (16px) -> lg (18px) -> xl (20px). */
-export const FONT_CYCLE = ['base', 'lg', 'xl'];
+/**
+ * Font-size ladder. The first step is the EMPTY STRING, not a named `base`:
+ * "normal" is expressed by the ABSENCE of the `data-font` attribute so the
+ * `:root` defaults apply untouched (and a stale attribute can never pin a
+ * student to a value the CSS no longer defines).
+ *
+ * Phase 8.6 — the reading scale is 1 / 1.18 / 1.36, so the three steps are
+ * visually distinct enough to be worth offering (the old 1/1.125/1.25 ladder was
+ * subtle enough that students could not tell `lg` from `xl`).
+ */
+export const FONT_CYCLE = ['', 'lg', 'xl'];
+
+/** Button labels for each font step, keyed by the `data-font` value. */
+export const FONT_LABELS = {
+  '': 'Chuẩn',
+  lg: 'Lớn',
+  xl: 'Rất lớn',
+};
 
 /**
  * The confirmation beat before the auto-advance jump.
@@ -49,10 +65,64 @@ export function nextTheme(current) {
   return THEME_CYCLE[(THEME_CYCLE.indexOf(start) + 1) % THEME_CYCLE.length];
 }
 
-/** Cycles to the next font step: base -> lg -> xl -> base. */
+/** Cycles to the next font step: normal ('') -> lg -> xl -> normal. */
 export function nextFontStep(current) {
-  const start = FONT_CYCLE.includes(current) ? current : 'base';
+  const start = FONT_CYCLE.includes(current) ? current : '';
   return FONT_CYCLE[(FONT_CYCLE.indexOf(start) + 1) % FONT_CYCLE.length];
+}
+
+/** Normalises a raw question type exactly like the SPA's `normalizeType()`. */
+function normalizeQuestionType(raw) {
+  const value = String(raw || '').toUpperCase();
+  if (value === 'TRUE_FALSE') return 'TRUE_FALSE';
+  if (value === 'SHORT_ANSWER') return 'SHORT_ANSWER';
+  if (value === 'ESSAY') return 'ESSAY';
+  return 'MCQ';
+}
+
+/**
+ * Whether one answer slot holds a real answer.
+ *
+ * Mirrors the SPA's `isDraftReady()` one-for-one so the "you still have N
+ * unanswered questions" warning can never disagree with the palette's answered
+ * count (both would otherwise drift and one of them would be a lie).
+ */
+function isAnswerFilled(type, answer) {
+  if (!answer || typeof answer !== 'object') return false;
+  if (type === 'MCQ') return answer.draft !== null && answer.draft !== undefined;
+  if (type === 'TRUE_FALSE') {
+    // A partly-answered sub-statement set is NOT answered: the student would
+    // lose the rest of their choices by moving on.
+    return Array.isArray(answer.draft) && answer.draft.some((value) => value !== '');
+  }
+  return String(answer.draft == null ? '' : answer.draft).trim() !== '';
+}
+
+/**
+ * Lists the questions the student has not answered yet, in paper order.
+ *
+ * Phase 8.6 — drives the smart submit modal: the warning lists these ordinals,
+ * and "Tiếp tục làm bài" jumps to `result[0].index` (the SMALLEST unanswered
+ * question), which is why the order of this array is part of the contract.
+ *
+ * @param {object[]} questions The paper, in display order.
+ * @param {object[]} answers   Parallel answer slots (`{ draft }` each).
+ * @returns {{index:number, ordinal:number}[]} `index` is 0-based, `ordinal` is
+ *   the 1-based number shown to the student ("Câu 3").
+ */
+export function getUnansweredQuestions(questions, answers) {
+  const paper = Array.isArray(questions) ? questions : [];
+  const slots = Array.isArray(answers) ? answers : [];
+  const unanswered = [];
+
+  for (let index = 0; index < paper.length; index += 1) {
+    const question = paper[index] || {};
+    if (!isAnswerFilled(normalizeQuestionType(question.type), slots[index])) {
+      unanswered.push({ index, ordinal: index + 1 });
+    }
+  }
+
+  return unanswered;
 }
 
 /**

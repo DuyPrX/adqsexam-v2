@@ -16,8 +16,8 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import {
-  AUTO_ADVANCE_MS, FONT_CYCLE, FONT_KEY, THEME_KEY,
-  buildPaletteCells, clampQuestionIndex, nextFontStep, nextTheme, normalizeTheme,
+  AUTO_ADVANCE_MS, FONT_CYCLE, FONT_KEY, FONT_LABELS, THEME_KEY,
+  buildPaletteCells, clampQuestionIndex, getUnansweredQuestions, nextFontStep, nextTheme, normalizeTheme,
   readAutoAdvancePreference, shouldAutoAdvance, writeAutoAdvancePreference,
 } from './exam-nav.js';
 import { orderPracticeQuestions, readShuffleToggle, shuffledOrder } from './practice-order.js';
@@ -357,31 +357,43 @@ function toggleTheme() {
   renderThemeIcon();
 }
 
-/** Reflects the active theme on the button (glyph + accessible name). */
-function renderThemeIcon() {
-  const node = $('btn-theme-toggle');
+/**
+ * Reflects the active theme on one theme button (glyph + accessible name).
+ *
+ * Phase 8.6 — there are two of them: the in-exam `#btn-theme-toggle` and the
+ * global `#btn-global-theme-toggle` on the login/roster screen. Both must show
+ * the same state, so the painting lives here rather than in either listener.
+ */
+function paintThemeButton(node, theme) {
   if (!node) return;
-  const theme = currentTheme();
   const glyph = theme === 'dark' ? '☀' : theme === 'sepia' ? '🌗' : '🌙';
+  // Keep whatever label class the markup used (`.btn-label` in the exam header,
+  // `.theme-label` on the global button) so the responsive hiding rule still applies.
+  const existing = node.querySelector('.btn-label, .theme-label');
+  const labelClass = existing ? existing.className : 'btn-label';
   node.textContent = '';
   node.appendChild(document.createTextNode(`${glyph} `));
-  node.appendChild(el('span', { className: 'btn-label', text: 'Giao diện' }));
+  node.appendChild(el('span', { className: labelClass, text: 'Giao diện' }));
   node.setAttribute('aria-label', `Giao diện: ${theme === 'dark' ? 'Tối' : theme === 'sepia' ? 'Dịu mắt' : 'Sáng'}`);
+}
+
+function renderThemeIcon() {
+  const theme = currentTheme();
+  paintThemeButton($('btn-theme-toggle'), theme);
+  paintThemeButton($('btn-global-theme-toggle'), theme);
 }
 
 /* ---------- font size ---------- */
 
-const FONT_LABEL = { base: 'Cỡ chữ', lg: 'Cỡ chữ+', xl: 'Cỡ chữ++' };
-
 function currentFontStep() {
   const attr = document.documentElement.getAttribute('data-font');
-  return FONT_CYCLE.includes(attr) ? attr : 'base';
+  return FONT_CYCLE.includes(attr) ? attr : '';
 }
 
 function initFontSize() {
   let saved = null;
   try { saved = localStorage.getItem(FONT_KEY); } catch { /* ignore */ }
-  if (FONT_CYCLE.includes(saved)) {
+  if (FONT_CYCLE.includes(saved) && saved !== '') {
     document.documentElement.setAttribute('data-font', saved);
   }
   renderFontIcon();
@@ -389,9 +401,10 @@ function initFontSize() {
 
 function cycleFontSize() {
   const next = nextFontStep(currentFontStep());
-  // `base` is the CSS default, so the attribute is removed rather than set —
-  // this keeps a stale `data-font="base"` from overriding a future default.
-  if (next === 'base') document.documentElement.removeAttribute('data-font');
+  // '' is the CSS default, so the attribute is removed rather than set — this
+  // keeps a stale `data-font=""` (or a future renamed default) from pinning the
+  // student to a value the stylesheet no longer defines.
+  if (next === '') document.documentElement.removeAttribute('data-font');
   else document.documentElement.setAttribute('data-font', next);
   try { localStorage.setItem(FONT_KEY, next); } catch { /* ignore */ }
   renderFontIcon();
@@ -402,7 +415,12 @@ function renderFontIcon() {
   if (!node) return;
   node.textContent = '';
   node.appendChild(document.createTextNode('🔤 '));
-  node.appendChild(el('span', { className: 'btn-label', text: FONT_LABEL[currentFontStep()] }));
+  // The label names the CURRENT size, so a student can tell what they are on
+  // without counting taps ("Cỡ chữ: Chuẩn / Lớn / Rất lớn").
+  node.appendChild(el('span', {
+    className: 'btn-label',
+    text: `Cỡ chữ: ${FONT_LABELS[currentFontStep()]}`,
+  }));
 }
 
 /* =====================================================================
@@ -1399,7 +1417,7 @@ function evictStudent(code) {
   unbindAntiCheat();
   clearSession();
   hide($('fullscreenOverlay'));
-  hide($('confirmOverlay'));
+  hide($('submitModal'));
   hide($('loadingOverlay'));
   show($('evictedOverlay'));
   console.warn('Session ended:', code);
@@ -1503,7 +1521,7 @@ function isTypingTarget(event) {
 function onKeyDown(event) {
   // Practice mode reuses the same shortcuts but never the guards.
   if (state.mode !== 'quiz' && state.mode !== 'practice') return;
-  if (!$('confirmOverlay').classList.contains('hidden')) return;
+  if (!$('submitModal').classList.contains('hidden')) return;
 
   const type = normalizeType(state.questions[state.currentIndex].type);
   const key = event.key;
@@ -1573,19 +1591,60 @@ function buildAnswersPayload() {
   return payload;
 }
 
+/**
+ * Phase 8.6 — opens the smart submit dialog.
+ *
+ * The dialog adapts to the state of the paper instead of asking a blind
+ * "are you sure?":
+ *   - Complete  → a clean confirmation ("Xem lại" / "Xác nhận nộp").
+ *   - Incomplete → names how many are outstanding, lists their numbers, and
+ *     offers "Tiếp tục làm bài", which jumps STRAIGHT to the first (smallest)
+ *     unanswered question rather than just closing and leaving the student to
+ *     hunt for it in the palette.
+ *
+ * No worker/RPC change is involved: the decision is derived entirely from
+ * `state.questions` + `state.answers` on the client.
+ */
 function openSubmitConfirm() {
   if (state.submitting) return;
   const practice = state.mode === 'practice';
   if (state.mode !== 'quiz' && !practice) return;
-  const answered = countAnswered();
-  const total = state.questions.length;
-  $('submitBody').textContent = practice
-    ? `Bạn đã trả lời ${answered}/${total} câu. Hệ thống sẽ chấm điểm và hiện đáp án ngay.`
-    : `Bạn đã trả lời ${answered}/${total} câu. Sau khi nộp, bạn không thể sửa lại bài làm.`;
-  show($('confirmOverlay'));
+
+  const unanswered = getUnansweredQuestions(state.questions, state.answers);
+  const list = $('submitModalUnansweredList');
+  const continueBtn = $('btnModalContinueExam');
+  const title = $('submitModalTitle');
+  const desc = $('submitModalDesc');
+
+  // Rebound on every open: the two modes have different "continue" semantics,
+  // and a stale closure would fire the wrong one on the second open.
+  if (unanswered.length === 0) {
+    title.textContent = practice ? 'Hoàn thành bài ôn tập! 🎉' : 'Hoàn thành bài thi! 🎉';
+    desc.textContent = practice
+      ? 'Bạn đã trả lời đầy đủ tất cả câu hỏi. Hệ thống sẽ chấm điểm và hiện đáp án ngay.'
+      : 'Bạn đã trả lời đầy đủ tất cả câu hỏi. Bạn có chắc chắn muốn nộp bài?';
+    clear(list);
+    list.style.display = 'none';
+    continueBtn.textContent = 'Xem lại';
+    continueBtn.onclick = closeSubmitConfirm;
+  } else {
+    title.textContent = 'Chưa hoàn thành bài thi ⚠️';
+    desc.textContent = `Bạn còn ${unanswered.length} câu chưa trả lời:`;
+    clear(list);
+    unanswered.forEach((item) => {
+      list.appendChild(el('span', { className: 'unanswered-tag', text: `Câu ${item.ordinal}` }));
+    });
+    list.style.display = 'flex';
+    continueBtn.textContent = 'Tiếp tục làm bài';
+    // `unanswered[0]` is the smallest index because getUnansweredQuestions()
+    // returns them in paper order.
+    continueBtn.onclick = () => { closeSubmitConfirm(); goToQuestion(unanswered[0].index); };
+  }
+
+  show($('submitModal'));
 }
 
-function closeSubmitConfirm() { hide($('confirmOverlay')); }
+function closeSubmitConfirm() { hide($('submitModal')); }
 
 async function submitExam(auto) {
   if (state.submitting) return;
@@ -1678,7 +1737,7 @@ function finishExam() {
   hide($('progressWrap'));
   hide($('quizScreen'));
   hide($('fullscreenOverlay'));
-  hide($('confirmOverlay'));
+  hide($('submitModal'));
 }
 
 /* =====================================================================
@@ -3263,6 +3322,8 @@ async function boot() {
   $('btn-close-palette').addEventListener('click', closePalette);
   $('palette-backdrop').addEventListener('click', closePalette);
   $('btn-theme-toggle').addEventListener('click', toggleTheme);
+  // Phase 8.6 — the same theme cycle is reachable from the login/roster screen.
+  $('btn-global-theme-toggle').addEventListener('click', toggleTheme);
   $('btn-font-toggle').addEventListener('click', cycleFontSize);
   $('btn-prev-question').addEventListener('click', goPrev);
   $('btn-next-question').addEventListener('click', goNext);
@@ -3277,8 +3338,10 @@ async function boot() {
 
   $('fsResumeBtn').addEventListener('click', () => { requestFullscreen(); hide($('fullscreenOverlay')); });
   $('evictedBtn').addEventListener('click', () => window.location.reload());
-  $('submitCancelBtn').addEventListener('click', closeSubmitConfirm);
-  $('submitConfirmBtn').addEventListener('click', () => {
+  // Phase 8.6 — smart submit modal. "Tiếp tục làm bài" carries a per-open click
+  // handler installed by openSubmitConfirm(), so nothing is bound to it here.
+  $('btnModalConfirmSubmit').addEventListener('click', () => {
+    closeSubmitConfirm();
     if (state.mode === 'practice') submitPractice();
     else submitExam(false);
   });

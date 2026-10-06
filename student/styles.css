@@ -119,9 +119,12 @@
 }
 
 /* Phase 8.5 — font-size ladder. The exam reading text scales; the chrome does
-   not, so a 20px setting never overflows the top bar or the bottom nav. */
-:root[data-font="lg"] { --font-base: 18px; --reading-scale: 1.125; }
-:root[data-font="xl"] { --font-base: 20px; --reading-scale: 1.25; }
+   not, so a 20px setting never overflows the top bar or the bottom nav.
+   Phase 8.6 — the steps were widened to 1 / 1.18 / 1.36: at 1/1.125/1.25 the
+   `lg` and `xl` rungs were close enough that students reported the button
+   "doing nothing". */
+:root[data-font="lg"] { --font-base: 18px; --reading-scale: 1.18; }
+:root[data-font="xl"] { --font-base: 20px; --reading-scale: 1.36; }
 
 /* OS dark mode only wins when the student has NOT chosen a theme. Sepia is an
    explicit choice and must survive a dark-mode OS. */
@@ -265,8 +268,9 @@ body {
   background: var(--primary-light); color: var(--primary-hover); border-color: var(--primary);
 }
 .btn-label { white-space: nowrap; }
-/* Below ~560px the labels crowd the timer; the glyph still carries the meaning. */
-@media (max-width: 560px) { .top-nav-btn .btn-label { display: none; } }
+/* Below ~560px the labels crowd the timer; the glyph still carries the meaning.
+   `.theme-label` is the global header's variant of the same label. */
+@media (max-width: 560px) { .top-nav-btn .btn-label, .top-nav-btn .theme-label { display: none; } }
 
 /* Phase 8.5 — exam control cluster in the header. */
 .exam-top-bar__controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
@@ -279,8 +283,27 @@ body {
 }
 .timer-badge.is-critical { color: var(--danger); border-color: var(--danger); background: var(--danger-weak); }
 
+/* Phase 8.6 — global shell header. Lives OUTSIDE `#examHeader` so the theme
+   control exists on the login/roster screen too, where the exam header is
+   hidden. Anchored to the top-right of the shell, above the login card but
+   BELOW the exam header's own control cluster (z-index 40 < 55), so during an
+   exam it simply drops behind the sticky header instead of doubling the
+   controls. */
+.app-global-header {
+  display: flex;
+  justify-content: flex-end;
+  padding: 8px 16px;
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 40;
+}
+
 /* ---------- login ---------- */
-.login { display: flex; justify-content: center; padding-top: 24px; }
+/* Phase 8.6 — extra top padding reserves the strip occupied by the global
+   header's theme button, which floats over the top of the shell on this
+   screen. Without it the button overlaps the login card on narrow phones. */
+.login { display: flex; justify-content: center; padding-top: 56px; }
 .login__card {
   width: 100%; max-width: 460px;
   background: var(--surface); border: 1px solid var(--border);
@@ -608,7 +631,9 @@ body {
 
 .q-text {
   margin: 0; line-height: 1.65; white-space: pre-wrap;
-  /* Phase 8.5 — scaled by the font-size control (--reading-scale). */
+  /* Phase 8.5/8.6 — scaled by the font-size control (--reading-scale). This is
+     the ONLY place the question body's size is set: the former 1024px media
+     query override has been removed, since it silently defeated the scale. */
   font-size: calc(19px * var(--reading-scale)); font-weight: 700;
 }
 .q-hint { margin: 10px 0 0; font-size: 12.5px; color: var(--text-faint); }
@@ -620,7 +645,10 @@ body {
   padding: 15px 16px; text-align: left;
   background: var(--surface); color: var(--text);
   border: 2px solid var(--border); border-radius: var(--radius);
-  font-family: inherit; font-size: 15.5px; font-weight: 600; line-height: 1.55;
+  font-family: inherit; font-weight: 600; line-height: 1.55;
+  /* Phase 8.6 — the answer options scale with the reading control too, so a
+     student who enlarged the question does not have to squint at the choices. */
+  font-size: calc(15.5px * var(--reading-scale));
   cursor: pointer; transition: border-color .15s, background .15s;
 }
 .option:hover:not(:disabled) { border-color: var(--accent); }
@@ -653,7 +681,11 @@ body {
 }
 .tf-item__label { flex: 0 0 auto; width: 28px; height: 28px; display: grid; place-items: center;
   background: var(--surface-2); border-radius: var(--radius-sm); font-weight: 800; font-size: 13px; color: var(--text-muted); }
-.tf-item__text { flex: 1 1 220px; min-width: 0; font-weight: 600; font-size: 15px; line-height: 1.55; }
+.tf-item__text {
+  flex: 1 1 220px; min-width: 0; font-weight: 600; line-height: 1.55;
+  /* Phase 8.6 — sub-statements scale with the reading control. */
+  font-size: calc(15px * var(--reading-scale));
+}
 .tf-item__choice { display: flex; gap: 8px; }
 .tf-choice {
   padding: 9px 18px; border-radius: var(--radius-sm);
@@ -797,6 +829,53 @@ body {
 .overlay__actions .btn { flex: 1 1 150px; }
 .overlay--busy { background: rgba(2, 6, 23, .62); }
 .overlay--busy .overlay__body { margin: 0; color: #f8fafc; font-weight: 600; }
+
+/* Phase 8.6 — smart submit confirmation modal.
+   Sized as a bottom-sheet-friendly card and theme-aware through the canonical
+   tokens, so it is legible in light, dark and sepia alike. */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  backdrop-filter: blur(2px);
+}
+.submit-modal-card {
+  background: var(--surface-card);
+  color: var(--text-main);
+  border: 1px solid var(--border-color);
+  border-radius: 16px;
+  padding: 24px;
+  width: 90%;
+  max-width: 440px;
+  box-shadow: var(--shadow-md);
+}
+.submit-modal-card h3 { margin: 0 0 8px; font-size: 19px; font-weight: 800; line-height: 1.4; }
+.submit-modal-card p { margin: 0; font-size: 14px; color: var(--text-muted); line-height: 1.6; }
+.modal-actions .btn-nav-prev,
+.modal-actions .btn-primary-finish { margin-left: 0; }
+.unanswered-tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 120px;
+  overflow-y: auto;
+  margin: 12px 0;
+  padding: 8px;
+  background: var(--surface-btn);
+  border-radius: 8px;
+}
+.unanswered-tag {
+  background: var(--warning-light);
+  color: var(--warning);
+  font-weight: 600;
+  font-size: 13px;
+  padding: 2px 8px;
+  border-radius: 6px;
+}
 
 .spinner {
   width: 40px; height: 40px; margin: 0 auto 16px;
@@ -947,7 +1026,10 @@ body {
 @media (min-width: 1024px) {
   .app { padding: 28px 24px 56px; }
   .question-host { padding-top: 32px; }
-  .q-text { font-size: 21px; }
+  /* Phase 8.6 — the desktop override that hard-coded `.q-text { font-size: 21px }`
+     is GONE. It silently beat `--reading-scale`, which is exactly why the font
+     button appeared dead on wide screens: the base size grew but the media
+     query pinned the rendered size. The scaled rule below is the only source. */
   .exam-header__title { max-width: 60vw; }
 }
 
@@ -957,9 +1039,6 @@ body {
   .metric-flag { display: none; }
   .tf-item__choice { width: 100%; }
   .tf-choice { flex: 1; }
-  .action-bar { flex-wrap: wrap; }
-  .action-bar .btn { flex: 1 1 100%; }
-  .action-bar .btn--ghost { order: 3; }
 }
 
 @media (prefers-reduced-motion: reduce) {

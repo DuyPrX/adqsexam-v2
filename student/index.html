@@ -20,6 +20,15 @@
                       from `?session=`/`?tree=`, it must cover the exam header and
                       tabs entirely rather than appearing underneath them. -->
   <div id="view-exam" class="spa-view">
+  <!-- Phase 8.6 — global shell header. Outside `#examHeader` on purpose: the exam
+       header is hidden until a sitting starts, but a student must be able to pick
+       their lighting from the login/roster screen too. Sits behind the sticky
+       exam header (z-index 40 < 55) so it never doubles the controls mid-exam. -->
+  <div class="app-global-header" id="globalHeader">
+    <button type="button" id="btn-global-theme-toggle" class="top-nav-btn" title="Đổi màu nền">
+      🌓 <span class="theme-label">Giao diện</span>
+    </button>
+  </div>
   <!-- Reading progress -->
   <div id="progressWrap" class="progress-wrap hidden" aria-hidden="true">
     <div id="progressBar" class="progress-bar"></div>
@@ -419,15 +428,20 @@
     </div>
   </div>
 
-  <!-- Submit confirmation -->
-  <div id="confirmOverlay" class="overlay hidden" role="dialog" aria-modal="true"
-       aria-labelledby="submitHeading" aria-describedby="submitBody">
-    <div class="overlay__card">
-      <h2 id="submitHeading" class="overlay__title">Nộp bài?</h2>
-      <p id="submitBody" class="overlay__body"></p>
-      <div class="overlay__actions">
-        <button id="submitCancelBtn" type="button" class="btn btn--ghost">Tiếp tục làm bài</button>
-        <button id="submitConfirmBtn" type="button" class="btn btn--primary">Nộp bài</button>
+  <!-- Submit confirmation — Phase 8.6 "smart" modal. One container serves both
+       cases: a full paper ("Xem lại" / "Xác nhận nộp") and an incomplete one
+       (the unanswered list plus "Tiếp tục làm bài" jumping straight to the
+       smallest unanswered question). Hidden via `.hidden` rather than an inline
+       `display:none` so `show()`/`hide()` drive it like every other overlay. -->
+  <div id="submitModal" class="modal-backdrop hidden" role="dialog" aria-modal="true"
+       aria-labelledby="submitModalTitle" aria-describedby="submitModalDesc">
+    <div class="submit-modal-card">
+      <h3 id="submitModalTitle">Xác nhận nộp bài</h3>
+      <p id="submitModalDesc">Bạn có chắc chắn muốn nộp bài thi?</p>
+      <div id="submitModalUnansweredList" class="unanswered-tag-list" style="display: none;"></div>
+      <div class="modal-actions" style="display: flex; gap: 10px; margin-top: 20px;">
+        <button type="button" id="btnModalContinueExam" class="btn-nav-prev" style="flex: 1;">Tiếp tục làm bài</button>
+        <button type="button" id="btnModalConfirmSubmit" class="btn-primary-finish" style="flex: 1;">Nộp bài ngay</button>
       </div>
     </div>
   </div>

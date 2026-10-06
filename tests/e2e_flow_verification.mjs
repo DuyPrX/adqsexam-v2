@@ -202,10 +202,10 @@ const { shuffledOrder, orderPracticeQuestions, readShuffleToggle } = await impor
 // dependency-free and DOM-free, so the auto-advance policy, the index clamping,
 // the theme/font cycles and the palette cell model are all executed for real.
 const {
-  THEME_CYCLE, FONT_CYCLE, AUTO_ADVANCE_MS, AUTO_ADVANCE_KEY,
+  THEME_CYCLE, FONT_CYCLE, FONT_LABELS, AUTO_ADVANCE_MS, AUTO_ADVANCE_KEY,
   normalizeTheme, nextTheme, nextFontStep, clampQuestionIndex,
   shouldAutoAdvance, readAutoAdvancePreference, writeAutoAdvancePreference,
-  buildPaletteCells,
+  buildPaletteCells, getUnansweredQuestions,
 } = await import(new URL('../student/exam-nav.js', import.meta.url).href);
 
 // Phase 7.2 Step 29 — the Tree of Knowledge engine. `computeTreeState()` and the
@@ -5257,13 +5257,13 @@ async function main() {
       && normalizeTheme(null, true) === 'dark'
       && normalizeTheme(undefined, false) === 'light',
     'normalizeTheme misbehaved');
-  check('36d: the font ladder is base -> lg -> xl',
-    JSON.stringify(FONT_CYCLE) === JSON.stringify(['base', 'lg', 'xl']),
+  check('36d: the font ladder is normal(\'\') -> lg -> xl',
+    JSON.stringify(FONT_CYCLE) === JSON.stringify(['', 'lg', 'xl']),
     JSON.stringify(FONT_CYCLE));
-  check('36d: nextFontStep walks the ladder and wraps back to base',
-    nextFontStep('base') === 'lg' && nextFontStep('lg') === 'xl'
-      && nextFontStep('xl') === 'base',
-    [nextFontStep('base'), nextFontStep('lg'), nextFontStep('xl')].join('>'));
+  check('36d: nextFontStep walks the ladder and wraps back to normal',
+    nextFontStep('') === 'lg' && nextFontStep('lg') === 'xl'
+      && nextFontStep('xl') === '',
+    [nextFontStep(''), nextFontStep('lg'), nextFontStep('xl')].join('>'));
 
   // --- 36e. palette cell model (executed) -------------------------------
   const palette = buildPaletteCells({
@@ -5343,6 +5343,137 @@ async function main() {
   check('36g: app.js no longer references the retired confirm flow',
     !navApp36.includes('confirmAnswer') && !navApp36.includes('openNavPanel'),
     'retired confirm/nav-panel code survived');
+
+  /* --- 37. Font resize, global theme toggle, smart submit modal (8.6) --- */
+  // The "smart" submit decision is a pure function of the paper + answer slots,
+  // so it is EXECUTED here rather than grep-asserted. The markup/CSS wiring that
+  // cannot run headlessly (no jsdom) is checked statically at the end.
+  step(37, 'font resizing fix, global theme toggle, and smart submit modal');
+
+  const navHtml37 = readFileSync(new URL('../student/index.html', import.meta.url), 'utf8');
+  const navCss37 = readFileSync(new URL('../student/styles.css', import.meta.url), 'utf8');
+  const navApp37 = readFileSync(new URL('../student/app.js', import.meta.url), 'utf8');
+
+  // --- 37a. getUnansweredQuestions (executed) ---------------------------
+  // A mixed paper: MCQ (2), TRUE_FALSE (3 sub-statements), SHORT_ANSWER/ESSAY.
+  const paper37 = [
+    { type: 'MCQ' },                                   // 0 answered
+    { type: 'MCQ' },                                   // 1 UNANSWERED
+    { type: 'TRUE_FALSE', subQuestions: [1, 2, 3] },   // 2 fully answered
+    { type: 'SHORT_ANSWER' },                          // 3 UNANSWERED (blank)
+    { type: 'ESSAY' },                                 // 4 answered
+  ];
+  const answers37 = [
+    { draft: 2 },                 // MCQ chosen (index 0 is a valid choice!)
+    { draft: null },              // MCQ untouched
+    { draft: ['Đ', 'S', 'Đ'] },   // TRUE_FALSE all filled
+    { draft: '   ' },             // whitespace only = NOT an answer
+    { draft: 'Bài làm của em' },  // ESSAY typed
+  ];
+  const unanswered37 = getUnansweredQuestions(paper37, answers37);
+  check('37a: only genuinely unanswered questions are reported',
+    JSON.stringify(unanswered37) === JSON.stringify([{ index: 1, ordinal: 2 }, { index: 3, ordinal: 4 }]),
+    JSON.stringify(unanswered37));
+  check('37a: the list is ordered so result[0] is the SMALLEST unanswered index',
+    unanswered37.length === 2 && unanswered37[0].index === 1
+      && unanswered37.every((u, i, all) => i === 0 || u.index > all[i - 1].index),
+    JSON.stringify(unanswered37.map((u) => u.index)));
+  check('37a: MCQ choice index 0 counts as ANSWERED (not falsy-dropped)',
+    getUnansweredQuestions([{ type: 'MCQ' }], [{ draft: 0 }]).length === 0,
+    'a zero-index MCQ choice was treated as blank');
+  check('37a: a partly-answered TRUE_FALSE counts as ANSWERED (matches the palette)',
+    // Deliberate: `isDraftReady()` — and therefore `countAnswered()` and the
+    // palette — treat ANY filled sub-statement as answered. The submit modal must
+    // use the SAME rule, or it would claim a question is outstanding while the
+    // palette paints it green. (Auto-advance uses the stricter all-filled rule;
+    // that is a navigation concern, not an "answered" one.)
+    getUnansweredQuestions(
+      [{ type: 'TRUE_FALSE', subQuestions: [1, 2, 3] }],
+      [{ draft: ['Đ', '', ''] }],
+    ).length === 0,
+    'a partially-answered TRUE_FALSE was reported as unanswered');
+  check('37a: an UNTOUCHED TRUE_FALSE is unanswered',
+    getUnansweredQuestions(
+      [{ type: 'TRUE_FALSE', subQuestions: [1, 2, 3] }],
+      [{ draft: ['', '', ''] }],
+    ).length === 1,
+    'a blank TRUE_FALSE was treated as done');
+  check('37a: a fully-answered paper yields an empty list',
+    getUnansweredQuestions([{ type: 'MCQ' }], [{ draft: 1 }]).length === 0,
+    'a complete paper reported outstanding questions');
+  check('37a: a missing answer slot counts as unanswered (no crash)',
+    getUnansweredQuestions([{ type: 'MCQ' }, { type: 'ESSAY' }], []).length === 2,
+    'a short answers array was mishandled');
+  check('37a: an empty paper yields an empty list',
+    getUnansweredQuestions([], []).length === 0, 'empty paper produced entries');
+
+  // --- 37b. font cycle + labels (executed) ------------------------------
+  check('37b: the reading scale ladder is 1 / 1.18 / 1.36 in CSS',
+    /:root\[data-font="lg"\][^}]*--reading-scale:\s*1\.18/.test(navCss37)
+      && /:root\[data-font="xl"\][^}]*--reading-scale:\s*1\.36/.test(navCss37)
+      && /--reading-scale:\s*1;/.test(navCss37),
+    'reading-scale ladder missing/incorrect');
+  check('37b: the button label names the CURRENT size (Chuẩn / Lớn / Rất lớn)',
+    FONT_LABELS[''] === 'Chuẩn' && FONT_LABELS.lg === 'Lớn' && FONT_LABELS.xl === 'Rất lớn',
+    JSON.stringify(FONT_LABELS));
+  check('37b: app.js renders the label from the shared FONT_LABELS map',
+    navApp37.includes('FONT_LABELS') && navApp37.includes('Cỡ chữ:'),
+    'app.js does not use the shared font labels');
+  check('37b: the question body AND options both scale with --reading-scale',
+    /\.q-text\s*\{[^}]*font-size:\s*calc\([^)]*var\(--reading-scale\)/s.test(navCss37)
+      && /\.option\s*\{[^}]*font-size:\s*calc\([^}]*var\(--reading-scale\)/s.test(navCss37),
+    'reading text is not scale-driven');
+  check('37b: no desktop media query re-pins .q-text (the original bug)',
+    // Comments are stripped first: the removed override is *described* in a
+    // comment, and matching that prose would be a false positive.
+    !/@media[^{]*\{[^@]*[^@]?\.q-text\s*\{[^}]*font-size:\s*\d+px/.test(
+      navCss37.replace(/\/\*[\s\S]*?\*\//g, ''),
+    ),
+    'a media query still overrides .q-text font-size');
+
+  // --- 37c. global theme toggle on the login view (static) --------------
+  check('37c: index.html ships a global header OUTSIDE #examHeader',
+    navHtml37.includes('id="globalHeader"')
+      && navHtml37.includes('id="btn-global-theme-toggle"')
+      && navHtml37.indexOf('id="globalHeader"') < navHtml37.indexOf('id="examHeader"'),
+    'global theme toggle missing or nested inside the exam header');
+  check('37c: styles.css styles .app-global-header as a top-right shell strip',
+    /\.app-global-header\s*\{[^}]*position:\s*absolute/s.test(navCss37)
+      && /\.app-global-header\s*\{[^}]*justify-content:\s*flex-end/s.test(navCss37),
+    'global header is not positioned top-right');
+  check('37c: app.js wires the global theme toggle to the SHARED cycle',
+    navApp37.includes("$('btn-global-theme-toggle')")
+      && navApp37.includes('paintThemeButton')
+      && (navApp37.match(/paintThemeButton\(/g) || []).length >= 3,
+    'the global toggle is not wired to toggleTheme');
+  check('37c: the login card is theme-aware through the canonical tokens',
+    /\.login__card\s*\{[^}]*background:\s*var\(--surface\)/s.test(navCss37)
+      && /\.field input[^{]*\{[^}]*background:\s*var\(--surface\)/s.test(navCss37),
+    'login surface does not follow the theme');
+
+  // --- 37d. smart submit modal markup + wiring (static) -----------------
+  check('37d: the retired confirm overlay is gone, replaced by #submitModal',
+    !navHtml37.includes('id="confirmOverlay"') && navHtml37.includes('id="submitModal"')
+      && navHtml37.includes('id="submitModalUnansweredList"'),
+    'confirm overlay was not replaced');
+  check('37d: the modal ships both a continue and a confirm action',
+    navHtml37.includes('id="btnModalContinueExam"') && navHtml37.includes('id="btnModalConfirmSubmit"'),
+    'modal action buttons missing');
+  check('37d: styles.css styles the backdrop, card and unanswered tags',
+    navCss37.includes('.modal-backdrop') && navCss37.includes('.submit-modal-card')
+      && navCss37.includes('.unanswered-tag-list') && navCss37.includes('.unanswered-tag'),
+    'smart modal styles missing');
+  check('37d: the modal copy matches the spec (warning title + unanswered count)',
+    navApp37.includes('Chưa hoàn thành bài thi') && navApp37.includes('Hoàn thành bài thi!')
+      && navApp37.includes('câu chưa trả lời'),
+    'modal copy drifted from the spec');
+  check('37d: "Tiếp tục làm bài" jumps to the smallest unanswered index',
+    /goToQuestion\(unanswered\[0\]\.index\)/.test(navApp37),
+    'continue does not jump to unanswered[0]');
+  check('37d: the confirm button submits the sitting (no worker change)',
+    navApp37.includes("$('btnModalConfirmSubmit').addEventListener")
+      && navApp37.includes('submitExam(false)'),
+    'confirm button is not wired to submitExam');
 
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);
