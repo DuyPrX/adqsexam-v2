@@ -25,17 +25,27 @@
     <div id="progressBar" class="progress-bar"></div>
   </div>
 
-  <!-- Exam header: identity + timer + navigation -->
+  <!-- Exam header: identity + timer + high-contrast controls (Phase 8.5) -->
   <header id="examHeader" class="exam-header hidden">
     <div class="exam-header__left">
       <span id="examTitle" class="exam-header__title"></span>
       <span id="qCounter" class="exam-header__counter"></span>
     </div>
-    <div class="exam-header__right">
+    <!-- Phase 8.5 — the old glyph-only `.icon-btn`s rendered muted ink on the page
+         background and vanished on the light theme. These are solid
+         `--surface-btn` buttons with a real border and label text. -->
+    <div class="exam-header__right exam-top-bar__controls">
       <span id="metricFlags" class="metric-flag hidden" title="Câu đã đánh dấu"></span>
-      <span id="timerDisplay" class="timer" role="timer" aria-label="Thời gian còn lại">--:--</span>
-      <button id="themeBtn" type="button" class="icon-btn" aria-label="Đổi giao diện sáng/tối"></button>
-      <button id="navToggleBtn" type="button" class="icon-btn" aria-label="Danh sách câu hỏi" aria-haspopup="dialog"></button>
+      <div id="exam-timer-badge" class="timer-badge" role="timer" aria-label="Thời gian còn lại">
+        <span aria-hidden="true">⏱️</span><span id="timerDisplay">00:00</span>
+      </div>
+      <button type="button" id="btn-font-toggle" class="top-nav-btn"
+              title="Đổi cỡ chữ" aria-label="Đổi cỡ chữ">🔤 <span class="btn-label">Cỡ chữ</span></button>
+      <button type="button" id="btn-theme-toggle" class="top-nav-btn"
+              title="Đổi màu nền" aria-label="Đổi màu nền">🌓 <span class="btn-label">Giao diện</span></button>
+      <button type="button" id="btn-open-palette" class="top-nav-btn"
+              title="Danh sách câu hỏi" aria-haspopup="dialog">📋
+        <span id="palette-progress-label">0/0</span></button>
     </div>
   </header>
 
@@ -224,11 +234,24 @@
     <section id="quizScreen" class="screen quiz hidden" aria-label="Nội dung bài thi">
       <div id="questionHost" class="question-host"></div>
 
-      <div id="actionBar" class="action-bar">
-        <button id="prevBtn" type="button" class="btn btn--ghost">&larr; Câu trước</button>
-        <button id="confirmBtn" type="button" class="btn btn--primary hidden">Xác nhận</button>
-        <button id="nextBtn" type="button" class="btn btn--primary hidden">Câu tiếp theo &rarr;</button>
-      </div>
+      <!-- Phase 8.5 — sticky "thumb zone" navigation bar. Always reachable at the
+           foot of the screen so prev/next/finish never require scrolling back up
+           on a phone. The auto-advance checkbox persists to localStorage. -->
+      <footer id="examBottomBar" class="exam-bottom-bar">
+        <button type="button" id="btn-prev-question" class="btn-nav-prev">⬅ Câu trước</button>
+
+        <label class="auto-advance-label" for="chk-auto-advance">
+          <input type="checkbox" id="chk-auto-advance" checked>
+          <span>Tự chuyển câu</span>
+        </label>
+
+        <button type="button" id="btn-flag-question" class="top-nav-btn"
+                title="Đánh dấu xem lại" aria-pressed="false">🚩
+          <span class="btn-label">Đánh dấu</span></button>
+
+        <button type="button" id="btn-next-question" class="btn-nav-next">Câu tiếp ➡</button>
+        <button type="button" id="btn-finish-exam" class="btn-primary-finish">Nộp bài</button>
+      </footer>
     </section>
 
     <!-- ================= RESULT ================= -->
@@ -348,21 +371,21 @@
   </div>
   <!-- /#view-tree -->
 
-  <!-- ================= NAVIGATION PANEL ================= -->
-  <div id="navBackdrop" class="nav-backdrop hidden"></div>
-  <aside id="navPanel" class="nav-panel" role="dialog" aria-modal="true"
-         aria-labelledby="navTitle" aria-hidden="true">
-    <div class="nav-panel__head">
-      <h2 id="navTitle" class="nav-panel__title">Danh sách câu hỏi</h2>
-      <button id="navCloseBtn" type="button" class="icon-btn" aria-label="Đóng danh sách câu hỏi"></button>
+  <!-- ================= QUESTION PALETTE DRAWER (Phase 8.5) ================= -->
+  <div id="palette-backdrop" class="drawer-backdrop" style="display: none;"></div>
+  <aside id="question-palette-drawer" class="palette-drawer" role="dialog" aria-modal="true"
+         aria-labelledby="paletteTitle" aria-hidden="true">
+    <div class="palette-header">
+      <h3 id="paletteTitle">Danh sách câu hỏi (<span id="palette-answered-count">0</span>/<span id="palette-total-count">0</span>)</h3>
+      <button type="button" id="btn-close-palette" class="btn-close-drawer" aria-label="Đóng danh sách câu hỏi">✕</button>
     </div>
-    <p id="navProgress" class="nav-panel__progress"></p>
-    <ul id="navLegend" class="nav-panel__legend">
-      <li><span class="dot dot--answered"></span>Đã trả lời</li>
-      <li><span class="dot dot--flagged"></span>Đánh dấu</li>
-      <li><span class="dot dot--current"></span>Đang làm</li>
-    </ul>
-    <div id="navGrid" class="nav-grid"></div>
+    <div class="palette-legend">
+      <span><span class="legend-dot is-answered"></span> Đã làm</span>
+      <span><span class="legend-dot is-unanswered"></span> Chưa làm</span>
+      <span><span class="legend-dot is-current"></span> Đang chọn</span>
+      <span><span class="legend-dot is-flagged"></span> Đánh dấu 🚩</span>
+    </div>
+    <div id="palette-grid-container" class="palette-grid"></div>
   </aside>
 
   <!-- ================= BLOCKING OVERLAYS ================= -->

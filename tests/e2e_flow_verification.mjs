@@ -198,6 +198,16 @@ const { shuffledOrder, orderPracticeQuestions, readShuffleToggle } = await impor
   new URL('../student/practice-order.js', import.meta.url).href
 );
 
+// Phase 8.5 Step 36 — the exam navigation + theme/font logic is likewise
+// dependency-free and DOM-free, so the auto-advance policy, the index clamping,
+// the theme/font cycles and the palette cell model are all executed for real.
+const {
+  THEME_CYCLE, FONT_CYCLE, AUTO_ADVANCE_MS, AUTO_ADVANCE_KEY,
+  normalizeTheme, nextTheme, nextFontStep, clampQuestionIndex,
+  shouldAutoAdvance, readAutoAdvancePreference, writeAutoAdvancePreference,
+  buildPaletteCells,
+} = await import(new URL('../student/exam-nav.js', import.meta.url).href);
+
 // Phase 7.2 Step 29 — the Tree of Knowledge engine. `computeTreeState()` and the
 // pixel-layout/hit-test helpers are pure and DOM-free, so the suite exercises the
 // SAME module the student SPA ships. `TreeRenderer` is additionally driven through
@@ -5108,6 +5118,208 @@ async function main() {
   const teamClassDelete = await teacher.from('classes').delete().eq('id', teamClassId);
   check('35h: the arena class deletes once its session is gone',
     !teamClassDelete.error, teamClassDelete.error?.message);
+
+  /* --- 36. Exam navigation, auto-advance, high-contrast themes (8.5) --- */
+  // The navigation/theme logic lives in `student/exam-nav.js`, a dependency-free
+  // module the SPA imports — so these are REAL executions of the shipped code,
+  // not assertions about its source text. The markup/contrast assertions that
+  // cannot be executed headlessly (no jsdom in the toolchain) are static checks
+  // against index.html/styles.css at the end.
+  step(36, 'exam navigation bar, auto-advance, high-contrast themes, palette drawer');
+
+  // --- 36a. markup: the new chrome exists -------------------------------
+  const navHtml36 = readFileSync(new URL('../student/index.html', import.meta.url), 'utf8');
+  const navCss36 = readFileSync(new URL('../student/styles.css', import.meta.url), 'utf8');
+
+  check('36a: index.html ships the auto-advance checkbox and the bottom nav buttons',
+    navHtml36.includes('id="chk-auto-advance"')
+      && navHtml36.includes('id="btn-prev-question"')
+      && navHtml36.includes('id="btn-next-question"')
+      && navHtml36.includes('id="btn-finish-exam"'),
+    'bottom navigation markup missing');
+  check('36a: index.html ships the palette trigger + drawer',
+    navHtml36.includes('id="btn-open-palette"')
+      && navHtml36.includes('id="question-palette-drawer"')
+      && navHtml36.includes('id="palette-grid-container"'),
+    'palette drawer markup missing');
+  check('36a: index.html ships the high-contrast theme + font buttons',
+    navHtml36.includes('id="btn-theme-toggle"') && navHtml36.includes('id="btn-font-toggle"'),
+    'theme/font buttons missing');
+  check('36a: the old invisible icon-btn controls are gone',
+    !navHtml36.includes('id="themeBtn"') && !navHtml36.includes('id="navToggleBtn"')
+      && !navHtml36.includes('id="navPanel"'),
+    'a legacy control survived');
+  check('36a: the retired confirm button is gone from the action bar',
+    !navHtml36.includes('id="confirmBtn"') && !navHtml36.includes('id="actionBar"'),
+    'the draft/confirm action bar survived');
+
+  // --- 36b. auto-advance policy (executed) ------------------------------
+  check('36b: the confirmation beat is the specified 280ms',
+    AUTO_ADVANCE_MS === 280, String(AUTO_ADVANCE_MS));
+
+  const mcqAnswer = { draft: 1 };
+  check('36b: an MCQ selection auto-advances when enabled and not on the last question',
+    shouldAutoAdvance({ enabled: true, currentIndex: 0, total: 5, type: 'MCQ', answer: mcqAnswer }) === true,
+    'MCQ should advance');
+  check('36b: auto-advance is REFUSED on the last question (nowhere to go)',
+    shouldAutoAdvance({ enabled: true, currentIndex: 4, total: 5, type: 'MCQ', answer: mcqAnswer }) === false,
+    'last question advanced');
+  check('36b: auto-advance is REFUSED when the student disabled the toggle',
+    shouldAutoAdvance({ enabled: false, currentIndex: 0, total: 5, type: 'MCQ', answer: mcqAnswer }) === false,
+    'disabled toggle still advanced');
+  check('36b: re-tapping the SAME option does not advance',
+    shouldAutoAdvance({ enabled: true, currentIndex: 0, total: 5, type: 'MCQ', answer: mcqAnswer, changed: false }) === false,
+    'unchanged selection advanced');
+  check('36b: a text (ESSAY) answer NEVER auto-advances mid-typing',
+    shouldAutoAdvance({ enabled: true, currentIndex: 0, total: 5, type: 'ESSAY', answer: { draft: 'abc' } }) === false,
+    'essay advanced while typing');
+  check('36b: a partly-answered TRUE_FALSE does NOT advance',
+    shouldAutoAdvance({
+      enabled: true, currentIndex: 0, total: 5, type: 'TRUE_FALSE',
+      answer: { draft: ['Đ', '', 'S', ''] },
+    }) === false,
+    'incomplete TRUE_FALSE advanced');
+  check('36b: a fully-answered TRUE_FALSE advances',
+    shouldAutoAdvance({
+      enabled: true, currentIndex: 0, total: 5, type: 'TRUE_FALSE',
+      answer: { draft: ['Đ', 'S', 'S', 'Đ'] },
+    }) === true,
+    'complete TRUE_FALSE did not advance');
+
+  // The preference round-trips through a storage stub, defaulting to ON.
+  const storageStub = (() => {
+    const map = new Map();
+    return {
+      getItem: (key) => (map.has(key) ? map.get(key) : null),
+      setItem: (key, value) => map.set(key, String(value)),
+      raw: map,
+    };
+  })();
+  check('36b: auto-advance defaults to ON when nothing is stored',
+    readAutoAdvancePreference(storageStub) === true, 'default was OFF');
+  writeAutoAdvancePreference(storageStub, false);
+  check('36b: the OFF preference round-trips through storage',
+    readAutoAdvancePreference(storageStub) === false
+      && storageStub.raw.get(AUTO_ADVANCE_KEY) === 'false',
+    JSON.stringify(storageStub.raw.get(AUTO_ADVANCE_KEY)));
+  writeAutoAdvancePreference(storageStub, true);
+  check('36b: the ON preference round-trips through storage',
+    readAutoAdvancePreference(storageStub) === true, 'ON did not round-trip');
+  check('36b: a storage that THROWS still yields the safe ON default',
+    readAutoAdvancePreference({ getItem: () => { throw new Error('denied'); } }) === true,
+    'a throwing storage disabled auto-advance');
+
+  // --- 36c. index clamping (executed) -----------------------------------
+  check('36c: clampQuestionIndex pins out-of-range input into 0..N-1',
+    clampQuestionIndex(-5, 10) === 0 && clampQuestionIndex(99, 10) === 9
+      && clampQuestionIndex(3, 10) === 3,
+    [clampQuestionIndex(-5, 10), clampQuestionIndex(99, 10), clampQuestionIndex(3, 10)].join(','));
+  check('36c: a zero-question exam clamps to 0 rather than a negative index',
+    clampQuestionIndex(4, 0) === 0 && clampQuestionIndex(0, 0) === 0,
+    String(clampQuestionIndex(4, 0)));
+  check('36c: non-numeric input clamps to 0',
+    clampQuestionIndex('abc', 10) === 0 && clampQuestionIndex(null, 10) === 0,
+    String(clampQuestionIndex('abc', 10)));
+
+  // --- 36d. theme + font cycles (executed) ------------------------------
+  check('36d: the theme cycle is exactly light -> dark -> sepia',
+    JSON.stringify(THEME_CYCLE) === JSON.stringify(['light', 'dark', 'sepia']),
+    JSON.stringify(THEME_CYCLE));
+  check('36d: nextTheme walks the full cycle and wraps back to light',
+    nextTheme('light') === 'dark' && nextTheme('dark') === 'sepia'
+      && nextTheme('sepia') === 'light',
+    [nextTheme('light'), nextTheme('dark'), nextTheme('sepia')].join('>'));
+  check('36d: normalizeTheme keeps an explicit choice and falls back to the OS',
+    normalizeTheme('sepia', false) === 'sepia'
+      && normalizeTheme(null, true) === 'dark'
+      && normalizeTheme(undefined, false) === 'light',
+    'normalizeTheme misbehaved');
+  check('36d: the font ladder is base -> lg -> xl',
+    JSON.stringify(FONT_CYCLE) === JSON.stringify(['base', 'lg', 'xl']),
+    JSON.stringify(FONT_CYCLE));
+  check('36d: nextFontStep walks the ladder and wraps back to base',
+    nextFontStep('base') === 'lg' && nextFontStep('lg') === 'xl'
+      && nextFontStep('xl') === 'base',
+    [nextFontStep('base'), nextFontStep('lg'), nextFontStep('xl')].join('>'));
+
+  // --- 36e. palette cell model (executed) -------------------------------
+  const palette = buildPaletteCells({
+    total: 6,
+    answered: [true, false, true, false, true, false],
+    flags: new Set([1, 2]),
+    currentIndex: 2,
+  });
+  check('36e: the palette renders exactly one cell per question (N = 6)',
+    palette.length === 6, String(palette.length));
+  check('36e: answered indices receive the answered role',
+    palette[0].answered === true && palette[1].answered === false
+      && palette[2].answered === true,
+    JSON.stringify(palette.map((c) => c.answered)));
+  check('36e: flagged indices receive the flagged role',
+    palette[1].flagged === true && palette[2].flagged === true
+      && palette[0].flagged === false,
+    JSON.stringify(palette.map((c) => c.flagged)));
+  check('36e: exactly one cell is the current question',
+    palette.filter((c) => c.current).length === 1 && palette[2].current === true,
+    JSON.stringify(palette.map((c) => c.current)));
+  check('36e: answered + flagged can co-exist on one cell',
+    palette[2].answered === true && palette[2].flagged === true,
+    JSON.stringify(palette[2]));
+  check('36e: the header count is the number ANSWERED, not the cell count',
+    palette.answeredCount === 3, String(palette.answeredCount));
+  check('36e: an empty exam yields an empty grid and a zero count',
+    buildPaletteCells({ total: 0, answered: [], flags: [], currentIndex: 0 }).length === 0,
+    'empty exam produced cells');
+
+  // --- 36f. contrast tokens (static — no CSS engine headless) -----------
+  // Every control must declare an EXPLICIT, non-transparent surface + border, and
+  // the three themes must each define the canonical button tokens. This is the
+  // regression guard for the original bug: buttons that rendered invisible.
+  check('36f: styles.css defines the canonical button surface tokens',
+    navCss36.includes('--surface-btn:') && navCss36.includes('--surface-btn-hover:')
+      && navCss36.includes('--border-color:') && navCss36.includes('--border-focus:'),
+    'canonical tokens missing');
+  check('36f: all three theme palettes define --surface-btn',
+    (navCss36.match(/--surface-btn:/g) || []).length >= 4,
+    String((navCss36.match(/--surface-btn:/g) || []).length));
+  check('36f: the sepia theme is a real palette (warm sand / amber)',
+    navCss36.includes('[data-theme="sepia"]') && navCss36.includes('--bg-app: #fbf0d9'),
+    'sepia palette missing');
+  check('36f: the font ladder is expressed as data-font CSS rules',
+    navCss36.includes('[data-font="lg"]') && navCss36.includes('[data-font="xl"]'),
+    'font-size rules missing');
+  check('36f: top-nav-btn uses an explicit surface + border, not a transparent fill',
+    /\.top-nav-btn\s*\{[^}]*background:\s*var\(--surface-btn\)/s.test(navCss36)
+      && /\.top-nav-btn\s*\{[^}]*border:\s*1px solid var\(--border-color\)/s.test(navCss36),
+    'top-nav-btn contrast tokens missing');
+  check('36f: the bottom nav bar and its buttons are styled',
+    navCss36.includes('.exam-bottom-bar') && navCss36.includes('.btn-nav-prev')
+      && navCss36.includes('.btn-nav-next') && navCss36.includes('.btn-primary-finish'),
+    'bottom bar styles missing');
+  check('36f: the palette drawer + cell status styles exist',
+    navCss36.includes('.palette-drawer') && navCss36.includes('.palette-cell')
+      && navCss36.includes('.palette-cell.is-answered')
+      && navCss36.includes('.palette-cell.is-current')
+      && navCss36.includes('.palette-cell.is-flagged'),
+    'palette styles missing');
+
+  // --- 36g. the SPA is wired to the nav module (static) -----------------
+  const navApp36 = readFileSync(new URL('../student/app.js', import.meta.url), 'utf8');
+  check('36g: app.js imports the shared navigation module (no duplicated logic)',
+    navApp36.includes("from './exam-nav.js'")
+      && navApp36.includes('shouldAutoAdvance')
+      && navApp36.includes('clampQuestionIndex')
+      && navApp36.includes('buildPaletteCells'),
+    'SPA does not use the shared module');
+  check('36g: app.js wires every bottom-bar + palette control',
+    ['btn-open-palette', 'btn-close-palette', 'palette-backdrop', 'btn-theme-toggle',
+     'btn-font-toggle', 'btn-prev-question', 'btn-next-question', 'btn-flag-question',
+     'btn-finish-exam', 'chk-auto-advance']
+      .every((id) => navApp36.includes(id)),
+    'a control is not wired');
+  check('36g: app.js no longer references the retired confirm flow',
+    !navApp36.includes('confirmAnswer') && !navApp36.includes('openNavPanel'),
+    'retired confirm/nav-panel code survived');
 
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);

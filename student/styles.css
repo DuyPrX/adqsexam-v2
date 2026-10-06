@@ -3,77 +3,151 @@
    Design tokens + responsive layout + dark/light theme + high-contrast controls.
    ========================================================================== */
 
+/* Phase 8.5 — CANONICAL design tokens.
+   These are the source of truth. Every legacy token below is an ALIAS so the
+   pre-existing rules keep working unchanged while every control gains a real
+   surface + border. `--surface-btn` / `--border-color` are deliberately opaque:
+   the old top-bar buttons used `--surface` on `--bg`, which is a ~1.02 contrast
+   ratio on the light theme — i.e. invisible. See section 2 for the fix. */
 :root {
-  --bg: #f1f5f9;
-  --surface: #ffffff;
-  --surface-2: #f8fafc;
-  --border: #e2e8f0;
-  --border-strong: #cbd5e1;
-  --text: #0f172a;
+  /* surfaces */
+  --bg-app: #f8fafc;
+  --surface-card: #ffffff;
+  --surface-btn: #f1f5f9;
+  --surface-btn-hover: #e2e8f0;
+  /* ink */
+  --text-main: #0f172a;
   --text-muted: #64748b;
-  --text-faint: #94a3b8;
-  --accent: #4f46e5;
-  --accent-weak: #eef2ff;
-  --accent-text: #4338ca;
-  --ok: #059669;
-  --ok-weak: #ecfdf5;
-  --warn: #d97706;
-  --warn-weak: #fffbeb;
+  /* lines */
+  --border-color: #cbd5e1;
+  --border-focus: #3b82f6;
+  /* brand */
+  --primary: #2563eb;
+  --primary-hover: #1d4ed8;
+  --primary-light: #dbeafe;
+  /* status */
+  --success: #16a34a;
+  --success-light: #dcfce7;
+  --warning: #d97706;
+  --warning-light: #fef3c7;
   --danger: #dc2626;
   --danger-weak: #fef2f2;
+  /* elevation */
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+  /* typography — `--reading-scale` multiplies the exam reading text only, so
+     enlarging the font never breaks the chrome layout. */
+  --font-base: 16px;
+  --reading-scale: 1;
+  /* geometry */
   --radius: 12px;
   --radius-sm: 8px;
-  --shadow: 0 1px 2px rgba(15, 23, 42, .06), 0 4px 16px rgba(15, 23, 42, .06);
+  --shadow: var(--shadow-sm);
   --shadow-lg: 0 8px 40px rgba(15, 23, 42, .18);
-  --focus: 0 0 0 3px rgba(79, 70, 229, .35);
+  --focus: 0 0 0 3px color-mix(in srgb, var(--border-focus) 40%, transparent);
   --header-h: 60px;
+
+  /* ---- legacy aliases (do not add new uses) ---- */
+  --bg: var(--bg-app);
+  --surface: var(--surface-card);
+  --surface-2: var(--surface-btn);
+  --border: var(--border-color);
+  --border-strong: var(--border-color);
+  --text: var(--text-main);
+  --text-faint: var(--text-muted);
+  --accent: var(--primary);
+  --accent-weak: var(--primary-light);
+  --accent-text: var(--primary-hover);
+  --ok: var(--success);
+  --ok-weak: var(--success-light);
+  --warn: var(--warning);
+  --warn-weak: var(--warning-light);
 }
 
+/* Phase 8.5 — Dark (Zinc/Navy). Every pair below clears WCAG AA on its own
+   surface: e.g. --text-main #f8fafc on --surface-card #131b2e = ~15:1, and
+   --text-muted #94a3b8 on the same = ~6.4:1. */
 :root[data-theme="dark"] {
-  --bg: #070b14;
-  --surface: #0f172a;
-  --surface-2: #131c31;
-  --border: #1e293b;
-  --border-strong: #334155;
-  --text: #f1f5f9;
+  --bg-app: #090d16;
+  --surface-card: #131b2e;
+  --surface-btn: #1e293b;
+  --surface-btn-hover: #334155;
+  --text-main: #f8fafc;
   --text-muted: #94a3b8;
-  --text-faint: #64748b;
-  --accent: #818cf8;
-  --accent-weak: #1e1b4b;
-  --accent-text: #c7d2fe;
-  --ok: #34d399;
-  --ok-weak: #064e3b;
-  --warn: #fbbf24;
-  --warn-weak: #78350f;
+  --border-color: #334155;
+  --border-focus: #60a5fa;
+  --primary: #3b82f6;
+  --primary-hover: #60a5fa;
+  --primary-light: #1e3a8a;
+  --success: #22c55e;
+  --success-light: #14532d;
+  --warning: #f59e0b;
+  --warning-light: #78350f;
   --danger: #f87171;
   --danger-weak: #7f1d1d;
   --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 4px 18px rgba(0, 0, 0, .35);
   --shadow-lg: 0 12px 48px rgba(0, 0, 0, .6);
-  --focus: 0 0 0 3px rgba(129, 140, 248, .45);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, .4);
+  --shadow-md: 0 4px 18px rgba(0, 0, 0, .35);
 }
 
+/* Phase 8.5 — Eye-Care Sepia (Warm Sand/Amber). Low blue-light: a warm sand
+   ground with amber accents; --text-main #451a03 on --surface-card #f4e5c3 is
+   ~11:1, so it stays comfortable for long reading sessions. */
+:root[data-theme="sepia"] {
+  --bg-app: #fbf0d9;
+  --surface-card: #f4e5c3;
+  --surface-btn: #ebd5a8;
+  --surface-btn-hover: #dfc491;
+  --text-main: #451a03;
+  --text-muted: #78350f;
+  --border-color: #d7b97e;
+  --border-focus: #b45309;
+  --primary: #b45309;
+  --primary-hover: #92400e;
+  --primary-light: #fde68a;
+  --success: #15803d;
+  --success-light: #bbf7d0;
+  --warning: #b45309;
+  --warning-light: #fef3c7;
+  --danger: #b91c1c;
+  --danger-weak: #fee2e2;
+  --shadow: 0 1px 2px rgba(69, 26, 3, .08), 0 4px 16px rgba(69, 26, 3, .10);
+  --shadow-lg: 0 8px 40px rgba(69, 26, 3, .22);
+  --shadow-sm: 0 1px 2px rgba(69, 26, 3, .08);
+  --shadow-md: 0 4px 16px rgba(69, 26, 3, .10);
+}
+
+/* Phase 8.5 — font-size ladder. The exam reading text scales; the chrome does
+   not, so a 20px setting never overflows the top bar or the bottom nav. */
+:root[data-font="lg"] { --font-base: 18px; --reading-scale: 1.125; }
+:root[data-font="xl"] { --font-base: 20px; --reading-scale: 1.25; }
+
+/* OS dark mode only wins when the student has NOT chosen a theme. Sepia is an
+   explicit choice and must survive a dark-mode OS. */
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --bg: #070b14;
-    --surface: #0f172a;
-    --surface-2: #131c31;
-    --border: #1e293b;
-    --border-strong: #334155;
-    --text: #f1f5f9;
+  :root:not([data-theme="light"]):not([data-theme="sepia"]) {
+    --bg-app: #090d16;
+    --surface-card: #131b2e;
+    --surface-btn: #1e293b;
+    --surface-btn-hover: #334155;
+    --text-main: #f8fafc;
     --text-muted: #94a3b8;
-    --text-faint: #64748b;
-    --accent: #818cf8;
-    --accent-weak: #1e1b4b;
-    --accent-text: #c7d2fe;
-    --ok: #34d399;
-    --ok-weak: #064e3b;
-    --warn: #fbbf24;
-    --warn-weak: #78350f;
+    --border-color: #334155;
+    --border-focus: #60a5fa;
+    --primary: #3b82f6;
+    --primary-hover: #60a5fa;
+    --primary-light: #1e3a8a;
+    --success: #22c55e;
+    --success-light: #14532d;
+    --warning: #f59e0b;
+    --warning-light: #78350f;
     --danger: #f87171;
     --danger-weak: #7f1d1d;
     --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 4px 18px rgba(0, 0, 0, .35);
     --shadow-lg: 0 12px 48px rgba(0, 0, 0, .6);
-    --focus: 0 0 0 3px rgba(129, 140, 248, .45);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, .4);
+    --shadow-md: 0 4px 18px rgba(0, 0, 0, .35);
   }
 }
 
@@ -170,6 +244,40 @@ body {
   cursor: pointer; transition: background .15s, color .15s, border-color .15s;
 }
 .icon-btn:hover { background: var(--surface-2); color: var(--text); border-color: var(--border-strong); }
+
+/* Phase 8.5 — high-contrast text button for the exam top bar. The old `.icon-btn`
+   glyph-only controls rendered `--text-muted` on `--surface`; on the light theme
+   that is roughly a 1.02 ratio against the page, so the icons "disappeared".
+   These carry a real `--surface-btn` fill, a visible `--border-color` stroke and
+   `--text-main` ink (>7:1 in every theme). */
+.top-nav-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 8px 12px; border-radius: var(--radius-sm);
+  background: var(--surface-btn);
+  color: var(--text-main);
+  border: 1px solid var(--border-color);
+  font-family: inherit; font-size: 14px; font-weight: 600;
+  cursor: pointer; transition: background .15s, border-color .15s, color .15s;
+}
+.top-nav-btn:hover { background: var(--surface-btn-hover); border-color: var(--border-focus); }
+.top-nav-btn:disabled { opacity: .55; cursor: not-allowed; }
+.top-nav-btn[aria-pressed="true"] {
+  background: var(--primary-light); color: var(--primary-hover); border-color: var(--primary);
+}
+.btn-label { white-space: nowrap; }
+/* Below ~560px the labels crowd the timer; the glyph still carries the meaning. */
+@media (max-width: 560px) { .top-nav-btn .btn-label { display: none; } }
+
+/* Phase 8.5 — exam control cluster in the header. */
+.exam-top-bar__controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.timer-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-variant-numeric: tabular-nums; font-weight: 700; font-size: 15px;
+  padding: 6px 10px; border-radius: var(--radius-sm);
+  background: var(--surface-btn); border: 1px solid var(--border-color); color: var(--text-main);
+  min-width: 74px; justify-content: center;
+}
+.timer-badge.is-critical { color: var(--danger); border-color: var(--danger); background: var(--danger-weak); }
 
 /* ---------- login ---------- */
 .login { display: flex; justify-content: center; padding-top: 24px; }
@@ -498,7 +606,11 @@ body {
 .flag-btn:hover { background: var(--surface-2); color: var(--text); }
 .flag-btn.is-on { background: var(--warn-weak); color: var(--warn); border-color: var(--warn); }
 
-.q-text { margin: 0; font-size: 19px; font-weight: 700; line-height: 1.65; white-space: pre-wrap; }
+.q-text {
+  margin: 0; line-height: 1.65; white-space: pre-wrap;
+  /* Phase 8.5 — scaled by the font-size control (--reading-scale). */
+  font-size: calc(19px * var(--reading-scale)); font-weight: 700;
+}
 .q-hint { margin: 10px 0 0; font-size: 12.5px; color: var(--text-faint); }
 
 /* options */
@@ -522,6 +634,15 @@ body {
 .option__label { flex: 1 1 auto; min-width: 0; }
 .option[aria-checked="true"] { border-color: var(--accent); background: var(--accent-weak); }
 .option[aria-checked="true"] .option__key { background: var(--accent); color: #fff; }
+/* Phase 8.5 — the auto-advance confirmation beat. The instant highlight is a
+   distinct `is-flash` ring, so a student sees the tap register before the 280ms
+   jump; the class is removed as soon as the next question paints. */
+.option.is-flash { animation: optionFlash .28s ease-out; }
+@keyframes optionFlash {
+  0%   { transform: scale(1); }
+  45%  { transform: scale(1.02); box-shadow: 0 0 0 3px var(--primary-light); }
+  100% { transform: scale(1); }
+}
 
 /* true/false */
 .tf-list { display: grid; gap: 10px; margin-top: 20px; }
@@ -552,61 +673,103 @@ body {
 .text-answer--essay textarea { min-height: 200px; }
 .text-answer__note { margin: 8px 0 0; font-size: 12.5px; color: var(--warn); font-weight: 600; }
 
-/* locked state */
-.locked-note {
-  margin-top: 14px; padding: 10px 14px;
-  background: var(--accent-weak); color: var(--accent-text);
-  border: 1px solid var(--accent); border-radius: var(--radius-sm);
-  font-size: 13px; font-weight: 700;
-}
-
-/* ---------- action bar ---------- */
-.action-bar {
-  position: sticky; bottom: 0;
+/* Phase 8.5 — sticky bottom navigation ("thumb zone"). Always reachable at the
+   foot of the quiz screen so prev/next/finish never require scrolling back up on
+   a phone. Full-bleed rather than inset, so the buttons sit in the screen's
+   corners where the thumbs actually are. */
+.exam-bottom-bar {
+  position: sticky; bottom: 0; z-index: 50;
   display: flex; align-items: center; gap: 10px;
-  padding: 14px 0;
-  margin-top: 18px;
-  background: linear-gradient(to top, var(--bg) 70%, transparent);
+  padding: 12px 16px; margin: 18px -16px 0;
+  background: var(--surface-card);
+  border-top: 1px solid var(--border-color);
+  box-shadow: 0 -4px 6px -1px rgb(0 0 0 / 0.05);
+  flex-wrap: wrap;
 }
-.action-bar .btn--primary { flex: 1 1 auto; }
-
-/* ---------- navigation panel ---------- */
-.nav-backdrop { position: fixed; inset: 0; background: rgba(2, 6, 23, .5); z-index: 70; }
-.nav-panel {
-  position: fixed; inset: 0 0 0 auto; width: min(320px, 88vw); z-index: 80;
-  display: flex; flex-direction: column;
-  background: var(--surface); border-left: 1px solid var(--border);
-  box-shadow: var(--shadow-lg);
-  transform: translateX(100%);
-  transition: transform .26s cubic-bezier(.4, 0, .2, 1);
+.btn-nav-prev, .btn-nav-next, .btn-primary-finish {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 10px 16px; border-radius: var(--radius-sm);
+  font-family: inherit; font-size: 14px; font-weight: 700;
+  cursor: pointer; transition: background .15s, border-color .15s, filter .15s;
 }
-.nav-panel.is-open { transform: translateX(0); }
-.nav-panel__head { display: flex; align-items: center; justify-content: space-between; gap: 10px;
-  padding: 16px; border-bottom: 1px solid var(--border); }
-.nav-panel__title { margin: 0; font-size: 15px; font-weight: 800; }
-.nav-panel__progress { margin: 12px 16px 0; font-size: 12.5px; color: var(--text-muted); font-weight: 600; }
-.nav-panel__legend { display: flex; flex-wrap: wrap; gap: 12px; list-style: none; margin: 10px 16px 0; padding: 0;
-  font-size: 11.5px; color: var(--text-muted); font-weight: 600; }
-.nav-panel__legend li { display: inline-flex; align-items: center; gap: 6px; }
-.dot { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
-.dot--answered { background: var(--accent); }
-.dot--flagged { background: var(--warn); }
-.dot--current { outline: 2px solid var(--accent); outline-offset: 1px; }
+.btn-nav-prev { min-width: 110px; background: var(--surface-btn); color: var(--text-main); border: 1px solid var(--border-color); }
+.btn-nav-prev:hover:not(:disabled) { background: var(--surface-btn-hover); border-color: var(--border-focus); }
+.btn-nav-prev:disabled { opacity: .5; cursor: not-allowed; }
+.btn-nav-next { min-width: 110px; background: var(--primary); color: #fff; border: 1px solid var(--primary); }
+.btn-nav-next:hover:not(:disabled) { background: var(--primary-hover); }
+.btn-primary-finish {
+  margin-left: auto; background: var(--success); color: #fff; border: 1px solid var(--success);
+}
+.btn-primary-finish:hover:not(:disabled) { filter: brightness(1.08); }
+/* On the last question the "next" slot is hidden and the finish button takes the
+   freed space, so the primary action is always the widest target. */
+.exam-bottom-bar.is-last .btn-nav-next { display: none; }
+.exam-bottom-bar.is-last .btn-primary-finish { flex: 1 1 auto; }
+.auto-advance-label {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 13px; font-weight: 600; color: var(--text-muted);
+  cursor: pointer; user-select: none; white-space: nowrap;
+}
+.auto-advance-label input { width: 16px; height: 16px; accent-color: var(--primary); cursor: pointer; }
+@media (max-width: 640px) {
+  .exam-bottom-bar { gap: 8px; padding: 10px 12px; }
+  .btn-nav-prev, .btn-nav-next { min-width: 0; padding: 10px 12px; }
+  .auto-advance-label { order: 10; font-size: 12px; }
+  #btnFlagQuestion .btn-label { display: none; }
+}
 
-.nav-grid { flex: 1 1 auto; overflow-y: auto; padding: 16px;
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(42px, 1fr)); gap: 8px; align-content: start; }
-.nav-grid__item {
-  aspect-ratio: 1; display: grid; place-items: center;
-  background: var(--surface-2); color: var(--text-muted);
-  border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
-  font-family: inherit; font-size: 13px; font-weight: 700; cursor: pointer;
+/* Phase 8.5 — question palette drawer (bottom sheet). */
+.drawer-backdrop { position: fixed; inset: 0; background: rgba(2, 6, 23, .5); z-index: 998; }
+.palette-drawer {
+  position: fixed; inset: auto 0 0 0; z-index: 999;
+  max-height: 75vh; overflow-y: auto;
+  padding: 20px 20px calc(20px + env(safe-area-inset-bottom, 0px));
+  background: var(--surface-card);
+  border-top: 2px solid var(--border-focus);
+  border-radius: 20px 20px 0 0;
+  box-shadow: 0 -10px 25px -5px rgb(0 0 0 / 0.2);
+  transform: translateY(100%);
+  transition: transform .3s cubic-bezier(.4, 0, .2, 1);
+}
+.palette-drawer.is-open { transform: translateY(0); }
+.palette-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.palette-header h3 { margin: 0; font-size: 15px; font-weight: 800; color: var(--text-main); }
+.btn-close-drawer {
+  width: 34px; height: 34px; display: grid; place-items: center; padding: 0;
+  background: var(--surface-btn); color: var(--text-main);
+  border: 1px solid var(--border-color); border-radius: var(--radius-sm);
+  font-size: 16px; cursor: pointer;
+}
+.btn-close-drawer:hover { background: var(--surface-btn-hover); }
+.palette-legend {
+  display: flex; flex-wrap: wrap; gap: 14px; margin-top: 12px;
+  font-size: 11.5px; font-weight: 600; color: var(--text-muted);
+}
+.palette-legend > span { display: inline-flex; align-items: center; gap: 6px; }
+.legend-dot { width: 12px; height: 12px; border-radius: 4px; display: inline-block; border: 1px solid var(--border-color); }
+.legend-dot.is-answered { background: var(--success); border-color: var(--success); }
+.legend-dot.is-unanswered { background: var(--surface-btn); }
+.legend-dot.is-current { outline: 2px solid var(--primary); outline-offset: 1px; background: var(--surface-btn); }
+.legend-dot.is-flagged { background: var(--warning); border-color: var(--warning); }
+.palette-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(44px, 1fr));
+  gap: 8px; margin-top: 16px;
+}
+.palette-cell {
+  position: relative; aspect-ratio: 1;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0; border-radius: var(--radius-sm);
+  font-family: inherit; font-size: 14px; font-weight: 700;
+  background: var(--surface-btn); color: var(--text-muted);
+  border: 1px solid var(--border-color); cursor: pointer;
   transition: background .15s, border-color .15s, color .15s;
 }
-.nav-grid__item:hover { border-color: var(--accent); }
-.nav-grid__item.is-answered { background: var(--accent-weak); color: var(--accent-text); border-color: var(--accent); }
-.nav-grid__item.is-flagged  { background: var(--warn-weak);   color: var(--warn);        border-color: var(--warn); }
-.nav-grid__item.is-current  { outline: 2px solid var(--accent); outline-offset: 1px; }
-.nav-grid__item.is-answered.is-flagged { background: var(--warn-weak); color: var(--warn); }
+.palette-cell:hover { border-color: var(--border-focus); }
+.palette-cell.is-answered { background: var(--success); color: #fff; border-color: var(--success); }
+.palette-cell.is-current { border: 2px solid var(--primary); outline: 2px solid var(--primary-light); }
+.palette-cell.is-flagged::after {
+  content: "🚩"; position: absolute; top: -8px; right: -6px; font-size: 12px; line-height: 1;
+}
 
 /* ---------- overlays ---------- */
 .overlay {

@@ -15,6 +15,11 @@
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import {
+  AUTO_ADVANCE_MS, FONT_CYCLE, FONT_KEY, THEME_KEY,
+  buildPaletteCells, clampQuestionIndex, nextFontStep, nextTheme, normalizeTheme,
+  readAutoAdvancePreference, shouldAutoAdvance, writeAutoAdvancePreference,
+} from './exam-nav.js';
 import { orderPracticeQuestions, readShuffleToggle, shuffledOrder } from './practice-order.js';
 import { TreeRenderer, clampTeamNumber, computeTreeState, getTeamSeed, hitTestFruits } from './tree-engine.js';
 import { countTreeWords, normalizeAnswerText, treeWordCounterLabel } from './tree-words.js';
@@ -27,7 +32,6 @@ import {
    ===================================================================== */
 
 const STORAGE_KEY = 'adqs_student_session_v2';
-const THEME_KEY = 'adqs_student_theme';
 const HEARTBEAT_MS = 20_000;
 const RING_CIRCUMFERENCE = 540;          // 2 * PI * r(86)
 const MAX_TEXT_LENGTH = 20_000;
@@ -135,9 +139,15 @@ const state = {
   // exam
   exam: null,
   questions: [],
-  answers: [],              // per-question draft + confirmed flag
+  answers: [],              // per-question draft (the answer itself)
   flags: new Set(),
   currentIndex: 0,
+  /**
+   * Phase 8.5 — the index whose selection should play the `is-flash` confirmation
+   * animation on the next paint (set by selectMcq/selectTrueFalse, cleared on
+   * navigation). Null = nothing to flash.
+   */
+  flashIndex: null,
   // timing
   durationSeconds: 0,
   startedAt: null,
@@ -317,33 +327,82 @@ function rpcMessage(code, fallback) {
 }
 
 /* =====================================================================
-   Theme
+   Theme + font size (Phase 8.5)
    ===================================================================== */
+
+/** OS dark-mode preference, resolved against the explicit theme choice. */
+function prefersDark() {
+  return window.matchMedia('(prefers-color-scheme: dark)').matches;
+}
+
+/** Current theme, resolving "no explicit choice" against the OS preference. */
+function currentTheme() {
+  return normalizeTheme(document.documentElement.getAttribute('data-theme'), prefersDark());
+}
 
 function initTheme() {
   let saved = null;
   try { saved = localStorage.getItem(THEME_KEY); } catch { /* ignore */ }
-  if (saved === 'light' || saved === 'dark') {
+  if (saved === 'light' || saved === 'dark' || saved === 'sepia') {
     document.documentElement.setAttribute('data-theme', saved);
   }
   renderThemeIcon();
 }
 
+/** Cycles light -> dark -> sepia -> light and persists the choice. */
 function toggleTheme() {
-  const root = document.documentElement;
-  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-  const current = root.getAttribute('data-theme') || (prefersDark ? 'dark' : 'light');
-  const next = current === 'dark' ? 'light' : 'dark';
-  root.setAttribute('data-theme', next);
+  const next = nextTheme(currentTheme());
+  document.documentElement.setAttribute('data-theme', next);
   try { localStorage.setItem(THEME_KEY, next); } catch { /* ignore */ }
   renderThemeIcon();
 }
 
+/** Reflects the active theme on the button (glyph + accessible name). */
 function renderThemeIcon() {
-  const root = document.documentElement;
-  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-  const current = root.getAttribute('data-theme') || (prefersDark ? 'dark' : 'light');
-  $('themeBtn').textContent = current === 'dark' ? '☀' : '☾';
+  const node = $('btn-theme-toggle');
+  if (!node) return;
+  const theme = currentTheme();
+  const glyph = theme === 'dark' ? '☀' : theme === 'sepia' ? '🌗' : '🌙';
+  node.textContent = '';
+  node.appendChild(document.createTextNode(`${glyph} `));
+  node.appendChild(el('span', { className: 'btn-label', text: 'Giao diện' }));
+  node.setAttribute('aria-label', `Giao diện: ${theme === 'dark' ? 'Tối' : theme === 'sepia' ? 'Dịu mắt' : 'Sáng'}`);
+}
+
+/* ---------- font size ---------- */
+
+const FONT_LABEL = { base: 'Cỡ chữ', lg: 'Cỡ chữ+', xl: 'Cỡ chữ++' };
+
+function currentFontStep() {
+  const attr = document.documentElement.getAttribute('data-font');
+  return FONT_CYCLE.includes(attr) ? attr : 'base';
+}
+
+function initFontSize() {
+  let saved = null;
+  try { saved = localStorage.getItem(FONT_KEY); } catch { /* ignore */ }
+  if (FONT_CYCLE.includes(saved)) {
+    document.documentElement.setAttribute('data-font', saved);
+  }
+  renderFontIcon();
+}
+
+function cycleFontSize() {
+  const next = nextFontStep(currentFontStep());
+  // `base` is the CSS default, so the attribute is removed rather than set —
+  // this keeps a stale `data-font="base"` from overriding a future default.
+  if (next === 'base') document.documentElement.removeAttribute('data-font');
+  else document.documentElement.setAttribute('data-font', next);
+  try { localStorage.setItem(FONT_KEY, next); } catch { /* ignore */ }
+  renderFontIcon();
+}
+
+function renderFontIcon() {
+  const node = $('btn-font-toggle');
+  if (!node) return;
+  node.textContent = '';
+  node.appendChild(document.createTextNode('🔤 '));
+  node.appendChild(el('span', { className: 'btn-label', text: FONT_LABEL[currentFontStep()] }));
 }
 
 /* =====================================================================
@@ -800,6 +859,7 @@ async function enterExam() {
     state.durationSeconds = Math.max(1, Number(state.exam.duration_minutes) || 45) * 60;
     state.answers = state.questions.map(makeEmptyAnswer);
     state.currentIndex = 0;
+    state.flashIndex = null;
     state.flags = new Set();
     state.mode = 'quiz';
 
@@ -823,14 +883,21 @@ async function enterExam() {
   }
 }
 
+/**
+ * Creates the empty answer slot for one question.
+ *
+ * Phase 8.5 — the draft/lock ("Xác nhận") step is GONE. Selection is now
+ * immediate and auto-advances, so an answer is simply the chosen value; there is
+ * no intermediate confirmed state to model.
+ */
 function makeEmptyAnswer(question) {
   const type = normalizeType(question.type);
   if (type === 'TRUE_FALSE') {
     const count = Array.isArray(question.subQuestions) ? question.subQuestions.length : 4;
-    return { draft: new Array(Math.max(1, count)).fill(''), confirmed: false };
+    return { draft: new Array(Math.max(1, count)).fill('') };
   }
-  if (type === 'MCQ') return { draft: null, confirmed: false };
-  return { draft: '', confirmed: false };
+  if (type === 'MCQ') return { draft: null };
+  return { draft: '' };
 }
 
 function resetToLogin(message) {
@@ -854,9 +921,9 @@ function resetToLogin(message) {
 
 function renderQuizShell() {
   $('examTitle').textContent = state.exam.title || 'Bài thi';
-  // The nav panel is toggled via the .is-open transform, not the `hidden`
-  // class — closeNavPanel() keeps those two mechanisms in sync.
-  closeNavPanel();
+  // The drawer is toggled via the .is-open transform, not the `hidden` class —
+  // closePalette() keeps those two mechanisms in sync.
+  closePalette();
 }
 
 function updateHeader() {
@@ -894,15 +961,8 @@ function renderQuestion() {
   else if (type === 'ESSAY') host.appendChild(buildTextAnswer(question, answer, true));
   else host.appendChild(buildTextAnswer(question, answer, false));
 
-  if (answer.confirmed) {
-    host.appendChild(el('p', {
-      className: 'locked-note',
-      text: 'Đáp án đã được xác nhận và khoá lại.',
-    }));
-  }
-
-  renderActionBar(type, answer);
-  renderNavGrid();
+  renderActionBar();
+  renderPalette();
 }
 
 function buildQuestionHead(question, type) {
@@ -949,11 +1009,15 @@ function buildMcqOptions(question, answer) {
         type: 'button',
         role: 'radio',
         'aria-checked': String(selected),
-        disabled: answer.confirmed ? 'disabled' : null,
       },
     });
+    if (selected) btn.classList.add('is-selected');
+    // Phase 8.5 — the question just advanced to is the one to flash, so the
+    // student's last tap is visibly acknowledged for the full 280ms beat.
+    if (selected && state.flashIndex === state.currentIndex) btn.classList.add('is-flash');
     btn.appendChild(el('span', { className: 'option__key', text: String.fromCharCode(65 + index) }));
     btn.appendChild(el('span', { className: 'option__label', text: option }));
+    // A second tap on the SAME option toggles nothing but must not re-advance.
     btn.addEventListener('click', () => selectMcq(index));
     list.appendChild(btn);
   });
@@ -965,7 +1029,7 @@ function buildTrueFalse(question, answer) {
   const subs = Array.isArray(question.subQuestions) ? question.subQuestions : [];
 
   subs.forEach((sub, index) => {
-    const item = el('div', { className: `tf-item${answer.confirmed ? ' is-locked' : ''}` });
+    const item = el('div', { className: 'tf-item' });
     item.appendChild(el('span', { className: 'tf-item__label', text: `${String.fromCharCode(97 + index)})` }));
     item.appendChild(el('span', { className: 'tf-item__text', text: sub.content || '' }));
 
@@ -978,7 +1042,6 @@ function buildTrueFalse(question, answer) {
           type: 'button',
           'data-value': value,
           'aria-pressed': String(answer.draft[index] === value),
-          disabled: answer.confirmed ? 'disabled' : null,
         },
       });
       btn.addEventListener('click', () => selectTrueFalse(index, value));
@@ -1004,7 +1067,6 @@ function buildTextAnswer(question, answer, isEssay) {
       maxlength: String(MAX_TEXT_LENGTH),
       rows: isEssay ? '8' : '1',
       placeholder: isEssay ? 'Nhập bài làm…' : 'Nhập câu trả lời…',
-      disabled: answer.confirmed ? 'disabled' : null,
     },
   });
   input.value = answer.draft || '';
@@ -1022,135 +1084,234 @@ function buildTextAnswer(question, answer, isEssay) {
 }
 
 /* =====================================================================
-   Answer interaction (draft -> confirm -> locked)
+   Answer interaction + auto-advance (Phase 8.5)
    ===================================================================== */
+
+/**
+ * The pending auto-advance timer. Held in module scope so a fresh selection
+ * always cancels the previous pending jump — otherwise rapid tapping would queue
+ * several advances.
+ */
+let autoAdvanceTimer = null;
+
+/** Whether selecting an MCQ/TF answer should jump to the next question. */
+let autoAdvanceEnabled = readAutoAdvancePreference(localStorage);
+
+function setAutoAdvancePreference(enabled) {
+  autoAdvanceEnabled = enabled;
+  writeAutoAdvancePreference(localStorage, enabled);
+}
+
+/**
+ * Cancels a pending auto-advance. Called on every manual navigation and on
+ * submit so a stale timer can never yank the student away from the question
+ * they deliberately jumped to.
+ */
+function cancelAutoAdvance() {
+  if (autoAdvanceTimer) { clearTimeout(autoAdvanceTimer); autoAdvanceTimer = null; }
+}
+
+/**
+ * Schedules the auto-jump, if the shared policy says we should.
+ *
+ * The DECISION lives in `exam-nav.js#shouldAutoAdvance()` (so the suite can
+ * assert it headlessly); this only owns the timer. Text answers (ESSAY / SHORT)
+ * never qualify there: the student is mid-typing and a jump 280ms after a
+ * keystroke would be hostile.
+ */
+function maybeAutoAdvance(type, answer, changed) {
+  cancelAutoAdvance();
+  const should = shouldAutoAdvance({
+    enabled: autoAdvanceEnabled,
+    currentIndex: state.currentIndex,
+    total: state.questions.length,
+    type,
+    answer,
+    changed,
+  });
+  if (!should) return;
+  const from = state.currentIndex;
+  autoAdvanceTimer = setTimeout(() => {
+    autoAdvanceTimer = null;
+    // Guard: the student may have navigated manually inside the beat.
+    if (state.currentIndex !== from) return;
+    goToQuestion(from + 1);
+  }, AUTO_ADVANCE_MS);
+}
 
 function selectMcq(index) {
   const answer = state.answers[state.currentIndex];
-  if (answer.confirmed) return;
+  const changed = answer.draft !== index;
   answer.draft = index;
+  state.flashIndex = state.currentIndex;
   renderQuestion();
+  updatePaletteState();
+  // Only advance on a genuine change; re-tapping the current choice should not
+  // silently move the student off a question they were re-reading.
+  maybeAutoAdvance('MCQ', answer, changed);
 }
 
 function selectTrueFalse(subIndex, value) {
   const answer = state.answers[state.currentIndex];
-  if (answer.confirmed) return;
+  const changed = answer.draft[subIndex] !== value;
   answer.draft[subIndex] = value;
+  state.flashIndex = state.currentIndex;
   renderQuestion();
+  updatePaletteState();
+  // TRUE_FALSE has several sub-statements; shouldAutoAdvance() holds the jump
+  // until EVERY one has been answered, or the student loses the rest.
+  maybeAutoAdvance('TRUE_FALSE', answer, changed);
 }
 
 function selectText(value) {
   const answer = state.answers[state.currentIndex];
-  if (answer.confirmed) return;
   answer.draft = value.slice(0, MAX_TEXT_LENGTH);
-  renderActionBar(normalizeType(state.questions[state.currentIndex].type), answer, /* keepFocus */ true);
+  // No auto-advance while typing — shouldAutoAdvance() returns false for text.
+  updatePaletteState();
 }
 
+/** Toggles the review flag on the current question. */
 function toggleFlag() {
   const index = state.currentIndex;
   if (state.flags.has(index)) state.flags.delete(index); else state.flags.add(index);
   renderQuestion();
 }
 
+/** True when the question has any answer recorded (drives palette/answered count). */
 function isDraftReady(type, answer) {
   if (type === 'MCQ') return answer.draft !== null;
   if (type === 'TRUE_FALSE') return answer.draft.some((value) => value !== '');
   return String(answer.draft || '').trim() !== '';
 }
 
-function confirmAnswer() {
-  const answer = state.answers[state.currentIndex];
-  if (answer.confirmed) return;
-  const type = normalizeType(state.questions[state.currentIndex].type);
-  if (!isDraftReady(type, answer)) {
-    toast('Vui lòng chọn hoặc nhập đáp án trước khi xác nhận.');
-    return;
-  }
-  answer.confirmed = true;
+/**
+ * Phase 8.5 — jumps to a question, clamping out-of-range input.
+ *
+ * Every navigation path funnels through here (the bottom bar, the palette, the
+ * keyboard, auto-advance) so button/legend state is recomputed in exactly one
+ * place and can never drift from `state.currentIndex`.
+ */
+function goToQuestion(index) {
+  cancelAutoAdvance();
+  state.currentIndex = clampQuestionIndex(index, state.questions.length);
+  state.flashIndex = null;
   renderQuestion();
 }
 
 function goNext() {
-  const isLast = state.currentIndex >= state.questions.length - 1;
-  if (isLast) { openSubmitConfirm(); return; }
-  state.currentIndex += 1;
-  renderQuestion();
+  if (state.currentIndex >= state.questions.length - 1) { openSubmitConfirm(); return; }
+  goToQuestion(state.currentIndex + 1);
 }
 
 function goPrev() {
   if (state.currentIndex <= 0) return;
-  state.currentIndex -= 1;
-  renderQuestion();
+  goToQuestion(state.currentIndex - 1);
 }
 
 function jumpTo(index) {
-  state.currentIndex = index;
-  closeNavPanel();
-  renderQuestion();
+  closePalette();
+  goToQuestion(index);
 }
 
-function renderActionBar(type, answer, keepFocus) {
-  const prev = $('prevBtn');
-  const confirm = $('confirmBtn');
-  const next = $('nextBtn');
+function renderActionBar() {
+  const prev = $('btn-prev-question');
+  const next = $('btn-next-question');
+  const bar = $('examBottomBar');
 
   prev.disabled = state.currentIndex === 0;
 
-  const ready = isDraftReady(type, answer);
-  if (!answer.confirmed && ready) show(confirm); else hide(confirm);
-
   const isLast = state.currentIndex >= state.questions.length - 1;
-  next.textContent = isLast ? 'Nộp bài →' : 'Câu tiếp theo →';
+  if (bar) bar.classList.toggle('is-last', isLast);
+  if (next) next.textContent = 'Câu tiếp ➡';
 
-  if (keepFocus) {
-    const field = $('shortAnswerInput') || $('essayInput');
-    if (field) { field.focus(); const len = field.value.length; field.setSelectionRange(len, len); }
+  const answered = countAnswered();
+  const progress = $('palette-progress-label');
+  if (progress) progress.textContent = `${answered}/${state.questions.length}`;
+
+  const flagBtn = $('btn-flag-question');
+  if (flagBtn) {
+    const on = state.flags.has(state.currentIndex);
+    flagBtn.classList.toggle('is-on', on);
+    flagBtn.setAttribute('aria-pressed', String(on));
+    flagBtn.innerHTML = on
+      ? '🚩 <span class="btn-label">Bỏ đánh dấu</span>'
+      : '🚩 <span class="btn-label">Đánh dấu</span>';
   }
 }
 
 /* =====================================================================
-   Navigation panel
+   Question palette drawer (Phase 8.5)
    ===================================================================== */
 
-function renderNavGrid() {
-  const grid = $('navGrid');
+/** Recomputes the answered count and repaints the palette + header. */
+function updatePaletteState() {
+  renderPalette();
+  updateHeader();
+}
+
+/**
+ * Renders the bottom-sheet question palette from the shared cell model.
+ *
+ * Cell roles mirror the drawer's legend: `is-answered` (green = has an answer),
+ * `is-flagged` (a 🚩 badge via ::after), `is-current` (focus ring). Answered and
+ * flagged can co-exist — the flag is a ::after badge, not a background — so a
+ * student can still spot a marked question even after answering it.
+ */
+function renderPalette() {
+  const grid = $('palette-grid-container');
+  if (!grid) return;
   clear(grid);
 
-  let answered = 0;
-  state.questions.forEach((question, index) => {
-    const type = normalizeType(question.type);
-    const answer = state.answers[index];
-    const isAnswered = isDraftReady(type, answer);
-    if (isAnswered) answered += 1;
-
-    const item = el('button', {
-      className: 'nav-grid__item',
-      text: String(index + 1),
-      attrs: { type: 'button', 'aria-label': `Câu ${index + 1}` },
-    });
-    if (isAnswered) item.classList.add('is-answered');
-    if (state.flags.has(index)) item.classList.add('is-flagged');
-    if (index === state.currentIndex) { item.classList.add('is-current'); item.setAttribute('aria-current', 'true'); }
-    item.addEventListener('click', () => jumpTo(index));
-    grid.appendChild(item);
+  // The cell MODEL is built by the shared, DOM-free helper so the suite can
+  // assert the grid size / roles without a browser; this renders it.
+  const cells = buildPaletteCells({
+    total: state.questions.length,
+    answered: state.questions.map((question, index) => (
+      isDraftReady(normalizeType(question.type), state.answers[index])
+    )),
+    flags: state.flags,
+    currentIndex: state.currentIndex,
   });
 
-  const flagged = state.flags.size;
-  $('navProgress').textContent = `Đã trả lời: ${answered}/${state.questions.length}`
-    + (flagged ? ` · Đánh dấu: ${flagged}` : '');
+  cells.forEach((cell) => {
+    const node = el('button', {
+      className: 'palette-cell',
+      text: cell.label,
+      attrs: { type: 'button', 'aria-label': `Câu ${cell.label}` },
+    });
+    if (cell.flagged) node.classList.add('is-flagged');
+    if (cell.answered) node.classList.add('is-answered');
+    if (cell.current) { node.classList.add('is-current'); node.setAttribute('aria-current', 'true'); }
+    node.addEventListener('click', () => jumpTo(cell.index));
+    grid.appendChild(node);
+  });
+
+  const answeredNode = $('palette-answered-count');
+  const totalNode = $('palette-total-count');
+  if (answeredNode) answeredNode.textContent = String(cells.answeredCount);
+  if (totalNode) totalNode.textContent = String(state.questions.length);
 }
 
-function openNavPanel() {
-  show($('navBackdrop'));
-  $('navPanel').classList.add('is-open');
-  $('navPanel').setAttribute('aria-hidden', 'false');
-  renderNavGrid();
+function openPalette() {
+  renderPalette();
+  show($('palette-backdrop'));
+  $('question-palette-drawer').classList.add('is-open');
+  $('question-palette-drawer').setAttribute('aria-hidden', 'false');
 }
 
-function closeNavPanel() {
-  hide($('navBackdrop'));
-  $('navPanel').classList.remove('is-open');
-  $('navPanel').setAttribute('aria-hidden', 'true');
+function closePalette() {
+  const backdrop = $('palette-backdrop');
+  const drawer = $('question-palette-drawer');
+  if (backdrop) hide(backdrop);
+  if (drawer) {
+    drawer.classList.remove('is-open');
+    drawer.setAttribute('aria-hidden', 'true');
+  }
+}
+
+function isPaletteOpen() {
+  const drawer = $('question-palette-drawer');
+  return !!drawer && drawer.classList.contains('is-open');
 }
 
 /* =====================================================================
@@ -1179,7 +1340,10 @@ function tickTimer() {
   const seconds = remaining % 60;
   const node = $('timerDisplay');
   node.textContent = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-  node.classList.toggle('is-critical', remaining <= 300);
+  // The critical (red) styling lives on the .timer-badge wrapper, not the inner
+  // digit span, so the icon and padding recolor together.
+  const badge = $('exam-timer-badge');
+  if (badge) badge.classList.toggle('is-critical', remaining <= 300);
 
   if (remaining <= 0 && state.mode === 'quiz' && !state.submitting) {
     stopTimer();
@@ -1342,10 +1506,12 @@ function onKeyDown(event) {
   if (!$('confirmOverlay').classList.contains('hidden')) return;
 
   const type = normalizeType(state.questions[state.currentIndex].type);
-  const answer = state.answers[state.currentIndex];
   const key = event.key;
   const lower = key.toLowerCase();
   const typing = isTypingTarget(event);
+
+  // Escape closes the palette drawer, the one transient overlay in the quiz.
+  if (key === 'Escape' && isPaletteOpen()) { event.preventDefault(); closePalette(); return; }
 
   // F toggles a review flag, anywhere.
   if (lower === 'f' && !typing) {
@@ -1358,18 +1524,18 @@ function onKeyDown(event) {
   if (key === 'ArrowLeft') { event.preventDefault(); goPrev(); return; }
   if (key === 'ArrowRight') { event.preventDefault(); goNext(); return; }
 
-  // Enter confirms a draft, or advances once locked.
+  // Phase 8.5 — with the confirm step gone, Enter advances (or opens the submit
+  // dialog on the last question). It never commits a half-written text answer.
   if (key === 'Enter' && !(typing && (event.target.tagName === 'TEXTAREA'))) {
     event.preventDefault();
-    if (answer.confirmed) goNext();
-    else if (isDraftReady(type, answer)) confirmAnswer();
+    goNext();
     return;
   }
 
   if (typing) return;
 
-  // A/B/C/D select an MCQ option.
-  if (type === 'MCQ' && !answer.confirmed) {
+  // A/B/C/D select an MCQ option (which then auto-advances after the beat).
+  if (type === 'MCQ') {
     const map = { a: 0, b: 1, c: 2, d: 3, e: 4, f: 5 };
     const index = map[lower];
     const options = Array.isArray(state.questions[state.currentIndex].options)
@@ -1506,7 +1672,8 @@ function finishExam() {
   stopHeartbeat();
   unbindAntiCheat();
   exitFullscreenIfNeeded();
-  closeNavPanel();
+  cancelAutoAdvance();
+  closePalette();
   hide($('examHeader'));
   hide($('progressWrap'));
   hide($('quizScreen'));
@@ -2097,6 +2264,7 @@ function enterPractice(title) {
   state.questions = orderPracticeQuestions(state.practiceQuestions, shouldShuffle);
   state.answers = state.questions.map(makeEmptyAnswer);
   state.currentIndex = 0;
+  state.flashIndex = null;
   state.flags = new Set();
   state.blurCount = 0;
   state.fullscreenExitCount = 0;
@@ -2109,7 +2277,9 @@ function enterPractice(title) {
 
   // No timer and no heartbeat: practice is untimed and has no live session (2,3).
   $('timerDisplay').textContent = '∞';
-  $('timerDisplay').classList.remove('is-critical');
+  const timerBadge = $('exam-timer-badge');
+  if (timerBadge) timerBadge.classList.remove('is-critical');
+  cancelAutoAdvance();
 
   // bindAntiCheat() is a no-op while mode === 'practice' (rule 2).
   bindAntiCheat();
@@ -3056,6 +3226,7 @@ function switchView(viewName) {
 
 async function boot() {
   initTheme();
+  initFontSize();
 
   try {
     state.supabase = initSupabase();
@@ -3086,13 +3257,24 @@ async function boot() {
   $('practice-exam-code').addEventListener('change', (event) => {
     void loadPracticeRoster(event.target.value);
   });
-  $('navToggleBtn').addEventListener('click', openNavPanel);
-  $('navCloseBtn').addEventListener('click', closeNavPanel);
-  $('navBackdrop').addEventListener('click', closeNavPanel);
-  $('themeBtn').addEventListener('click', toggleTheme);
-  $('prevBtn').addEventListener('click', goPrev);
-  $('nextBtn').addEventListener('click', goNext);
-  $('confirmBtn').addEventListener('click', confirmAnswer);
+
+  // Phase 8.5 — exam navigation controls.
+  $('btn-open-palette').addEventListener('click', openPalette);
+  $('btn-close-palette').addEventListener('click', closePalette);
+  $('palette-backdrop').addEventListener('click', closePalette);
+  $('btn-theme-toggle').addEventListener('click', toggleTheme);
+  $('btn-font-toggle').addEventListener('click', cycleFontSize);
+  $('btn-prev-question').addEventListener('click', goPrev);
+  $('btn-next-question').addEventListener('click', goNext);
+  $('btn-flag-question').addEventListener('click', toggleFlag);
+  $('btn-finish-exam').addEventListener('click', openSubmitConfirm);
+  // The auto-advance checkbox reflects the stored preference, then persists it.
+  const autoAdvanceBox = $('chk-auto-advance');
+  autoAdvanceBox.checked = autoAdvanceEnabled;
+  autoAdvanceBox.addEventListener('change', (event) => {
+    setAutoAdvancePreference(event.target.checked);
+  });
+
   $('fsResumeBtn').addEventListener('click', () => { requestFullscreen(); hide($('fullscreenOverlay')); });
   $('evictedBtn').addEventListener('click', () => window.location.reload());
   $('submitCancelBtn').addEventListener('click', closeSubmitConfirm);
