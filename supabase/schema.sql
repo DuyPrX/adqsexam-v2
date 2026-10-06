@@ -72,6 +72,10 @@ create table if not exists public.exams (
     pin_mode         varchar(20)  not null default 'INDIVIDUAL',
     -- Shared PIN, used only when pin_mode = 'GLOBAL'.
     global_pin       varchar(50),
+    -- Phase 8.7 — per-exam paper-ordering policy. TRUE means the student runtime
+    -- may reorder questions (with all TRUE_FALSE items grouped at the end);
+    -- FALSE means the authored `position` order is preserved verbatim.
+    shuffle_questions boolean     not null default true,
     created_at       timestamptz  not null default now()
 );
 
@@ -88,6 +92,10 @@ alter table public.exams add column if not exists allow_practice boolean not nul
 -- verify_and_acquire_session() fall through to "no verification at all".
 alter table public.exams add column if not exists pin_mode   varchar(20) not null default 'INDIVIDUAL';
 alter table public.exams add column if not exists global_pin varchar(50);
+-- Phase 8.7 shuffle policy. NOT NULL DEFAULT true backfills existing rows in one
+-- pass (no NULL window) and preserves the shipped "always shuffled" behaviour;
+-- the client treats only an explicit false as "keep the authored order".
+alter table public.exams add column if not exists shuffle_questions boolean not null default true;
 -- `add constraint` is not re-runnable, so drop before adding.
 alter table public.exams drop constraint if exists chk_pin_mode;
 alter table public.exams add constraint chk_pin_mode
@@ -890,7 +898,9 @@ begin
             'code',             v_exam.code,
             'title',            v_exam.title,
             'duration_minutes', v_exam.duration_minutes,
-            'total_questions',  coalesce(v_total, 0)
+            'total_questions',  coalesce(v_total, 0),
+            -- Phase 8.7 — false = the teacher wants the authored order kept.
+            'shuffle_questions', v_exam.shuffle_questions
         ),
         'questions', v_questions
     );
@@ -1859,7 +1869,9 @@ begin
             'code',             v_exam.code,
             'title',            v_exam.title,
             'duration_minutes', v_exam.duration_minutes,
-            'total_questions',  v_total
+            'total_questions',  v_total,
+            -- Phase 8.7 — context only; the practice order is the student's toggle.
+            'shuffle_questions', v_exam.shuffle_questions
         ),
         -- The roster row is authoritative: the client displays this rather than
         -- echoing whatever identity was typed.
@@ -2034,6 +2046,8 @@ begin
         -- Lets the practice picker distinguish "closed" from "not open for
         -- practice" without a second round-trip.
         'allow_practice', v_exam.allow_practice,
+        -- Phase 8.7 — the paper-ordering policy, so the picker can show it.
+        'shuffle_questions', v_exam.shuffle_questions,
         'candidates',     coalesce(v_candidates, '[]'::jsonb)
     );
 end;

@@ -73,6 +73,8 @@ export function ExamEditor({ exam, initialQuestions, submissionCount }: ExamEdit
   const [durationMinutes, setDurationMinutes] = useState(exam.duration_minutes);
   const [isActive, setIsActive] = useState(exam.is_active);
   const [allowPractice, setAllowPractice] = useState(exam.allow_practice);
+  // Phase 8.7 — paper-ordering policy, seeded from the stored value.
+  const [shuffleQuestions, setShuffleQuestions] = useState(exam.shuffle_questions);
   const [pinMode, setPinMode] = useState<PinMode>(exam.pin_mode);
   const [globalPin, setGlobalPin] = useState(exam.global_pin ?? '');
   const [isClassPickerOpen, setIsClassPickerOpen] = useState(false);
@@ -162,6 +164,7 @@ export function ExamEditor({ exam, initialQuestions, submissionCount }: ExamEdit
         durationMinutes,
         isActive,
         allowPractice,
+        shuffleQuestions,
         pinMode,
         // Only sent in GLOBAL mode: in the other modes the stored value is
         // deliberately left untouched so toggling back restores it.
@@ -273,6 +276,23 @@ export function ExamEditor({ exam, initialQuestions, submissionCount }: ExamEdit
               {allowPractice
                 ? 'Cho phép luyện tập (học sinh xem được đáp án)'
                 : 'Không cho phép luyện tập'}
+            </span>
+          </label>
+
+          {/* Phase 8.7 — paper-ordering policy. ON (the default) lets the student
+              runtime reorder the paper and group every Đúng/Sai item at the end;
+              OFF preserves the authored order verbatim. */}
+          <label className="flex items-center gap-2 text-sm text-slate-700">
+            <input
+              type="checkbox"
+              checked={shuffleQuestions}
+              onChange={(event) => setShuffleQuestions(event.target.checked)}
+              className="accent-slate-900"
+            />
+            <span className={cn('font-semibold', shuffleQuestions ? 'text-emerald-700' : 'text-slate-500')}>
+              {shuffleQuestions
+                ? 'Xáo trộn câu hỏi (câu Đúng/Sai xếp cuối)'
+                : 'Giữ nguyên thứ tự câu hỏi'}
             </span>
           </label>
         </div>

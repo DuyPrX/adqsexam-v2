@@ -20,7 +20,9 @@ import {
   buildPaletteCells, clampQuestionIndex, getUnansweredQuestions, nextFontStep, nextTheme, normalizeTheme,
   readAutoAdvancePreference, shouldAutoAdvance, writeAutoAdvancePreference,
 } from './exam-nav.js';
-import { orderPracticeQuestions, readShuffleToggle, shuffledOrder } from './practice-order.js';
+import {
+  partitionAndShuffleOrder, partitionAndShuffleQuestions, readShuffleToggle,
+} from './practice-order.js';
 import { TreeRenderer, clampTeamNumber, computeTreeState, getTeamSeed, hitTestFruits } from './tree-engine.js';
 import { countTreeWords, normalizeAnswerText, treeWordCounterLabel } from './tree-words.js';
 import {
@@ -822,15 +824,19 @@ function deviceInfo() {
    ===================================================================== */
 
 /**
- * Applies the per-student display shuffle to the official exam.
+ * Applies the display shuffle to the official exam.
  *
- * The Fisher-Yates permutation lives in `practice-order.js` (imported above) so
- * this shuffle and the Phase 5.9 practice toggle share ONE implementation, and
- * the e2e suite can exercise it without loading this DOM-bound module.
+ * Phase 8.7 — the teacher decides. When `exam.shuffle_questions` is false the
+ * authored `position ASC` order is preserved verbatim and `displayOrder` stays
+ * null (an identity mapping), because the server already returned the questions
+ * in that order. This matters for papers whose numbering carries meaning (a
+ * sequenced derivation, a passage referenced by "the text above").
  *
- * `state.questions` becomes the DISPLAY array (shuffled), while the untouched
- * originals are kept in `state.displayOrder`. Options are NOT reordered — their
- * indices are tied to the stored `correct_answer`.
+ * The permutation itself lives in `practice-order.js` so this shuffle and the
+ * practice toggle share ONE implementation — including the TRUE_FALSE-at-the-end
+ * grouping — and the e2e suite can exercise it without loading this DOM-bound
+ * module. Options are NOT reordered: their indices are tied to the stored
+ * `correct_answer`.
  */
 function applyDisplayShuffle() {
   const total = state.questions.length;
@@ -838,7 +844,16 @@ function applyDisplayShuffle() {
     state.displayOrder = null;
     return;
   }
-  const order = shuffledOrder(total);
+
+  // Only an explicit `false` opts out; a missing key (an older payload) keeps the
+  // shipped behaviour of shuffling.
+  if (state.exam && state.exam.shuffle_questions === false) {
+    state.displayOrder = null;
+    return;
+  }
+
+  const types = state.questions.map((question) => normalizeType(question.type));
+  const order = partitionAndShuffleOrder(types, true);
   state.displayOrder = order;
   state.questions = order.map((originalIndex) => state.questions[originalIndex]);
 }
@@ -2319,8 +2334,11 @@ function enterPractice(title) {
   // Practice is graded entirely in RAM (no server round-trip), so shuffling the
   // questions array needs no index re-mapping: every question carries its own
   // `correctAnswer`, and `displayOrder` stays null because nothing is submitted.
+  //
+  // Phase 8.7 — `partitionAndShuffleQuestions` groups every TRUE_FALSE item at
+  // the END of the paper, so self-practice matches the official sitting's shape.
   state.displayOrder = null;
-  state.questions = orderPracticeQuestions(state.practiceQuestions, shouldShuffle);
+  state.questions = partitionAndShuffleQuestions(state.practiceQuestions, shouldShuffle);
   state.answers = state.questions.map(makeEmptyAnswer);
   state.currentIndex = 0;
   state.flashIndex = null;

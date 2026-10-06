@@ -93,6 +93,9 @@ export function ExamPreviewEditor({
   );
   const [shuffleDistractors, setShuffleDistractors] = useState(false);
   const [allowPractice, setAllowPractice] = useState(false);
+  // Phase 8.7 — paper-ordering policy. Defaults ON to preserve the behaviour
+  // every exam had before this column existed.
+  const [shuffleQuestions, setShuffleQuestions] = useState(true);
   const [savedVariants, setSavedVariants] = useState<SaveExamVariantsResult | null>(null);
 
   // Admission policy (Phase 6.2). INDIVIDUAL is the server-side default, so the
@@ -150,6 +153,7 @@ export function ExamPreviewEditor({
           allowPractice,
           pinMode,
           globalPin,
+          shuffleQuestions,
           variants: variants.map((variant) => ({
             code: variant.code,
             title,
@@ -165,6 +169,7 @@ export function ExamPreviewEditor({
           allowPractice,
           pinMode,
           globalPin,
+          shuffleQuestions,
           questions,
         });
         await importSelectedClasses(supabase, [exam.code]);
@@ -482,6 +487,20 @@ export function ExamPreviewEditor({
               className="accent-slate-900"
             />
             Cho phép dùng để luyện tập (học sinh xem được đáp án &amp; giải thích)
+          </label>
+
+          {/* Phase 8.7 — paper-ordering policy. When ON, the student runtime
+              reorders the questions and groups every Đúng/Sai item at the end.
+              Turning it OFF preserves the authored order for papers whose
+              numbering carries meaning. */}
+          <label className="flex items-center gap-2 text-sm text-slate-700">
+            <input
+              type="checkbox"
+              checked={shuffleQuestions}
+              onChange={(event) => setShuffleQuestions(event.target.checked)}
+              className="accent-slate-900"
+            />
+            Xáo trộn thứ tự câu hỏi đối với học sinh (câu Đúng/Sai luôn xếp cuối)
           </label>
 
           {/* Phase 6.2 — admission policy, applied to every generated variant. */}

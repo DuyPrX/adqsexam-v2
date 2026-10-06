@@ -88,6 +88,14 @@ export interface ExamRow {
   pin_mode: PinMode;
   /** Shared PIN, meaningful only when `pin_mode === 'GLOBAL'`. */
   global_pin: string | null;
+  /**
+   * Phase 8.7 — per-exam paper-ordering policy. `true` (the default) lets the
+   * student runtime reorder the questions, grouping every TRUE_FALSE item at the
+   * end of the paper; `false` preserves the authored `position` order verbatim
+   * (needed when the numbering itself carries meaning, e.g. a sequenced
+   * derivation or a passage referenced by "the text above").
+   */
+  shuffle_questions: boolean;
   created_at: string;
 }
 

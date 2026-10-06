@@ -26,7 +26,7 @@ const UNIQUE_VIOLATION = '23505';
  * it `undefined` at runtime while TypeScript still believes it is `string | null`.
  */
 export const EXAM_COLUMNS =
-  'id, user_id, code, title, duration_minutes, is_active, starts_at, ends_at, deleted_at, allow_practice, pin_mode, global_pin, created_at';
+  'id, user_id, code, title, duration_minutes, is_active, starts_at, ends_at, deleted_at, allow_practice, pin_mode, global_pin, shuffle_questions, created_at';
 
 export class PersistenceError extends Error {
   constructor(message: string) {
@@ -91,6 +91,7 @@ async function insertExamWithFreshCode(
   durationMinutes: number,
   allowPractice: boolean,
   pinFields: { pin_mode: PinMode; global_pin: string | null },
+  shuffleQuestions: boolean,
 ): Promise<ExamRow> {
   for (let attempt = 0; attempt < 10; attempt++) {
     const code = generateExamCode();
@@ -102,6 +103,7 @@ async function insertExamWithFreshCode(
         title,
         duration_minutes: durationMinutes,
         allow_practice: allowPractice,
+        shuffle_questions: shuffleQuestions,
         ...pinFields,
       })
       .select(EXAM_COLUMNS)
@@ -125,6 +127,8 @@ export interface SaveExamInput {
   /** Phase 6.2: admission policy (defaults to INDIVIDUAL server-side). */
   pinMode?: PinMode;
   globalPin?: string | null;
+  /** Phase 8.7: let the student runtime reorder the paper (defaults to true). */
+  shuffleQuestions?: boolean;
 }
 
 export interface SaveExamResult {
@@ -144,7 +148,15 @@ export async function saveExam(
   supabase: SupabaseClient,
   input: SaveExamInput,
 ): Promise<SaveExamResult> {
-  const { title, durationMinutes, questions, allowPractice = false, pinMode, globalPin } = input;
+  const {
+    title,
+    durationMinutes,
+    questions,
+    allowPractice = false,
+    pinMode,
+    globalPin,
+    shuffleQuestions = true,
+  } = input;
 
   if (!title.trim()) throw new PersistenceError('Vui lòng nhập tên đề thi.');
   if (questions.length === 0) throw new PersistenceError('Đề thi chưa có câu hỏi nào.');
@@ -158,6 +170,7 @@ export async function saveExam(
     durationMinutes,
     allowPractice,
     pinFields,
+    shuffleQuestions,
   );
 
   const rows = questions.map((question, index) => ({
@@ -197,6 +210,8 @@ export interface SaveExamVariantsInput {
   /** Phase 6.2: applies to every generated variant. */
   pinMode?: PinMode;
   globalPin?: string | null;
+  /** Phase 8.7: applies to every generated variant (defaults to true). */
+  shuffleQuestions?: boolean;
 }
 
 export interface SaveExamVariantsResult {
@@ -217,7 +232,14 @@ export async function saveExamVariants(
   supabase: SupabaseClient,
   input: SaveExamVariantsInput,
 ): Promise<SaveExamVariantsResult> {
-  const { durationMinutes, variants, allowPractice = false, pinMode, globalPin } = input;
+  const {
+    durationMinutes,
+    variants,
+    allowPractice = false,
+    pinMode,
+    globalPin,
+    shuffleQuestions = true,
+  } = input;
 
   if (variants.length === 0) throw new PersistenceError('Chưa có mã đề nào để lưu.');
   for (const variant of variants) {
@@ -236,6 +258,7 @@ export async function saveExamVariants(
     title: variant.title.trim(),
     duration_minutes: durationMinutes,
     allow_practice: allowPractice,
+    shuffle_questions: shuffleQuestions,
     ...pinFields,
   }));
 
@@ -396,6 +419,8 @@ export interface ExamMetadataPatch {
   /** Phase 6.2 admission policy. */
   pinMode?: PinMode;
   globalPin?: string | null;
+  /** Phase 8.7 paper-ordering policy. */
+  shuffleQuestions?: boolean;
 }
 
 /** Updates exam metadata (Phase 5.4 edit route general-info form). */
@@ -419,6 +444,7 @@ export async function updateExamMetadata(
   if (patch.startsAt !== undefined) row.starts_at = patch.startsAt;
   if (patch.endsAt !== undefined) row.ends_at = patch.endsAt;
   if (patch.allowPractice !== undefined) row.allow_practice = patch.allowPractice;
+  if (patch.shuffleQuestions !== undefined) row.shuffle_questions = patch.shuffleQuestions;
 
   // Phase 6.2 — partial patch semantics. Unlike `buildPinFields` (used by the
   // create paths), a caller may update ONLY `pin_mode` and leave `global_pin`

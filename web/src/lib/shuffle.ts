@@ -1,4 +1,4 @@
-import type { ExtractedQuestion } from './types';
+import type { ExtractedQuestion, QuestionType } from './types';
 import { generateExamCode } from './utils';
 
 /**
@@ -21,13 +21,43 @@ export function shuffleArray<T>(input: readonly T[]): T[] {
 }
 
 /**
+ * Shuffles question order, keeping every TRUE_FALSE item at the END.
+ *
+ * Phase 8.7. A plain Fisher-Yates scatter mixes TRUE_FALSE blocks into the MCQ
+ * run, which is hostile to read: a TRUE_FALSE item is a block of four
+ * sub-statements that needs more room and more time than one MCQ. Grouping them
+ * at the tail gives the student one continuous "judgement" section instead of
+ * interrupting the fast MCQ flow.
+ *
+ * The two partitions are shuffled INDEPENDENTLY (not "shuffle then stable
+ * partition"), so the relative order inside each group is still random — a
+ * stable partition would leak the authored order within the TRUE_FALSE block.
+ */
+export function shufflePartitioned<T extends { question_type: QuestionType }>(
+  questions: readonly T[],
+): T[] {
+  const nonTrueFalse: T[] = [];
+  const trueFalse: T[] = [];
+
+  for (const question of questions) {
+    if (question.question_type === 'TRUE_FALSE') trueFalse.push(question);
+    else nonTrueFalse.push(question);
+  }
+
+  return [...shuffleArray(nonTrueFalse), ...shuffleArray(trueFalse)];
+}
+
+/**
  * Shuffles the ordering of the questions and renumbers `position` so the saved
  * 1-based sequence stays contiguous and matches the on-screen order.
+ *
+ * Phase 8.7 — TRUE_FALSE questions are grouped at the end (see
+ * `shufflePartitioned`).
  */
 export function shuffleQuestions(
   questions: readonly ExtractedQuestion[],
 ): ExtractedQuestion[] {
-  return shuffleArray(questions).map((question, index) => ({
+  return shufflePartitioned(questions).map((question, index) => ({
     ...question,
     position: index + 1,
   }));
@@ -127,9 +157,12 @@ export function generateExamVariants(
 
   const variants: ExamVariant[] = [];
   for (let variantIndex = 0; variantIndex < variantCount; variantIndex++) {
+    // Sample first, THEN partition the sample: every variant still draws a
+    // random K of the pool, but the drawn set is presented with its TRUE_FALSE
+    // items grouped at the end (Phase 8.7).
     const sampled = shuffleArray(questions).slice(0, k);
 
-    const prepared = sampled.map((question, index) => {
+    const prepared = shufflePartitioned(sampled).map((question, index) => {
       const cloned = cloneQuestion(question);
       const positioned: ExtractedQuestion = { ...cloned, position: index + 1 };
       return shuffleDistractors ? shuffleOptions(positioned) : positioned;

@@ -188,13 +188,15 @@ export async function load(url, context, nextLoad) {
 }
 `)}`,
 );
-const { generateExamVariants } = await import(
+const { generateExamVariants, shufflePartitioned } = await import(
   new URL('../web/src/lib/shuffle.ts', import.meta.url).href
 );
 
 // Phase 5.9 Step 24 — the practice ordering helpers are dependency-free, so the
 // suite exercises the SAME module the student SPA imports (not a copy).
-const { shuffledOrder, orderPracticeQuestions, readShuffleToggle } = await import(
+const {
+  shuffledOrder, partitionAndShuffleOrder, partitionAndShuffleQuestions, readShuffleToggle,
+} = await import(
   new URL('../student/practice-order.js', import.meta.url).href
 );
 
@@ -248,7 +250,7 @@ const { execFileSync } = await import('node:child_process');
 // Phase 6.2 Step 26 — the teacher-web persistence + template modules. These are
 // dependency-free (or, for excel.ts, borrow the web app's own SheetJS), so the
 // suite asserts against the SAME code the browser ships rather than a copy.
-const { EXAM_COLUMNS, updateExamMetadata, PersistenceError } = await import(
+const { EXAM_COLUMNS, updateExamMetadata, saveExam, PersistenceError } = await import(
   new URL('../web/src/lib/exams.ts', import.meta.url).href
 );
 const { STUDENT_TEMPLATE_HEADERS, buildStudentCsvTemplate, studentTemplateFilename } =
@@ -2283,7 +2285,7 @@ async function main() {
   }));
 
   // --- 24a. toggle OFF => strict original `position ASC` order ------------
-  const ordered = orderPracticeQuestions(practiceFixture, false);
+  const ordered = partitionAndShuffleQuestions(practiceFixture, false);
   check('shuffle OFF keeps the original source order',
     JSON.stringify(ordered.map((q) => q.content)) === JSON.stringify(practiceFixture.map((q) => q.content)),
     JSON.stringify(ordered.map((q) => q.content)));
@@ -2293,13 +2295,13 @@ async function main() {
 
   // A caller that hands over a scrambled list must still get `position ASC`.
   const scrambled = [practiceFixture[3], practiceFixture[0], practiceFixture[5], practiceFixture[1], practiceFixture[4], practiceFixture[2]];
-  const resorted = orderPracticeQuestions(scrambled, false);
+  const resorted = partitionAndShuffleQuestions(scrambled, false);
   check('shuffle OFF re-sorts a scrambled input by position',
     JSON.stringify(resorted.map((q) => q.position)) === '[1,2,3,4,5,6]',
     JSON.stringify(resorted.map((q) => q.position)));
 
   // --- 24b. toggle ON => order differs, content preserved ----------------
-  const shuffled = orderPracticeQuestions(practiceFixture, true);
+  const shuffled = partitionAndShuffleQuestions(practiceFixture, true);
   check('shuffle ON preserves the question count',
     shuffled.length === practiceFixture.length, String(shuffled.length));
   check('shuffle ON preserves every question exactly once',
@@ -2319,7 +2321,7 @@ async function main() {
   // makes a stuck identity astronomically unlikely if the shuffle truly runs.)
   const seenOrders = new Set();
   for (let i = 0; i < 60; i += 1) {
-    seenOrders.add(orderPracticeQuestions(practiceFixture, true).map((q) => q.content).join('|'));
+    seenOrders.add(partitionAndShuffleQuestions(practiceFixture, true).map((q) => q.content).join('|'));
   }
   check('shuffle ON produces more than one distinct order across runs',
     seenOrders.size > 1, String(seenOrders.size));
@@ -2344,11 +2346,11 @@ async function main() {
   check('absent document => shuffle disabled', readShuffleToggle(undefined) === false);
 
   // --- 24e. empty / degenerate inputs are safe --------------------------
-  check('empty list stays empty (shuffle ON)', orderPracticeQuestions([], true).length === 0);
-  check('empty list stays empty (shuffle OFF)', orderPracticeQuestions([], false).length === 0);
-  check('a non-array is treated as empty', orderPracticeQuestions(null, true).length === 0);
+  check('empty list stays empty (shuffle ON)', partitionAndShuffleQuestions([], true).length === 0);
+  check('empty list stays empty (shuffle OFF)', partitionAndShuffleQuestions([], false).length === 0);
+  check('a non-array is treated as empty', partitionAndShuffleQuestions(null, true).length === 0);
   check('a single question survives the shuffle',
-    orderPracticeQuestions([practiceFixture[0]], true)[0].correctAnswer === 0);
+    partitionAndShuffleQuestions([practiceFixture[0]], true)[0].correctAnswer === 0);
 
   /* --- 25. Class rosters + flexible PIN auth (Phase 6.1) ---------------- */
   step(25, 'class roster import and NONE / GLOBAL / INDIVIDUAL PIN enforcement');
@@ -5474,6 +5476,270 @@ async function main() {
     navApp37.includes("$('btnModalConfirmSubmit').addEventListener")
       && navApp37.includes('submitExam(false)'),
     'confirm button is not wired to submitExam');
+
+  /* --- 38. Exam shuffle toggle + partitioned shuffle (8.7) -------------- */
+  // Two independent halves: the partitioned-ordering POLICY is a pure function
+  // and is EXECUTED here; the column/RPC plumbing is asserted against the live
+  // database (the toggle is worthless if the column never round-trips).
+  step(38, 'per-exam shuffle toggle and TRUE_FALSE-at-the-end partitioning');
+
+  // --- 38a. the column list carries the new field -----------------------
+  const columns38 = EXAM_COLUMNS.split(',').map((c) => c.trim());
+  check('38a: EXAM_COLUMNS includes shuffle_questions',
+    columns38.includes('shuffle_questions'), EXAM_COLUMNS);
+
+  // --- 38b. saveExam persists shuffle_questions and defaults it to true --
+  // A real save through the SHIPPED helper, not a hand-written insert: this is
+  // what proves the create path actually writes the column. `saveExam` reserves
+  // its own code, so the returned code (not a pre-chosen one) is the fixture key.
+  const savedShuffle = await saveExam(teacher, {
+    title: 'E2E Phase 8.7 Shuffle',
+    durationMinutes: 20,
+    // Deliberately NOT passing shuffleQuestions: the helper must default it ON.
+    questions: [
+      { question_text: 'Câu MCQ 1', question_type: 'MULTIPLE_CHOICE', options: ['A', 'B'], correct_answer: 0, explanation: null },
+      { question_text: 'Câu Đúng/Sai', question_type: 'TRUE_FALSE', options: ['a', 'b', 'c', 'd'], correct_answer: ['Đ', 'S', 'Đ', 'S'], explanation: null },
+    ],
+  });
+  const shuffleCode = savedShuffle.exam?.code;
+  check('38b: saveExam returns the new exam code',
+    typeof savedShuffle.exam?.code === 'string' && savedShuffle.exam.code.length === 6,
+    JSON.stringify(savedShuffle.exam?.code));
+  check('38b: shuffle_questions defaults to true when the caller omits it',
+    savedShuffle.exam?.shuffle_questions === true,
+    JSON.stringify(savedShuffle.exam?.shuffle_questions));
+
+  // --- 38c. updateExamMetadata round-trips the toggle -------------------
+  await updateExamMetadata(teacher, shuffleCode, { shuffleQuestions: false });
+  const afterShuffleOff = await teacher
+    .from('exams').select('shuffle_questions').eq('code', shuffleCode).single();
+  check('38c: updateExamMetadata persists shuffle_questions = false',
+    afterShuffleOff.data?.shuffle_questions === false,
+    JSON.stringify(afterShuffleOff.data?.shuffle_questions));
+
+  await updateExamMetadata(teacher, shuffleCode, { shuffleQuestions: true });
+  const afterShuffleOn = await teacher
+    .from('exams').select('shuffle_questions').eq('code', shuffleCode).single();
+  check('38c: updateExamMetadata persists shuffle_questions = true',
+    afterShuffleOn.data?.shuffle_questions === true,
+    JSON.stringify(afterShuffleOn.data?.shuffle_questions));
+
+  // A partial patch must not clobber the column (same discipline as pin_mode).
+  await updateExamMetadata(teacher, shuffleCode, { title: 'E2E Phase 8.7 Shuffle (renamed)' });
+  const afterTitleOnly = await teacher
+    .from('exams').select('shuffle_questions').eq('code', shuffleCode).single();
+  check('38c: a title-only patch leaves shuffle_questions untouched',
+    afterTitleOnly.data?.shuffle_questions === true,
+    JSON.stringify(afterTitleOnly.data?.shuffle_questions));
+
+  // --- 38d. get_exam_roster exposes the flag to the student -------------
+  const rosterShuffle = await rosterAnon.rpc('get_exam_roster', { p_exam_code: shuffleCode });
+  check('38d: get_exam_roster reports shuffle_questions as a boolean',
+    typeof rosterShuffle.data?.shuffle_questions === 'boolean',
+    JSON.stringify(rosterShuffle.data?.shuffle_questions));
+  check('38d: the reported value matches the stored column',
+    rosterShuffle.data?.shuffle_questions === true,
+    JSON.stringify(rosterShuffle.data?.shuffle_questions));
+
+  // Flip it and re-read: a hard-coded `true` in the projection would pass the
+  // check above but fail this one.
+  await updateExamMetadata(teacher, shuffleCode, { shuffleQuestions: false });
+  const rosterShuffleOff = await rosterAnon.rpc('get_exam_roster', { p_exam_code: shuffleCode });
+  check('38d: the flag follows the stored value (not hard-coded true)',
+    rosterShuffleOff.data?.shuffle_questions === false,
+    JSON.stringify(rosterShuffleOff.data?.shuffle_questions));
+
+  // --- 38e. get_student_exam_payload exposes it (the SPA needs it) ------
+  // Without this the SPA cannot honour the toggle at all: this RPC is the only
+  // source of `state.exam` for an official sitting.
+  await updateExamMetadata(teacher, shuffleCode, {
+    isActive: true, shuffleQuestions: false,
+  });
+  await teacher.from('students').delete().eq('exam_code', shuffleCode);
+  await teacher.from('students').insert({
+    student_code: 'E2ESHF01', full_name: 'Phan Văn Trộn',
+    class_name: '12SHF', exam_code: shuffleCode,
+  });
+  const shfClient = createClient(SB_URL, SB_PUBLISHABLE, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const shfAcquire = await shfClient.rpc('verify_and_acquire_session', {
+    p_exam_code: shuffleCode,
+    p_student_code: 'E2ESHF01',
+    p_full_name: 'Phan Văn Trộn',
+    p_class_name: '12SHF',
+  });
+  check('38e: the shuffle fixture session is acquired',
+    shfAcquire.data?.success === true, JSON.stringify(shfAcquire.data ?? shfAcquire.error));
+
+  const shfPayload = await shfClient.rpc('get_student_exam_payload', {
+    p_exam_code: shuffleCode,
+    p_session_token: shfAcquire.data?.session_token,
+  });
+  check('38e: get_student_exam_payload exposes shuffle_questions = false',
+    shfPayload.data?.exam?.shuffle_questions === false,
+    JSON.stringify(shfPayload.data?.exam));
+  // The sanitisation contract must survive: adding a key must not leak answers.
+  check('38e: the payload still leaks no answer key',
+    !JSON.stringify(shfPayload.data).includes('correct_answer')
+      && !JSON.stringify(shfPayload.data).includes('explanation'),
+    JSON.stringify(shfPayload.data).slice(0, 200));
+
+  // get_practice_exam_payload must expose the flag AND keep its existing keys —
+  // Step 32c asserts `student_name`, so this guards the other direction of the
+  // same edit (a re-created function silently losing a return field).
+  await teacher.from('exams').update({ allow_practice: true })
+    .eq('code', shuffleCode);
+  const shfPractice = await shfClient.rpc('get_practice_exam_payload', {
+    p_exam_code: shuffleCode,
+    p_student_code: 'E2ESHF01',
+  });
+  check('38e: get_practice_exam_payload exposes shuffle_questions',
+    shfPractice.data?.success === true
+      && shfPractice.data?.exam?.shuffle_questions === false,
+    JSON.stringify(shfPractice.data));
+  check('38e: the practice payload keeps its existing exam keys',
+    shfPractice.data?.exam?.total_questions === 2
+      && typeof shfPractice.data?.exam?.title === 'string'
+      && typeof shfPractice.data?.student_name === 'string',
+    JSON.stringify(shfPractice.data?.exam));
+
+  // --- 38f. variant generation groups TRUE_FALSE at the END -------------
+  // A pool whose TRUE_FALSE items are deliberately INTERLEAVED, so a plain
+  // Fisher-Yates (or a stable partition) would be caught.
+  const variantPool = [
+    { question_text: 'Q1', question_type: 'MULTIPLE_CHOICE', options: ['A', 'B'], correct_answer: 0, explanation: null },
+    { question_text: 'TF-A', question_type: 'TRUE_FALSE', options: ['a', 'b', 'c', 'd'], correct_answer: ['Đ', 'S', 'Đ', 'S'], explanation: null },
+    { question_text: 'Q2', question_type: 'MULTIPLE_CHOICE', options: ['A', 'B'], correct_answer: 1, explanation: null },
+    { question_text: 'TF-B', question_type: 'TRUE_FALSE', options: ['a', 'b', 'c', 'd'], correct_answer: ['Đ', 'Đ', 'S', 'S'], explanation: null },
+    { question_text: 'Q3', question_type: 'SHORT_ANSWER', options: [], correct_answer: 'x', explanation: null },
+    { question_text: 'TF-C', question_type: 'TRUE_FALSE', options: ['a', 'b', 'c', 'd'], correct_answer: ['S', 'S', 'Đ', 'Đ'], explanation: null },
+  ];
+  const tfIndices = (list) => list
+    .map((q, i) => (q.question_type === 'TRUE_FALSE' ? i : -1))
+    .filter((i) => i >= 0);
+
+  // Every variant must satisfy: min(TF index) > max(non-TF index). Run it many
+  // times because the failure is order-dependent, not deterministic.
+  let variantOrderViolations = 0;
+  let variantsChecked = 0;
+  for (let round = 0; round < 25; round++) {
+    for (const variant of generateExamVariants(variantPool, { variantCount: 4 })) {
+      variantsChecked++;
+      const questions = variant.questions;
+      const tf = tfIndices(questions);
+      const nonTf = questions
+        .map((q, i) => (q.question_type === 'TRUE_FALSE' ? -1 : i))
+        .filter((i) => i >= 0);
+      if (tf.length === 0 || nonTf.length === 0) continue;
+      if (Math.min(...tf) <= Math.max(...nonTf)) variantOrderViolations++;
+    }
+  }
+  check('38f: every generated variant puts all TRUE_FALSE after all other types',
+    variantsChecked > 0 && variantOrderViolations === 0,
+    `checked=${variantsChecked} violations=${variantOrderViolations}`);
+  check('38f: variants still carry contiguous 1-based positions',
+    generateExamVariants(variantPool, { variantCount: 2 }).every((variant) =>
+      variant.questions.every((q, i) => q.position === i + 1)),
+    'position renumbering broke');
+  check('38f: shufflePartitioned keeps every question exactly once',
+    JSON.stringify(shufflePartitioned(variantPool).map((q) => q.question_text).sort())
+      === JSON.stringify(variantPool.map((q) => q.question_text).sort()),
+    JSON.stringify(shufflePartitioned(variantPool).map((q) => q.question_text)));
+
+  // --- 38g. the SPA partitioner (executed) ------------------------------
+  const tfFixture = [
+    { position: 1, type: 'MCQ', content: 'q1' },
+    { position: 2, type: 'TRUE_FALSE', content: 'tf1' },
+    { position: 3, type: 'MCQ', content: 'q2' },
+    { position: 4, type: 'ESSAY', content: 'q3' },
+    { position: 5, type: 'TRUE_FALSE', content: 'tf2' },
+    { position: 6, type: 'SHORT_ANSWER', content: 'q4' },
+  ];
+  const isTf = (q) => String(q.type || '').toUpperCase() === 'TRUE_FALSE';
+
+  let spaViolations = 0;
+  let spaRuns = 0;
+  for (let round = 0; round < 60; round++) {
+    const out = partitionAndShuffleQuestions(tfFixture, true);
+    spaRuns++;
+    const tfPos = out.map((q, i) => (isTf(q) ? i : -1)).filter((i) => i >= 0);
+    const nonTfPos = out.map((q, i) => (isTf(q) ? -1 : i)).filter((i) => i >= 0);
+    if (Math.min(...tfPos) <= Math.max(...nonTfPos)) spaViolations++;
+  }
+  check('38g: shuffle ON (SPA) always places TRUE_FALSE strictly at the end',
+    spaRuns === 60 && spaViolations === 0, `runs=${spaRuns} violations=${spaViolations}`);
+
+  const spaShuffled = partitionAndShuffleQuestions(tfFixture, true);
+  check('38g: shuffle ON preserves every question exactly once',
+    JSON.stringify([...spaShuffled].map((q) => q.content).sort())
+      === JSON.stringify(tfFixture.map((q) => q.content).sort()),
+    JSON.stringify(spaShuffled.map((q) => q.content)));
+  check('38g: shuffle ON stamps contiguous 1-based displayOrdinal',
+    spaShuffled.every((q, i) => q.displayOrdinal === i + 1),
+    JSON.stringify(spaShuffled.map((q) => q.displayOrdinal)));
+  check('38g: shuffle ON does not mutate the source array',
+    JSON.stringify(tfFixture.map((q) => q.position)) === '[1,2,3,4,5,6]');
+
+  // The TRUE_FALSE block is genuinely shuffled WITHIN itself (a stable partition
+  // would leave tf1 before tf2 on every single run).
+  const tfBlockOrders = new Set();
+  for (let round = 0; round < 60; round++) {
+    tfBlockOrders.add(
+      partitionAndShuffleQuestions(tfFixture, true)
+        .filter(isTf).map((q) => q.content).join('|'),
+    );
+  }
+  check('38g: the TRUE_FALSE block is shuffled within itself, not stable',
+    tfBlockOrders.size > 1, JSON.stringify([...tfBlockOrders]));
+
+  // --- 38h. shuffle OFF restores the authored order ---------------------
+  const spaOrdered = partitionAndShuffleQuestions(tfFixture, false);
+  check('38h: shuffle OFF preserves the original position order (TF stays interleaved)',
+    JSON.stringify(spaOrdered.map((q) => q.content)) === JSON.stringify(['q1', 'tf1', 'q2', 'q3', 'tf2', 'q4']),
+    JSON.stringify(spaOrdered.map((q) => q.content)));
+  check('38h: shuffle OFF sorts a scrambled input by position',
+    JSON.stringify(
+      partitionAndShuffleQuestions([tfFixture[4], tfFixture[0], tfFixture[3]], false)
+        .map((q) => q.position),
+    ) === '[1,4,5]',
+    JSON.stringify(partitionAndShuffleQuestions([tfFixture[4], tfFixture[0], tfFixture[3]], false).map((q) => q.position)));
+
+  // --- 38i. the SPA reads the flag (static) -----------------------------
+  const appJs38 = readFileSync(new URL('../student/app.js', import.meta.url), 'utf8');
+  check('38i: app.js honours exam.shuffle_questions for the official sitting',
+    appJs38.includes('shuffle_questions === false'), 'the toggle is not consulted');
+  check('38i: app.js routes the official shuffle through the shared partitioner',
+    appJs38.includes('partitionAndShuffleOrder'), 'the partitioned order is not used');
+  check('38i: app.js routes practice through partitionAndShuffleQuestions',
+    appJs38.includes('partitionAndShuffleQuestions('), 'practice does not partition');
+  check('38i: the retired orderPracticeQuestions helper is gone from the SPA',
+    !appJs38.includes('orderPracticeQuestions'), 'the superseded helper is still imported');
+
+  // --- 38j. the teacher UI exposes the toggle (static) ------------------
+  const previewSrc38 = readFileSync(
+    new URL('../web/src/components/questions/ExamPreviewEditor.tsx', import.meta.url), 'utf8',
+  );
+  const editorSrc38 = readFileSync(
+    new URL('../web/src/components/questions/ExamEditor.tsx', import.meta.url), 'utf8',
+  );
+  check('38j: ExamPreviewEditor ships the shuffle toggle (defaults ON)',
+    previewSrc38.includes('shuffleQuestions') && previewSrc38.includes('useState(true)')
+      && previewSrc38.includes('Xáo trộn thứ tự câu hỏi'),
+    'preview editor toggle missing');
+  check('38j: ExamPreviewEditor passes the toggle to both save paths',
+    (previewSrc38.match(/shuffleQuestions,/g) || []).length >= 2,
+    'the toggle is not forwarded to saveExam/saveExamVariants');
+  check('38j: ExamEditor ships the shuffle toggle seeded from the stored row',
+    editorSrc38.includes('useState(exam.shuffle_questions)')
+      && editorSrc38.includes('shuffleQuestions'),
+    'exam editor toggle missing');
+  check('38j: ExamEditor persists the toggle through updateExamMetadata',
+    /updateExamMetadata\([\s\S]*?shuffleQuestions,/.test(editorSrc38),
+    'the editor does not persist the toggle');
+
+  // --- 38k. cleanup -----------------------------------------------------
+  await teacher.from('exams').delete().eq('code', shuffleCode);
 
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);
