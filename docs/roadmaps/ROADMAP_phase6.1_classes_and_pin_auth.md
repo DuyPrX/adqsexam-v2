@@ -91,11 +91,14 @@ explicit grant survives a PUBLIC revoke. `import_class_to_exam` therefore also
 does `revoke all ... from anon`. (Steps 1–24 pass regardless, because the body
 rejects an anonymous caller via `auth.uid()`; the ACL revoke makes the privilege
 table match the documented "teacher-only" intent.)
-**Flagged for follow-up:** five PRE-EXISTING teacher-only RPCs
-(`delete_exam`, `restore_exam`, `purge_expired_exams`, `recalculate_exam_scores`,
-`update_exam_questions_safe`) still carry an `anon=X` grant from the same
-default-privilege behaviour. They are protected only by their `auth.uid()` body
-checks. Out of scope here, but worth a hardening pass.
+**Flagged for follow-up — RESOLVED in Phase 8.5.** Five PRE-EXISTING teacher-only
+RPCs (`delete_exam`, `restore_exam`, `purge_expired_exams`,
+`recalculate_exam_scores`, `update_exam_questions_safe`) also carried an `anon=X`
+grant from the same default-privilege behaviour, protected only by their
+`auth.uid()` body checks. Migration
+`20261006010000_harden_teacher_rpc_grants.sql` now revokes it from `anon` on all
+five (verified: `anon=false`, `authenticated=true`), and e2e Step 32a asserts
+both halves so the grant can never silently return.
 
 ### D-D. New tables inherit an `anon` grant from database default privileges
 Proven locally: `pg_default_acl` for `public` tables is

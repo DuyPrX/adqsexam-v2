@@ -4073,6 +4073,7 @@ async function main() {
   /* --- 32. Exam candidates + flexible identity (8.1) -------------------- */
   // Three concerns share one step because they only make sense together:
   //   32a  the three re-signatured RPCs are SINGLE, non-overloaded, anon-callable
+  //        (and, per the Phase 8.5 hardening, the five teacher-only RPCs are NOT)
   //   32b  get_exam_roster(..., true) serves a practice-enabled CLOSED exam
   //   32c  get_practice_exam_payload authorises by (full_name, class_name)
   //   32d  the teacher-web candidate CRUD helpers round-trip
@@ -4110,6 +4111,28 @@ async function main() {
     anonCanExecute('get_practice_exam_payload(varchar, varchar, varchar, varchar)'));
   check('32a: anon may execute verify_student_practice(varchar, varchar, varchar)',
     anonCanExecute('verify_student_practice(varchar, varchar, varchar)'));
+
+  // Phase 8.5 hardening — the five PRE-EXISTING teacher-only RPCs carried a stale
+  // `anon` EXECUTE grant from Supabase's database default privileges (an explicit
+  // grant that survives `revoke ... from public`; see Phase 6.1's D-C). They were
+  // only protected by their internal auth.uid() body checks. The ACL must now
+  // match the documented "teacher-only" intent, while `authenticated` keeps it.
+  const TEACHER_ONLY_RPCS = [
+    'update_exam_questions_safe(varchar, jsonb)',
+    'delete_exam(varchar)',
+    'restore_exam(varchar)',
+    'purge_expired_exams()',
+    'recalculate_exam_scores(varchar)',
+  ];
+  const authCanExecute = (signature) => step32Sql(
+    `select has_function_privilege('authenticated', 'public.${signature}'::regprocedure, 'execute')`,
+  ) === 't';
+  check('32a: NONE of the five teacher-only RPCs is anon-executable',
+    TEACHER_ONLY_RPCS.every((signature) => !anonCanExecute(signature)),
+    TEACHER_ONLY_RPCS.map((s) => `${s}=${anonCanExecute(s) ? 'LEAK' : 'ok'}`).join(', '));
+  check('32a: all five teacher-only RPCs remain executable by authenticated',
+    TEACHER_ONLY_RPCS.every((signature) => authCanExecute(signature)),
+    TEACHER_ONLY_RPCS.map((s) => `${s}=${authCanExecute(s) ? 'ok' : 'REVOKED'}`).join(', '));
 
   // --- fixtures: a practice-enabled exam that is CLOSED ------------------
   const CAN_EXAM = {

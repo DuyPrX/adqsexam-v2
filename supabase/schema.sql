@@ -2390,8 +2390,19 @@ grant execute on function public.recalculate_exam_scores(varchar)               
 -- Supabase's database default privileges grant EXECUTE to `anon` directly, and an
 -- explicit grant survives `revoke ... from public` (verified locally: after a
 -- PUBLIC revoke, has_function_privilege('anon', ...) was still true).
+--
+-- Phase 8.5 hardening — the same `from anon` revoke is now applied to the five
+-- PRE-EXISTING teacher-only RPCs below. They were only ever protected by their
+-- internal auth.uid() body checks; a direct anon call would reach the function
+-- and be refused there. Removing the grant makes the ACL match the documented
+-- "teacher-only" intent, so the privilege table is no longer misleading.
 revoke all on function public.import_class_to_exam(varchar, uuid[])                                          from public;
 revoke all on function public.import_class_to_exam(varchar, uuid[])                                          from anon;
+revoke all on function public.update_exam_questions_safe(varchar, jsonb)                                     from anon;
+revoke all on function public.delete_exam(varchar)                                                           from anon;
+revoke all on function public.restore_exam(varchar)                                                          from anon;
+revoke all on function public.purge_expired_exams()                                                          from anon;
+revoke all on function public.recalculate_exam_scores(varchar)                                               from anon;
 grant execute on function public.import_class_to_exam(varchar, uuid[])                                       to authenticated;
 -- Internal helper: called only from other SECURITY DEFINER functions, never
 -- directly by a client (no EXECUTE grant to anon/authenticated).
