@@ -72,6 +72,10 @@ const RPC_MESSAGES = {
   // Phase 5.8 — practice-by-code refusals.
   PRACTICE_NOT_ALLOWED: 'Giáo viên chưa mở đề này cho chế độ luyện tập.',
   PRACTICE_EMPTY: 'Đề này chưa có câu hỏi nào để luyện tập.',
+  // Phase 8.9 — class-gated .docx self-practice.
+  CLASS_NOT_FOUND: 'Lớp học không tồn tại trên hệ thống. Vui lòng kiểm tra lại tên lớp!',
+  CLASS_PRACTICE_DISABLED: 'Lớp của bạn hiện đang tạm khóa quyền tự luyện tập. Vui lòng liên hệ giáo viên!',
+  STUDENT_NOT_FOUND: 'Thông tin học sinh không có trong danh sách của lớp này.',
   // Phase 7.4 — Tree of Knowledge participation.
   SESSION_NOT_FOUND: 'Phiên hoạt động không tồn tại hoặc đã bị xoá.',
   SESSION_INACTIVE: 'Phiên hoạt động đã kết thúc. Cảm ơn bạn đã tham gia!',
@@ -208,6 +212,13 @@ const state = {
    */
   practiceRoster: null,
   practiceRosterRequestId: 0,
+  /**
+   * Phase 8.9 — class names whose teachers permit DOCX self-practice, from
+   * `get_public_practice_classes()`. Offered in the class datalist so a student
+   * picks a class that will actually pass `verify_student_practice`.
+   */
+  practiceClasses: [],
+  practiceClassesLoaded: false,
   /** Phase 7.2 — Tree of Knowledge screen state. */
   treeRenderer: null,
   treeData: null,
@@ -2101,6 +2112,8 @@ function selectModeTab(mode) {
     hide($('officialPanel'));
     show($('practicePanel'));
     practiceError('');
+    // Phase 8.9 — populate the class picker the first time this tab opens.
+    void loadPracticeClasses();
   }
 }
 
@@ -2201,14 +2214,57 @@ async function loadPracticeRoster(examCode) {
 
 /** Clears the practice suggestion lists. */
 function clearPracticeDatalists() {
-  const classOptions = $('practiceClassOptions');
   const nameOptions = $('practiceStudentOptions');
-  if (classOptions) clear(classOptions);
   if (nameOptions) clear(nameOptions);
+  renderPracticeClassOptions();
 }
 
 /**
- * Fills the practice class/name datalists from a roster.
+ * Phase 8.9 — renders the class datalist from the public practice class list,
+ * merged with any class names carried by a loaded practice roster.
+ *
+ * The public list is what makes the .docx flow usable: it only contains names
+ * whose teacher left `allow_practice` on, so anything the student picks here is
+ * guaranteed to pass `verify_student_practice`.
+ */
+function renderPracticeClassOptions() {
+  const classOptions = $('practiceClassOptions');
+  if (!classOptions) return;
+
+  clear(classOptions);
+  const seen = new Set();
+  const add = (rawName) => {
+    const value = String(rawName || '').trim();
+    if (!value || seen.has(value)) return;
+    seen.add(value);
+    classOptions.appendChild(el('option', { attrs: { value } }));
+  };
+
+  state.practiceClasses.forEach(add);
+  if (Array.isArray(state.practiceRoster)) {
+    state.practiceRoster.forEach((row) => add(row.class_name));
+  }
+}
+
+/**
+ * Phase 8.9 — fetches the class names that allow DOCX self-practice.
+ *
+ * Best-effort, like the roster fetch: a failure only means the student types
+ * the class name manually, and the verification call still gates the upload.
+ * `practiceClassesLoaded` latches success so the RPC runs once per page load
+ * (a failed attempt stays unlatched and is retried on the next tab switch).
+ */
+async function loadPracticeClasses() {
+  if (state.practiceClassesLoaded) return;
+  const result = await callRpc('get_public_practice_classes', {});
+  if (!result.ok || result.data?.success !== true) return;
+  state.practiceClasses = Array.isArray(result.data.classes) ? result.data.classes : [];
+  state.practiceClassesLoaded = true;
+  renderPracticeClassOptions();
+}
+
+/**
+ * Fills the practice NAME datalist from a roster.
  *
  * The name list holds EVERY candidate (not just one class's): the class and name
  * inputs are independent text fields, so filtering names by the current class
@@ -2216,24 +2272,18 @@ function clearPracticeDatalists() {
  * narrows the suggestions as the student types.
  */
 function fillPracticeDatalists(candidates) {
-  const classOptions = $('practiceClassOptions');
   const nameOptions = $('practiceStudentOptions');
-  if (!classOptions || !nameOptions) return;
+  if (!nameOptions) return;
 
-  clear(classOptions);
   clear(nameOptions);
-
-  const seenClasses = new Set();
   candidates.forEach((candidate) => {
-    const className = String(candidate.class_name || '');
-    if (className && !seenClasses.has(className)) {
-      seenClasses.add(className);
-      classOptions.appendChild(el('option', { attrs: { value: className } }));
-    }
     if (candidate.full_name) {
       nameOptions.appendChild(el('option', { attrs: { value: candidate.full_name } }));
     }
   });
+  // The roster may name a class the public list omits (e.g. a practice-enabled
+  // exam from a class whose .docx permission is off), so merge it in.
+  renderPracticeClassOptions();
 }
 
 /**
@@ -2326,21 +2376,27 @@ async function startPracticeByFile() {
   }
 
   // --- 1. Authorization ---------------------------------------------------
-  // Phase 8.1 — the .docx path has no exam code, so there is no roster to derive
-  // a student code from. The RPC now matches on (full_name, class_name); the code
-  // is still forwarded when a practice roster happened to supply one.
+  // Phase 8.9 — the .docx path is gated on the CLASS roster now. The RPC checks
+  // that the class exists, that its teacher left `allow_practice` on, and that
+  // the student is one of its members — so a personal file can only be parsed
+  // for a student a teacher actually admitted. It normalizes Vietnamese text
+  // server-side, hence the NFC pass here (the client's half of the contract).
   const auth = await callRpc('verify_student_practice', {
-    p_class_name: state.className,
-    p_full_name: state.fullName,
+    p_class_name: normalizeText(state.className),
+    p_full_name: normalizeText(state.fullName),
     p_student_code: state.studentCode || null,
   });
   if (!auth.ok) {
     practiceError('Không kết nối được máy chủ. Vui lòng kiểm tra mạng và thử lại.');
     return;
   }
-  if (auth.data?.authorized !== true) {
-    practiceError(auth.data?.message
-      || 'Thông tin học sinh không có trong danh sách được phép ôn luyện.');
+  if (auth.data?.success !== true) {
+    practiceError(rpcMessage(
+      auth.data?.code,
+      auth.data?.message || 'Thông tin học sinh không có trong danh sách được phép ôn luyện.',
+    ));
+    // Reset the picker so the student can immediately retry with the right file.
+    fileInput.value = '';
     return;
   }
 
@@ -2357,7 +2413,9 @@ async function startPracticeByFile() {
   }
 
   // --- 3. Enter practice --------------------------------------------------
-  state.fullName = auth.data?.student_name || '';
+  // Prefer the roster row's canonical spelling; fall back to what was typed.
+  state.fullName = auth.data?.full_name || state.fullName;
+  state.studentCode = auth.data?.student_code || state.studentCode || '';
   state.examCode = '';
   state.practiceQuestions = payload.questions;
   enterPractice(file.name.replace(/\.docx$/i, ''));

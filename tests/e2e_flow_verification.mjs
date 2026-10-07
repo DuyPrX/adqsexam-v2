@@ -677,6 +677,26 @@ async function main() {
   });
   check('student whitelisted', !rosterInsert.error, rosterInsert.error?.message);
 
+  // Phase 8.9 — the .docx self-practice gate reads `classes` + `class_members`,
+  // not `students` (the whitelist above), so the same identity must also exist
+  // on a class roster. Step 11 exercises the gate on exactly this pair.
+  const practiceClassInsert = await teacher
+    .from('classes')
+    .insert({ user_id: teacherId, name: STUDENT.className, academic_year: '2026-2027' })
+    .select('id')
+    .single();
+  check('practice class created', !practiceClassInsert.error, practiceClassInsert.error?.message);
+  const practiceClassId = practiceClassInsert.data?.id;
+
+  const practiceMemberInsert = await teacher.from('class_members').insert({
+    class_id: practiceClassId,
+    student_code: STUDENT.code,
+    full_name: STUDENT.fullName,
+    team_number: 1,
+  });
+  check('practice class member created', !practiceMemberInsert.error,
+    practiceMemberInsert.error?.message);
+
   /* --- Realtime subscription (teacher side, before any student action) --- */
   step('3', 'Teacher subscribes to Realtime channels (D2)');
 
@@ -949,11 +969,17 @@ async function main() {
   check('failing result reports NOT_PASSED',
     failingVerify.data?.message === 'NOT_PASSED', String(failingVerify.data?.message));
 
-  /* --- 11. Authorized self-practice gate (Phase 5.2 / 8.1) -------------- */
+  /* --- 11. Authorized self-practice gate (Phase 5.2 / 8.1 / 8.9) -------- */
   // Phase 8.1 widened the signature to (p_class_name, p_full_name,
   // p_student_code DEFAULT NULL) so the personal-.docx path can authorise
-  // without a student code. Both paths are exercised here; Step 32 covers the
-  // dedicated practice exam.
+  // without a student code.
+  //
+  // Phase 8.9 RE-POINTED the gate: it no longer consults `public.students` (the
+  // exam whitelist) but the teacher's `classes` + `class_members` roster, and
+  // additionally honours `classes.allow_practice`. The contract is now
+  // success/code/message instead of authorized/student_name. Step 2 seeds the
+  // matching class row for exactly this identity; Step 41 covers the code paths
+  // (disabled class, unknown class, non-member).
   step(11, 'Self-practice authorization via verify_student_practice');
 
   const practiceOk = await student.rpc('verify_student_practice', {
@@ -961,53 +987,60 @@ async function main() {
     p_full_name: STUDENT.fullName,
   });
   check('practice RPC reachable by anon', !practiceOk.error, JSON.stringify(practiceOk.error));
-  check('whitelisted student is authorized', practiceOk.data?.authorized === true,
+  check('rostered member is authorized', practiceOk.data?.success === true,
     JSON.stringify(practiceOk.data));
   check('authorized response returns the canonical name',
-    practiceOk.data?.student_name === STUDENT.fullName, String(practiceOk.data?.student_name));
+    practiceOk.data?.full_name === STUDENT.fullName, String(practiceOk.data?.full_name));
+  check('authorized response returns the class name',
+    practiceOk.data?.class_name === STUDENT.className, String(practiceOk.data?.class_name));
 
   // The same identity, resolved by student_code instead of the name.
   const practiceByCode = await student.rpc('verify_student_practice', {
     p_class_name: STUDENT.className,
-    p_full_name: STUDENT.fullName,
+    p_full_name: 'Không Khớp Tên',
     p_student_code: STUDENT.code,
   });
-  check('authorising by student_code still works', practiceByCode.data?.authorized === true,
+  check('authorising by student_code still works', practiceByCode.data?.success === true,
     JSON.stringify(practiceByCode.data));
 
-  // Case- and whitespace-insensitive, mirroring verify_and_acquire_session().
+  // Case- and whitespace-insensitive, mirroring the SQL-side normalization.
   const practiceLoose = await student.rpc('verify_student_practice', {
     p_class_name: ` ${STUDENT.className.toLowerCase()}  `,
     p_full_name: `  ${STUDENT.fullName.toUpperCase()} `,
   });
-  check('match is case/whitespace-insensitive', practiceLoose.data?.authorized === true,
+  check('match is case/whitespace-insensitive', practiceLoose.data?.success === true,
     JSON.stringify(practiceLoose.data));
 
-  // Not on any roster.
+  // Unknown class -> CLASS_NOT_FOUND (Phase 8.9 changed this from a silent
+  // "not on any roster" rejection into an explicit, actionable code).
   const practiceBad = await student.rpc('verify_student_practice', {
     p_class_name: '99ZZ',
     p_full_name: 'Không Có Thật',
   });
-  check('unknown student is rejected', practiceBad.data?.authorized === false,
+  check('unknown class is rejected', practiceBad.data?.success === false,
     JSON.stringify(practiceBad.data));
+  check('unknown class reports CLASS_NOT_FOUND',
+    practiceBad.data?.code === 'CLASS_NOT_FOUND', String(practiceBad.data?.code));
   check('rejection carries a Vietnamese message',
     typeof practiceBad.data?.message === 'string' && practiceBad.data.message.length > 0,
     String(practiceBad.data?.message));
 
-  // Right student name, wrong class -> still rejected (both fields must match).
-  const practiceWrongClass = await student.rpc('verify_student_practice', {
-    p_class_name: '99ZZ',
-    p_full_name: STUDENT.fullName,
+  // Right class, but a name that is not on its roster.
+  const practiceWrongName = await student.rpc('verify_student_practice', {
+    p_class_name: STUDENT.className,
+    p_full_name: 'Trần Không Thuộc Lớp',
   });
-  check('mismatched class is rejected', practiceWrongClass.data?.authorized === false,
-    JSON.stringify(practiceWrongClass.data));
+  check('non-member is rejected', practiceWrongName.data?.success === false,
+    JSON.stringify(practiceWrongName.data));
+  check('non-member reports STUDENT_NOT_FOUND',
+    practiceWrongName.data?.code === 'STUDENT_NOT_FOUND', String(practiceWrongName.data?.code));
 
   // Empty input is rejected without touching the table.
   const practiceEmpty = await student.rpc('verify_student_practice', {
     p_class_name: '',
     p_full_name: '',
   });
-  check('empty credentials are rejected', practiceEmpty.data?.authorized === false,
+  check('empty credentials are rejected', practiceEmpty.data?.success === false,
     JSON.stringify(practiceEmpty.data));
 
   /* --- 12. Scheduling window (Phase 5.4) -------------------------------- */
@@ -4141,6 +4174,9 @@ async function main() {
     procCount('get_practice_exam_payload') === 1, String(procCount('get_practice_exam_payload')));
   check('32a: verify_student_practice has exactly one signature',
     procCount('verify_student_practice') === 1, String(procCount('verify_student_practice')));
+  check('32a: get_public_practice_classes has exactly one signature',
+    procCount('get_public_practice_classes') === 1,
+    String(procCount('get_public_practice_classes')));
 
   const anonCanExecute = (signature) => step32Sql(
     `select has_function_privilege('anon', 'public.${signature}'::regprocedure, 'execute')`,
@@ -4151,6 +4187,8 @@ async function main() {
     anonCanExecute('get_practice_exam_payload(varchar, varchar, varchar, varchar)'));
   check('32a: anon may execute verify_student_practice(varchar, varchar, varchar)',
     anonCanExecute('verify_student_practice(varchar, varchar, varchar)'));
+  check('32a: anon may execute get_public_practice_classes()',
+    anonCanExecute('get_public_practice_classes()'));
 
   // Phase 8.5 hardening — the five PRE-EXISTING teacher-only RPCs carried a stale
   // `anon` EXECUTE grant from Supabase's database default privileges (an explicit
@@ -4231,6 +4269,31 @@ async function main() {
   );
   check('32b: candidate exam seeded with a 2-person roster', !canRoster.error,
     canRoster.error?.message);
+
+  // Phase 8.9 — `verify_student_practice` now resolves against `classes` +
+  // `class_members`, not the exam whitelist above, so 32c needs a matching class
+  // roster with practice ENABLED (this step is about the payload RPC, not the
+  // class gate — Step 41 owns the disabled/unknown-class branches).
+  const canClass = await teacher
+    .from('classes')
+    .insert({ user_id: teacherId, name: CAN_CLASS, academic_year: '2026-2027', allow_practice: true })
+    .select('id')
+    .single();
+  check('32b: practice class created for the CAN roster', !canClass.error,
+    canClass.error?.message);
+  const canClassId = canClass.data?.id;
+
+  const canClassMembers = await teacher.from('class_members').insert(
+    CAN_MEMBERS.map((m) => ({
+      class_id: canClassId,
+      student_code: m.code,
+      full_name: m.fullName,
+      dob: m.dob,
+      pin: m.pin,
+    })),
+  );
+  check('32b: practice class members created', !canClassMembers.error,
+    canClassMembers.error?.message);
 
   const flexAnon = createClient(SB_URL, SB_PUBLISHABLE, {
     auth: { persistSession: false, autoRefreshToken: false },
@@ -4330,13 +4393,14 @@ async function main() {
   check('32c: authorising by student_code still succeeds',
     payloadByCode.data?.success === true, JSON.stringify(payloadByCode.data));
 
-  // verify_student_practice (the personal-.docx path) now accepts class + name.
+  // verify_student_practice (the personal-.docx path) resolves against the CLASS
+  // roster (Phase 8.9), and returns the success/code/full_name contract.
   const verifyByName = await flexAnon.rpc('verify_student_practice', {
     p_class_name: CAN_CLASS,
     p_full_name: CAN_MEMBERS[0].fullName,
   });
   check('32c: verify_student_practice authorises by (class_name, full_name)',
-    verifyByName.data?.authorized === true
+    verifyByName.data?.success === true
       && verifyByName.data?.student_code === CAN_MEMBERS[0].code,
     JSON.stringify(verifyByName.data));
 
@@ -4345,13 +4409,15 @@ async function main() {
     p_full_name: 'Không Có Thật',
   });
   check('32c: verify_student_practice refuses an unknown name',
-    verifyMissing.data?.authorized === false, JSON.stringify(verifyMissing.data));
+    verifyMissing.data?.success === false
+      && verifyMissing.data?.code === 'STUDENT_NOT_FOUND',
+    JSON.stringify(verifyMissing.data));
 
   const verifyBlank = await flexAnon.rpc('verify_student_practice', {
     p_class_name: '   ', p_full_name: '',
   });
   check('32c: verify_student_practice demands both fields',
-    verifyBlank.data?.authorized === false, JSON.stringify(verifyBlank.data));
+    verifyBlank.data?.success === false, JSON.stringify(verifyBlank.data));
 
   // --- 32d. teacher-web candidate CRUD -----------------------------------
   const listed = await listExamCandidates(teacher, CAN_EXAM.code);
@@ -6507,6 +6573,143 @@ async function main() {
 
   // --- 40l. cleanup -----------------------------------------------------
   await teacher.from('exams').delete().eq('code', FLEX_EXAM.code); // cascades
+
+  /* --- 41. Class-gated .docx self-practice (Phase 8.9) ------------------ */
+  // The .docx path is now authorised against the CLASS roster (classes +
+  // class_members) instead of the exam whitelist, and the owning teacher can
+  // suspend it per class via `classes.allow_practice`. This step walks every
+  // branch of the new contract plus the pick-list RPC the SPA fills from.
+  step(41, 'class-gated DOCX self-practice with teacher permission toggle');
+
+  // --- 41a. the column itself -------------------------------------------
+  // `not null default true` backfills in a single pass, so an existing class
+  // can never be left with a NULL permission.
+  const gateColumn = step32Sql(
+    `select is_nullable || '|' || coalesce(column_default, '') `
+    + `from information_schema.columns where table_schema = 'public' `
+    + `and table_name = 'classes' and column_name = 'allow_practice'`,
+  );
+  check('41a: classes.allow_practice is NOT NULL', gateColumn.startsWith('NO|'), gateColumn);
+  check('41a: classes.allow_practice defaults to true', gateColumn === 'NO|true', gateColumn);
+
+  // --- 41b. enable branch ------------------------------------------------
+  // Deliberately omits `allow_practice` on insert: the DB default must supply
+  // it, which is exactly what the teacher-web create modal relies on.
+  const GATE_CLASS = 'E2E-10A1-' + String(Math.floor(1000 + Math.random() * 9000));
+  const GATE_MEMBER = { code: 'E2E10A1', fullName: 'Nguyễn Văn Mười' };
+
+  const gateInsert = await teacher
+    .from('classes')
+    .insert({ user_id: teacherId, name: GATE_CLASS, academic_year: '2026-2027' })
+    .select('id, allow_practice')
+    .single();
+  check('41b: a new class defaults to allow_practice = true',
+    !gateInsert.error && gateInsert.data?.allow_practice === true,
+    gateInsert.error?.message ?? JSON.stringify(gateInsert.data));
+  const gateClassId = gateInsert.data?.id;
+
+  const gateMembers = await teacher.from('class_members').insert({
+    class_id: gateClassId,
+    student_code: GATE_MEMBER.code,
+    full_name: GATE_MEMBER.fullName,
+    team_number: 1,
+  });
+  check('41b: the practice class is seeded with one member', !gateMembers.error,
+    gateMembers.error?.message);
+
+  const gateOk = await flex40Anon.rpc('verify_student_practice', {
+    p_class_name: GATE_CLASS,
+    p_full_name: GATE_MEMBER.fullName,
+  });
+  check('41b: an enabled class authorises its member',
+    gateOk.data?.success === true && gateOk.data?.student_code === GATE_MEMBER.code,
+    JSON.stringify(gateOk.data));
+  check('41b: the success payload echoes class_name instead of authorized',
+    gateOk.data?.class_name === GATE_CLASS && !('authorized' in gateOk.data),
+    JSON.stringify(gateOk.data));
+
+  // A name that is not on THIS class's roster is refused with a distinct code,
+  // so the SPA can tell "wrong class" from "not your roster".
+  const gateStranger = await flex40Anon.rpc('verify_student_practice', {
+    p_class_name: GATE_CLASS,
+    p_full_name: 'Người Ngoài Lớp',
+  });
+  check('41b: a non-member is refused with STUDENT_NOT_FOUND',
+    gateStranger.data?.success === false && gateStranger.data?.code === 'STUDENT_NOT_FOUND',
+    JSON.stringify(gateStranger.data));
+
+  // --- 41c. the pick-list RPC -------------------------------------------
+  const listOn = await flex40Anon.rpc('get_public_practice_classes', {});
+  check('41c: get_public_practice_classes succeeds',
+    listOn.data?.success === true, JSON.stringify(listOn.data));
+  check('41c: it returns an array (never null) even when empty',
+    Array.isArray(listOn.data?.classes), JSON.stringify(listOn.data?.classes));
+  check('41c: it lists the practice-enabled class',
+    listOn.data.classes.includes(GATE_CLASS), JSON.stringify(listOn.data.classes));
+  // Ordered by the DATABASE's collation (jsonb_agg ... order by name), which is
+  // not necessarily a codepoint sort, so the expectation is built from the same
+  // ORDER BY rather than re-sorted in JS.
+  const gateExpectedOrder = step32Sql(
+    `select coalesce(string_agg(name, '|' order by name asc), '') `
+    + `from public.classes where allow_practice = true`,
+  );
+  check('41c: the list is ordered by class name',
+    listOn.data.classes.join('|') === gateExpectedOrder,
+    `got ${listOn.data.classes.join('|')} want ${gateExpectedOrder}`);
+
+  // --- 41d. disable branch ----------------------------------------------
+  const gateDisable = await teacher
+    .from('classes')
+    .update({ allow_practice: false })
+    .eq('id', gateClassId)
+    .select('allow_practice')
+    .single();
+  check('41d: the toggle persists false', gateDisable.data?.allow_practice === false,
+    gateDisable.error?.message ?? JSON.stringify(gateDisable.data));
+
+  const gateDisabled = await flex40Anon.rpc('verify_student_practice', {
+    p_class_name: GATE_CLASS,
+    p_full_name: GATE_MEMBER.fullName,
+  });
+  check('41d: a disabled class returns CLASS_PRACTICE_DISABLED',
+    gateDisabled.data?.success === false
+      && gateDisabled.data?.code === 'CLASS_PRACTICE_DISABLED',
+    JSON.stringify(gateDisabled.data));
+  check('41d: the disabled message names the teacher as the route to re-enable',
+    typeof gateDisabled.data?.message === 'string'
+      && gateDisabled.data.message.includes('giáo viên'),
+    String(gateDisabled.data?.message));
+
+  const listOff = await flex40Anon.rpc('get_public_practice_classes', {});
+  check('41d: a disabled class drops out of the pick list',
+    listOff.data?.classes.includes(GATE_CLASS) === false, JSON.stringify(listOff.data?.classes));
+
+  // --- 41e. unknown class ----------------------------------------------
+  const gateMissing = await flex40Anon.rpc('verify_student_practice', {
+    p_class_name: 'E2E-KHONG-TON-TAI-' + String(Math.floor(1000 + Math.random() * 9000)),
+    p_full_name: GATE_MEMBER.fullName,
+  });
+  check('41e: an unknown class returns CLASS_NOT_FOUND',
+    gateMissing.data?.success === false && gateMissing.data?.code === 'CLASS_NOT_FOUND',
+    JSON.stringify(gateMissing.data));
+
+  // --- 41f. the SPA is wired to the new gate ----------------------------
+  const appSrc41 = readFileSync(new URL('../student/app.js', import.meta.url), 'utf8');
+  check('41f: the SPA populates the picker from get_public_practice_classes',
+    appSrc41.includes("callRpc('get_public_practice_classes'"),
+    'the pick-list RPC is never called');
+  check('41f: the verification runs BEFORE the .docx is uploaded',
+    appSrc41.indexOf("callRpc('verify_student_practice'")
+      < appSrc41.indexOf('await extractPracticeDocx(file)'),
+    'the file is uploaded before authorisation');
+  check('41f: the SPA branches on the success contract',
+    appSrc41.includes('auth.data?.success !== true'), 'the old `authorized` check survived');
+  check('41f: a refused verification clears the file picker',
+    appSrc41.includes("fileInput.value = ''"), 'the rejected file is not reset');
+  check('41f: the SPA reads the roster full_name, not student_name',
+    appSrc41.includes('auth.data?.full_name'), 'the canonical name is not adopted');
+
+  await teacher.from('classes').delete().eq('id', gateClassId); // members cascade
 
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);

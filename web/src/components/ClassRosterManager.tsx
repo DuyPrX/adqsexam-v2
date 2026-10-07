@@ -18,6 +18,7 @@ import {
   deleteClassMember,
   listClassMembers,
   saveClassMembers,
+  togglePracticePermission,
 } from '@/lib/classes';
 import { parseStudentRosterFile } from '@/lib/excel';
 import { downloadStudentCsvTemplate } from '@/lib/studentTemplate';
@@ -47,9 +48,40 @@ export function ClassRosterManager({ initialClasses }: ClassRosterManagerProps) 
   const [treeClass, setTreeClass] = useState<ClassRow | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyMemberId, setBusyMemberId] = useState<string | null>(null);
+  /**
+   * Phase 8.9 — optimistic overrides for `classes.allow_practice`, keyed by id.
+   *
+   * The list itself stays server-authoritative (`initialClasses` + refresh), but
+   * a permission flip must feel instant, so the switch renders from this map
+   * until the refetched row arrives with the same value. A failed RPC deletes
+   * its own entry, reverting the switch.
+   */
+  const [practiceOverrides, setPracticeOverrides] = useState<Record<string, boolean>>({});
+  const [busyPracticeId, setBusyPracticeId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const selected = initialClasses.find((c) => c.id === selectedId) ?? null;
+
+  const isPracticeAllowed = (klass: ClassRow) => practiceOverrides[klass.id] ?? klass.allow_practice;
+
+  const handleTogglePractice = async (klass: ClassRow) => {
+    const next = !isPracticeAllowed(klass);
+    setError(null);
+    setPracticeOverrides((prev) => ({ ...prev, [klass.id]: next }));
+    setBusyPracticeId(klass.id);
+    try {
+      await togglePracticePermission(createClient(), klass.id, next);
+      router.refresh();
+    } catch (err) {
+      setPracticeOverrides((prev) => {
+        const { [klass.id]: _dropped, ...rest } = prev;
+        return rest;
+      });
+      setError(err instanceof PersistenceError ? err.message : 'Không cập nhật được quyền tự luyện tập.');
+    } finally {
+      setBusyPracticeId(null);
+    }
+  };
 
   const selectClass = async (classId: string) => {
     setSelectedId(classId);
@@ -137,58 +169,95 @@ export function ClassRosterManager({ initialClasses }: ClassRosterManagerProps) 
           </p>
         ) : (
           <ul className="space-y-1.5">
-            {initialClasses.map((klass) => (
-              <li key={klass.id}>
-                <div
-                  className={cn(
-                    'flex items-center justify-between gap-2 rounded-lg border px-3 py-2 transition',
-                    selectedId === klass.id
-                      ? 'border-slate-900 bg-slate-900 text-white'
-                      : 'border-slate-200 bg-white hover:bg-slate-50',
-                  )}
-                >
-                  <button
-                    type="button"
-                    onClick={() => void selectClass(klass.id)}
-                    className="flex-1 text-left"
+            {initialClasses.map((klass) => {
+              const practiceOn = isPracticeAllowed(klass);
+              return (
+                <li key={klass.id}>
+                  <div
+                    className={cn(
+                      'flex items-center justify-between gap-2 rounded-lg border px-3 py-2 transition',
+                      selectedId === klass.id
+                        ? 'border-slate-900 bg-slate-900 text-white'
+                        : 'border-slate-200 bg-white hover:bg-slate-50',
+                    )}
                   >
-                    <span className="block text-sm font-semibold">{klass.name}</span>
+                    <button
+                      type="button"
+                      onClick={() => void selectClass(klass.id)}
+                      className="flex-1 text-left"
+                    >
+                      <span className="block text-sm font-semibold">{klass.name}</span>
+                      <span
+                        className={cn(
+                          'block text-xs',
+                          selectedId === klass.id ? 'text-slate-300' : 'text-slate-500',
+                        )}
+                      >
+                        {klass.academic_year}
+                      </span>
+                    </button>
                     <span
                       className={cn(
-                        'block text-xs',
-                        selectedId === klass.id ? 'text-slate-300' : 'text-slate-500',
+                        'inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold',
+                        selectedId === klass.id
+                          ? 'bg-white/20 text-white'
+                          : 'bg-slate-100 text-slate-600',
                       )}
                     >
-                      {klass.academic_year}
+                      <Users size={11} />
+                      {klass.member_count ?? 0}
                     </span>
-                  </button>
-                  <span
-                    className={cn(
-                      'inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold',
-                      selectedId === klass.id
-                        ? 'bg-white/20 text-white'
-                        : 'bg-slate-100 text-slate-600',
-                    )}
-                  >
-                    <Users size={11} />
-                    {klass.member_count ?? 0}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => void handleDeleteClass(klass)}
-                    title="Xoá lớp"
-                    className={cn(
-                      'shrink-0 rounded-md p-1 transition',
-                      selectedId === klass.id
-                        ? 'text-slate-300 hover:bg-white/10 hover:text-white'
-                        : 'text-slate-400 hover:bg-rose-50 hover:text-rose-600',
-                    )}
-                  >
-                    <Trash2 size={14} />
-                  </button>
-                </div>
-              </li>
-            ))}
+                    <span
+                      title={practiceOn ? 'Học sinh được tự luyện tập' : 'Đã tắt tự luyện tập'}
+                      className={cn(
+                        'inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[11px] font-semibold',
+                        practiceOn
+                          ? selectedId === klass.id
+                            ? 'bg-emerald-400/25 text-emerald-100'
+                            : 'bg-emerald-50 text-emerald-700'
+                          : selectedId === klass.id
+                            ? 'bg-white/15 text-slate-200'
+                            : 'bg-slate-100 text-slate-500',
+                      )}
+                    >
+                      Tự luyện: {practiceOn ? 'Bật' : 'Tắt'}
+                    </span>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={practiceOn}
+                      aria-label={`Cho phép ${klass.name} tự luyện tập`}
+                      disabled={busyPracticeId === klass.id}
+                      onClick={() => void handleTogglePractice(klass)}
+                      className={cn(
+                        'relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition disabled:opacity-50',
+                        practiceOn ? 'bg-emerald-500' : 'bg-slate-300',
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          'inline-block h-3 w-3 transform rounded-full bg-white transition',
+                          practiceOn ? 'translate-x-3.5' : 'translate-x-0.5',
+                        )}
+                      />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleDeleteClass(klass)}
+                      title="Xoá lớp"
+                      className={cn(
+                        'shrink-0 rounded-md p-1 transition',
+                        selectedId === klass.id
+                          ? 'text-slate-300 hover:bg-white/10 hover:text-white'
+                          : 'text-slate-400 hover:bg-rose-50 hover:text-rose-600',
+                      )}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         )}
       </section>
@@ -343,6 +412,7 @@ function CreateClassModal({
 }) {
   const [name, setName] = useState('');
   const [academicYear, setAcademicYear] = useState('2026-2027');
+  const [allowPractice, setAllowPractice] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -350,7 +420,7 @@ function CreateClassModal({
     setError(null);
     setIsSaving(true);
     try {
-      const created = await createClass(createClient(), name, academicYear);
+      const created = await createClass(createClient(), name, academicYear, allowPractice);
       onCreated(created);
     } catch (err) {
       setError(err instanceof PersistenceError ? err.message : 'Không tạo được lớp.');
@@ -392,6 +462,18 @@ function CreateClassModal({
               placeholder="VD: 2025-2026"
               className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-slate-400"
             />
+          </label>
+
+          <label className="flex items-start gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+            <input
+              type="checkbox"
+              checked={allowPractice}
+              onChange={(event) => setAllowPractice(event.target.checked)}
+              className="mt-0.5 h-4 w-4 shrink-0 accent-slate-900"
+            />
+            <span className="text-sm text-slate-700">
+              Cho phép học sinh lớp này tự luyện tập bằng file DOCX
+            </span>
           </label>
 
           {error && (

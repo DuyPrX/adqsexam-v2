@@ -230,12 +230,23 @@ create table if not exists public.classes (
     user_id       uuid         not null references auth.users (id) on delete cascade,
     name          varchar(100) not null,
     academic_year varchar(20)  default '2026-2027',
+    -- Phase 8.9 — teacher switch gating personal-.docx self-practice for this
+    -- class. Read by the public verify_student_practice() below.
+    allow_practice boolean     not null default true,
     created_at    timestamptz  default now(),
     updated_at    timestamptz  default now(),
     constraint classes_user_name_uniq unique (user_id, name)
 );
 
 comment on table public.classes is 'Teacher-owned class roster container (Phase 6.1). Imported into exams via import_class_to_exam().';
+
+-- Idempotency for databases created before Phase 8.9. `not null default true`
+-- backfills in a single pass, so no row is ever NULL for a column the public
+-- gate tests with `IF NOT allow_practice`.
+alter table public.classes add column if not exists allow_practice boolean not null default true;
+create index if not exists idx_classes_allow_practice on public.classes (allow_practice);
+
+comment on column public.classes.allow_practice is 'Teacher switch: may this class self-practise with a personal .docx (Phase 8.9)? Default true.';
 
 -- ----------------------------------------------------------------------------
 -- A.8  class_members — the students belonging to a class (Phase 6.1).
@@ -1328,30 +1339,32 @@ $$;
 
 
 -- ----------------------------------------------------------------------------
--- C.7  verify_student_practice  (PUBLIC — anon, Phase 5.2)
---      Gate for AUTHORIZED SELF-PRACTICE. A candidate may practise with any
---      .docx of their own choosing as long as their identity appears in the
---      whitelist of ANY exam roster ever imported — the exam_code is
---      deliberately NOT part of the match, because practice is not tied to a
---      published exam.
+-- C.7  verify_student_practice  (PUBLIC — anon, Phase 5.2 / 8.9)
+--      Gate for AUTHORIZED SELF-PRACTICE with a personal .docx.
 --
---      Phase 8.1: matches on (full_name, class_name) — falling back to
---      student_code only when one is supplied — because the student SPA no
---      longer shows a student-code input. This is REQUIRED for coherence, not
---      cosmetic: the .docx path has no exam code, so it cannot look up a roster
---      picker and name+class is the only identity it can offer.
+--      Phase 8.9: the gate is the CLASS ROSTER, not an exam roster. The class
+--      must exist, its `allow_practice` must be true, and the candidate must be
+--      a `class_members` row of THAT class. Previously this matched
+--      `public.students` — the whitelist of any exam the candidate had been
+--      imported into — which made the gate a side-effect of historical imports
+--      and left the teacher no way to switch a class off.
 --
---      Matching is case- and whitespace-insensitive on every field, mirroring
---      the tolerance of verify_and_acquire_session().
+--      Consequences, both intentional:
+--        * authorisation no longer consults `public.students` at all;
+--        * a teacher with no `classes` row now gets CLASS_NOT_FOUND. `classes`
+--          is the source of truth (import_class_to_exam() copies it into exams),
+--          so the gate now agrees with how rosters are actually maintained.
 --
---      This is an authorization probe only: it writes nothing, reveals no
---      exam content, and returns the canonical full_name so the client can
---      greet the student. Practice exams are never persisted (no `exams`,
---      `question_bank`, `active_sessions` or `exam_results` rows are touched).
+--      Matching is case- and whitespace-insensitive on every field (NFC is the
+--      client's job; SQL collapses UTF-8 whitespace), mirroring
+--      verify_and_acquire_session().
 --
---      The parameter ORDER changed (class_name first, student_code last and
---      optional), so the old 2-arg function is dropped first — `create or
---      replace` alone would leave both signatures callable.
+--      This is an authorization probe only: it writes nothing, reveals no exam
+--      content, and echoes the caller's own identity back.
+--
+--      The SIGNATURE is unchanged from Phase 8.1, so this is a plain create or
+--      replace — no drop, hence no window without the function and no lost ACL.
+--      (The older 2-arg overload was dropped back in Phase 8.1; see the history.)
 -- ----------------------------------------------------------------------------
 drop function if exists public.verify_student_practice(varchar, varchar);
 
@@ -1365,50 +1378,145 @@ security definer
 set search_path = public, pg_temp
 as $$
 declare
-    v_match   public.students%rowtype;
+    v_class   public.classes%rowtype;
+    v_member  public.class_members%rowtype;
+    v_name    varchar;
+    v_class_n varchar;
+    -- Tracked explicitly rather than relying on FOUND: a skipped branch would
+    -- otherwise leave FOUND holding whatever the previous statement set. (Testing
+    -- an unassigned RECORD with `IS NULL` also raises "record is not assigned
+    -- yet".)
     v_matched boolean := false;
 begin
-    if p_class_name is null or trim(p_class_name) = ''
-       or p_full_name is null or trim(p_full_name) = '' then
+    if p_class_name is null or trim(p_class_name) = '' then
         return jsonb_build_object(
-            'authorized', false,
-            'message',    'Vui lòng nhập đầy đủ Họ tên và Lớp.'
+            'success', false,
+            'code',    'CLASS_REQUIRED',
+            'message', 'Vui lòng nhập hoặc chọn tên lớp.'
         );
     end if;
 
-    -- `v_matched` is tracked explicitly rather than relying on FOUND: an
-    -- if/elsif where no branch runs leaves FOUND holding the previous value.
+    if p_full_name is null or trim(p_full_name) = '' then
+        return jsonb_build_object(
+            'success', false,
+            'code',    'NAME_REQUIRED',
+            'message', 'Vui lòng nhập họ và tên của bạn.'
+        );
+    end if;
+
+    v_class_n := lower(regexp_replace(trim(p_class_name), '\s+', ' ', 'g'));
+    v_name    := lower(regexp_replace(trim(p_full_name),  '\s+', ' ', 'g'));
+
+    -- 1. Resolve the class by normalized name.
+    --
+    --    `classes` is per-teacher, so two teachers may own a class of the same
+    --    name. ORDER BY puts an ENABLED class first, which is load-bearing:
+    --    get_public_practice_classes() lists a name when ANY teacher permits
+    --    practice, so a name offered in that pick-list must actually verify.
+    --    Ordering by id alone could resolve a listed name to a different
+    --    tenant's disabled class and refuse it with CLASS_PRACTICE_DISABLED.
+    select * into v_class
+      from public.classes c
+     where lower(regexp_replace(trim(c.name), '\s+', ' ', 'g')) = v_class_n
+     order by c.allow_practice desc, c.id
+     limit 1;
+
+    if not found then
+        return jsonb_build_object(
+            'success', false,
+            'code',    'CLASS_NOT_FOUND',
+            'message', 'Lớp học không tồn tại trên hệ thống. Vui lòng kiểm tra lại tên lớp!'
+        );
+    end if;
+
+    -- 2. The teacher's permission switch.
+    if not v_class.allow_practice then
+        return jsonb_build_object(
+            'success', false,
+            'code',    'CLASS_PRACTICE_DISABLED',
+            'message', 'Lớp của bạn hiện đang tạm khóa quyền tự luyện tập. Vui lòng liên hệ giáo viên!'
+        );
+    end if;
+
+    -- 3. Candidate must be a member of THAT class. Fast path by student_code when
+    --    supplied, else the normalized full name; both scoped to `class_id`, so
+    --    membership of another class never authorises.
     if p_student_code is not null and trim(p_student_code) <> '' then
-        select * into v_match
-          from public.students s
-         where lower(trim(s.student_code)) = lower(trim(p_student_code))
-           and lower(trim(s.class_name))   = lower(trim(p_class_name))
+        select * into v_member
+          from public.class_members m
+         where m.class_id = v_class.id
+           and lower(trim(m.student_code)) = lower(trim(p_student_code))
          limit 1;
         v_matched := found;
-    else
-        select * into v_match
-          from public.students s
-         where lower(trim(s.full_name))  = lower(trim(p_full_name))
-           and lower(trim(s.class_name)) = lower(trim(p_class_name))
-         order by s.student_code
+    end if;
+
+    if not v_matched then
+        select * into v_member
+          from public.class_members m
+         where m.class_id = v_class.id
+           and lower(regexp_replace(trim(m.full_name), '\s+', ' ', 'g')) = v_name
+         -- A class may hold two students with the same name ((class_id,
+         -- student_code) is the unique key, not the name); the lowest code is a
+         -- stable pick and cannot escalate — it only echoes that row's identity.
+         order by m.student_code
          limit 1;
         v_matched := found;
     end if;
 
     if not v_matched then
         return jsonb_build_object(
-            'authorized', false,
-            'message',    'Thông tin học sinh không có trong danh sách được phép ôn luyện.'
+            'success', false,
+            'code',    'STUDENT_NOT_FOUND',
+            'message', 'Thông tin học sinh không có trong danh sách của lớp này.'
         );
     end if;
 
     return jsonb_build_object(
-        'authorized',   true,
-        'student_name', v_match.full_name,
-        'student_code', v_match.student_code
+        'success',      true,
+        'class_name',   v_class.name,
+        'full_name',    v_member.full_name,
+        'student_code', v_member.student_code
     );
 end;
 $$;
+
+comment on function public.verify_student_practice(varchar, varchar, varchar) is
+    'Public gate for personal-.docx self-practice. Class must exist and have allow_practice = true, and the candidate must be a class_members row of THAT class (Phase 8.9).';
+
+
+-- ----------------------------------------------------------------------------
+-- C.7b  get_public_practice_classes  (PUBLIC — anon, Phase 8.9)
+--       Distinct class names whose teacher permits self-practice, for the SPA's
+--       class pick-list. Anon-executable BY DESIGN: the SPA populates a datalist
+--       before the student has identified themselves. Exposes class NAMES only —
+--       no member, credential or result data. DISTINCT because `classes` is
+--       per-teacher and two teachers may share a class name.
+-- ----------------------------------------------------------------------------
+create or replace function public.get_public_practice_classes()
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+    v_classes jsonb;
+begin
+    select jsonb_agg(distinct c.name order by c.name asc)
+      into v_classes
+      from public.classes c
+     where c.allow_practice = true;
+
+    return jsonb_build_object(
+        'success', true,
+        -- coalesce, not `[]`: jsonb_agg over zero rows yields NULL, and the
+        -- client iterates this unconditionally.
+        'classes', coalesce(v_classes, '[]'::jsonb)
+    );
+end;
+$$;
+
+comment on function public.get_public_practice_classes() is
+    'Distinct class names with allow_practice = true, for the student SPA class pick-list (Phase 8.9).';
 
 
 -- ----------------------------------------------------------------------------
@@ -2428,6 +2536,8 @@ revoke all on function public.submit_exam_result(varchar, varchar, uuid, jsonb, 
 revoke all on function public.record_proctoring_snapshot(varchar, varchar, uuid, text)                     from public;
 revoke all on function public.get_certificate_verification(uuid)                                          from public;
 revoke all on function public.verify_student_practice(varchar, varchar, varchar)                           from public;
+-- Phase 8.9 — student-facing class pick-list for personal-.docx practice.
+revoke all on function public.get_public_practice_classes()                                               from public;
 revoke all on function public.update_exam_questions_safe(varchar, jsonb)                                   from public;
 revoke all on function public.grade_exam_answers(uuid, jsonb)                                              from public;
 revoke all on function public.delete_exam(varchar)                                                         from public;
@@ -2452,6 +2562,9 @@ grant execute on function public.submit_exam_result(varchar, varchar, uuid, json
 grant execute on function public.record_proctoring_snapshot(varchar, varchar, uuid, text)                     to anon, authenticated;
 grant execute on function public.get_certificate_verification(uuid)                                           to anon, authenticated;
 grant execute on function public.verify_student_practice(varchar, varchar, varchar)                             to anon, authenticated;
+-- Phase 8.9 — anon by design: the SPA lists valid classes BEFORE the student has
+-- an identity. Exposes class names only (no member/credential/result data).
+grant execute on function public.get_public_practice_classes()                                                 to anon, authenticated;
 -- Phase 5.8: student-facing, but the body gates on the exam roster + allow_practice.
 grant execute on function public.get_practice_exam_payload(varchar, varchar, varchar, varchar)                  to anon, authenticated;
 -- Phase 6.3 / 8.1 — student-facing: the roster picker must work BEFORE the student

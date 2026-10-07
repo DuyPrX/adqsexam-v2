@@ -14,7 +14,7 @@ import type { ClassMemberInput, ClassMemberRow, ClassRow } from './types';
  */
 
 /** Columns read for a class row. */
-const CLASS_COLUMNS = 'id, user_id, name, academic_year, created_at, updated_at';
+const CLASS_COLUMNS = 'id, user_id, name, academic_year, allow_practice, created_at, updated_at';
 const MEMBER_COLUMNS = 'id, class_id, student_code, full_name, dob, pin, team_number, created_at';
 
 /** Shape of the nested aggregate `class_members(count)`. */
@@ -56,6 +56,7 @@ export async function createClass(
   supabase: SupabaseClient,
   name: string,
   academicYear: string,
+  allowPractice = true,
 ): Promise<ClassRow> {
   const trimmedName = name.trim();
   if (!trimmedName) throw new PersistenceError('Vui lòng nhập tên lớp.');
@@ -67,6 +68,7 @@ export async function createClass(
       user_id: userId,
       name: trimmedName,
       academic_year: academicYear.trim() || '2026-2027',
+      allow_practice: allowPractice,
     })
     .select(CLASS_COLUMNS)
     .single<ClassRow>();
@@ -78,6 +80,30 @@ export async function createClass(
     }
     throw new PersistenceError(`Không tạo được lớp: ${error.message}`);
   }
+  return data;
+}
+
+/**
+ * Phase 8.9 — flips the DOCX self-practice permission for one class.
+ *
+ * RLS (`classes_owner_all`) scopes the UPDATE to the owning teacher, so a
+ * foreign `classId` simply matches no row; that is reported as "not found"
+ * rather than silently succeeding.
+ */
+export async function togglePracticePermission(
+  supabase: SupabaseClient,
+  classId: string,
+  allow: boolean,
+): Promise<ClassRow> {
+  const { data, error } = await supabase
+    .from('classes')
+    .update({ allow_practice: allow })
+    .eq('id', classId)
+    .select(CLASS_COLUMNS)
+    .maybeSingle<ClassRow>();
+
+  if (error) throw new PersistenceError(`Không cập nhật được quyền tự luyện tập: ${error.message}`);
+  if (!data) throw new PersistenceError('Không tìm thấy lớp để cập nhật.');
   return data;
 }
 

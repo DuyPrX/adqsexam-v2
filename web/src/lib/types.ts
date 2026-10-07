@@ -108,6 +108,13 @@ export interface ClassRow {
   user_id: string;
   name: string;
   academic_year: string;
+  /**
+   * Phase 8.9 — teacher-controlled permission gate for DOCX self-practice.
+   * When false, `verify_student_practice` refuses every member of this class
+   * with `CLASS_PRACTICE_DISABLED`, and the class name drops out of
+   * `get_public_practice_classes()`. Defaults true server-side.
+   */
+  allow_practice: boolean;
   created_at: string;
   updated_at: string;
   /** Nested aggregate from `select('*, class_members(count)')`, when requested. */
