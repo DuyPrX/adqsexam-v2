@@ -83,10 +83,25 @@
           </p>
 
           <form id="loginForm" class="login__form" novalidate>
+            <!-- Phase 8.8 — Mã đề thi is FIRST, as the entry point of the flow.
+                 Everything below it (class, name, PIN) is derived from the exam
+                 this code identifies. -->
             <div class="field">
               <label for="exam-code">Mã đề thi</label>
-              <input id="exam-code" name="examCode" type="text" inputmode="numeric"
-                     autocomplete="off" maxlength="6" placeholder="6 chữ số" required />
+              <div class="input-with-button">
+                <input id="exam-code" name="examCode" type="text" inputmode="numeric"
+                       autocomplete="off" maxlength="6" placeholder="6 chữ số" required />
+                <button type="button" id="btnVerifyExamCode" class="btn btn--ghost">
+                  Kiểm tra đề
+                </button>
+              </div>
+              <!-- Phase 8.8 — exam identity, shown once get_exam_roster() succeeds
+                   so the student can confirm they are in the right room before
+                   choosing a name. Hidden until then (and on any failure). -->
+              <div id="examMetaBanner" class="exam-meta-banner hidden" role="status">
+                <span id="examMetaTitle" class="exam-meta-banner__title"></span>
+                <span id="examMetaStatus" class="exam-meta-banner__status"></span>
+              </div>
             </div>
 
             <!-- Phase 6.3 — roster picker. Populated by get_exam_roster() once a
@@ -133,13 +148,19 @@
 
             <!-- Phase 6.3 — PIN. Hidden when the exam's pin_mode is NONE. Left
                  VISIBLE in the manual fallback, where pin_mode is unknown and a
-                 GLOBAL exam would otherwise be impossible to enter. -->
+                 GLOBAL exam would otherwise be impossible to enter.
+
+                 Phase 8.8 — the label and hint are rewritten from the exam's
+                 pin_mode once the roster loads (GLOBAL = one shared code the
+                 teacher announced; INDIVIDUAL = your own PIN, or DDMM as the
+                 fallback), so the student is never guessing which credential the
+                 field wants. -->
             <div id="pin-field-group" class="field">
-              <label for="student-pin">Mã PIN bảo vệ</label>
+              <label for="student-pin" id="labelStudentPin">Mã PIN bảo vệ</label>
               <input id="student-pin" name="studentPin" type="password"
                      autocomplete="current-password" maxlength="50"
                      placeholder="Nhập PIN hoặc ngày sinh DDMM" />
-              <small class="hint-text">
+              <small class="hint-text" id="hintStudentPin">
                 Nhập mã PIN do giáo viên cấp, hoặc ngày sinh dạng DDMM (VD: 0509 nếu sinh 05/09).
               </small>
             </div>
@@ -173,6 +194,22 @@
                       role="tab" aria-selected="false" aria-controls="practiceFileFields">Tải file đề cá nhân (.docx)</button>
             </div>
 
+            <!-- Source A: an exam the teacher explicitly opened for practice.
+                 Phase 8.8 — moved ABOVE the identity fields, so the exam code is
+                 the first thing entered, exactly as in the official form. Both
+                 sources still share the class/name fields below. -->
+            <div id="practiceCodeFields">
+              <div class="field">
+                <label for="practice-exam-code">Mã đề luyện tập</label>
+                <input id="practice-exam-code" name="practice-exam-code" type="text"
+                       inputmode="numeric" autocomplete="off" maxlength="20"
+                       placeholder="Nhập mã đề (VD: 839201)" />
+                <small class="hint-text">
+                  Nhập mã đề để gợi ý danh sách lớp và tên, hoặc tự điền ở dưới.
+                </small>
+              </div>
+            </div>
+
             <!-- Phase 8.1 — no student-code input anywhere. The shared identity
                  fields are Class + Full Name.
 
@@ -194,19 +231,6 @@
                      list="practiceStudentOptions" autocomplete="off" maxlength="150"
                      placeholder="VD: Nguyễn Văn A" required />
               <datalist id="practiceStudentOptions"></datalist>
-            </div>
-
-            <!-- Source A: an exam the teacher explicitly opened for practice. -->
-            <div id="practiceCodeFields">
-              <div class="field">
-                <label for="practice-exam-code">Mã đề luyện tập</label>
-                <input id="practice-exam-code" name="practice-exam-code" type="text"
-                       inputmode="numeric" autocomplete="off" maxlength="20"
-                       placeholder="Nhập mã đề (VD: 839201)" />
-                <small class="hint-text">
-                  Nhập mã đề để gợi ý danh sách lớp và tên, hoặc tự điền ở trên.
-                </small>
-              </div>
             </div>
 
             <!-- Source B: a personal .docx, parsed on the fly (Phase 5.2). -->

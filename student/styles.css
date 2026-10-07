@@ -575,6 +575,38 @@ body {
 }
 .roster-status.is-error { background: var(--danger-weak); color: var(--danger); border-color: var(--danger); }
 
+/* ---------- Phase 8.8: exam-code row + exam identity banner ---------- */
+
+/* The code input and its "Kiểm tra đề" button share one row. `flex` on the
+   wrapper rather than a grid so the button keeps its intrinsic width and the
+   input absorbs the remainder at every breakpoint. Wraps on narrow screens
+   instead of crushing the input below a usable width. */
+.input-with-button { display: flex; gap: 8px; align-items: stretch; }
+.input-with-button > input { flex: 1 1 auto; min-width: 0; }
+.input-with-button > .btn { flex: 0 0 auto; padding-left: 14px; padding-right: 14px; }
+@media (max-width: 420px) {
+  .input-with-button { flex-wrap: wrap; }
+  .input-with-button > .btn { width: 100%; }
+}
+
+/* Exam identity, revealed once get_exam_roster() succeeds. `role="status"` in
+   the markup means the title is announced when it appears, which is the point:
+   the student confirms the paper before picking a name. */
+.exam-meta-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin-top: 8px; padding: 10px 12px; border-radius: var(--radius-sm);
+  background: var(--surface-2); border: 1px solid var(--border-strong);
+}
+.exam-meta-banner__title {
+  font-size: 14px; font-weight: 700; color: var(--text);
+  /* A long exam title must not push the duration out of the card. */
+  min-width: 0; overflow-wrap: anywhere;
+}
+.exam-meta-banner__status {
+  flex: 0 0 auto; font-size: 13px; font-weight: 600; color: var(--text-muted);
+  white-space: nowrap;
+}
+
 /* ---------- buttons ---------- */
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 8px;

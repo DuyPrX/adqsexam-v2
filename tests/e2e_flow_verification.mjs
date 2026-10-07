@@ -123,6 +123,16 @@
  *      provider-gated shortlist from the environment; and the Worker resolves both its
  *      model (`AI_MODEL_NAME`, legacy aliases still honoured) and its CORS origins
  *      (`ALLOWED_ORIGINS`) from bindings — proven by driving the real Hono app.
+ *  40. Top-first exam code entry & flexible candidate lookup (Phase 8.8): the exam
+ *      code physically precedes every identity field in both the official form and
+ *      the practice panel; the exam banner and its explicit verify trigger exist;
+ *      `readIdentity` no longer hard-blocks on a missing roster; `normalizeText`
+ *      (executed) trims, collapses whitespace and unifies NFC; the SQL normalizes
+ *      both the caller's input and the stored row, keeps `student_code` as a fast
+ *      path with `(class_name, full_name)` as the fallback, and retains all five
+ *      security guards; and a live round-trip authenticates a candidate from a
+ *      NULL code despite case/whitespace differences while refusing a wrong name,
+ *      a wrong class and an unknown identity.
  *
  * Usage:
  *   node v2/tests/e2e_flow_verification.mjs
@@ -6183,6 +6193,320 @@ async function main() {
   } finally {
     globalThis.fetch = realFetch39;
   }
+
+  /* --- 40. top-first exam code entry + flexible candidate lookup (8.8) -- */
+  step(40, 'top-first exam code entry, progressive roster picker, dual-auth fallback');
+
+  // --- 40a. the official form puts the exam code FIRST -------------------
+  // Order is asserted on the RAW STRING INDEX, not on a parsed DOM: there is no
+  // HTML parser in this toolchain, and `indexOf` is exactly the question being
+  // asked ("does the code input physically precede the identity fields?").
+  const indexHtml40 = readFileSync(new URL('../student/index.html', import.meta.url), 'utf8');
+  const loginForm40 = indexHtml40.slice(
+    indexHtml40.indexOf('id="loginForm"'),
+    indexHtml40.indexOf('id="practicePanel"'),
+  );
+  const posExamCode = loginForm40.indexOf('id="exam-code"');
+  const posClass = loginForm40.indexOf('id="class-select"');
+  const posName = loginForm40.indexOf('id="student-select"');
+  const posManualClass = loginForm40.indexOf('id="class-name-input"');
+  const posManualName = loginForm40.indexOf('id="student-name-input"');
+  check('40a: the exam-code input renders before the class picker',
+    posExamCode !== -1 && posClass !== -1 && posExamCode < posClass,
+    `exam-code@${posExamCode} class-select@${posClass}`);
+  check('40a: the exam-code input renders before the name picker',
+    posExamCode !== -1 && posName !== -1 && posExamCode < posName,
+    `exam-code@${posExamCode} student-select@${posName}`);
+  check('40a: the exam-code input renders before the manual identity fields',
+    posExamCode < posManualClass && posExamCode < posManualName,
+    `exam-code@${posExamCode} manual@${posManualClass}/${posManualName}`);
+  check('40a: the exam code is the FIRST control of the official form',
+    posExamCode !== -1
+      && posExamCode < loginForm40.indexOf('type="submit"'),
+    'the code is not the first field');
+
+  // The banner + verify button are what make the code-first flow usable.
+  check('40a: the exam meta banner exists with both slots',
+    loginForm40.includes('id="examMetaBanner"')
+      && loginForm40.includes('id="examMetaTitle"')
+      && loginForm40.includes('id="examMetaStatus"'),
+    'banner markup missing');
+  check('40a: it has an explicit "Kiểm tra đề" trigger',
+    loginForm40.includes('id="btnVerifyExamCode"'), 'verify button missing');
+  check('40a: the PIN label and hint are addressable for the dynamic rewrite',
+    loginForm40.includes('id="labelStudentPin"') && loginForm40.includes('id="hintStudentPin"'),
+    'PIN label/hint ids missing');
+
+  // --- 40b. the practice panel is likewise top-first --------------------
+  const practicePanel40 = indexHtml40.slice(indexHtml40.indexOf('id="practicePanel"'));
+  check('40b: the practice exam code renders before the practice class field',
+    practicePanel40.indexOf('id="practice-exam-code"') !== -1
+      && practicePanel40.indexOf('id="practice-exam-code"')
+        < practicePanel40.indexOf('id="practiceClassName"'),
+    `code@${practicePanel40.indexOf('id="practice-exam-code"')} class@${practicePanel40.indexOf('id="practiceClassName"')}`);
+  check('40b: the practice exam code renders before the practice name field',
+    practicePanel40.indexOf('id="practice-exam-code"')
+      < practicePanel40.indexOf('id="practiceStudentName"'),
+    'practice code is not first');
+
+  // --- 40c. readIdentity no longer REQUIRES a roster --------------------
+  // The behaviour that makes a failed roster fetch survivable: the manual branch
+  // must not return an error just because `state.roster` is empty.
+  const appSrc40 = readFileSync(new URL('../student/app.js', import.meta.url), 'utf8');
+  const readIdentityBody = appSrc40.slice(
+    appSrc40.indexOf('function readIdentity()'),
+    appSrc40.indexOf('async function handleLoginSubmit'),
+  );
+  check('40c: readIdentity no longer blocks on a missing roster',
+    !readIdentityBody.includes('danh sách dự thi nên không thể xác minh'),
+    'the empty-roster hard block survived');
+  check('40c: readIdentity tolerates a null roster when matching',
+    readIdentityBody.includes('(state.roster || [])'), 'the roster is dereferenced unsafely');
+  check('40c: readIdentity sends a null code when nothing matched',
+    readIdentityBody.includes('match ? match.student_code : null'),
+    'a missing match does not degrade to a null code');
+
+  // --- 40d. normalizeText -----------------------------------------------
+  // Executed, not inspected: the function is pure and DOM-free, so the suite can
+  // evaluate the shipped definition directly.
+  const normalizeTextSrc = appSrc40.slice(
+    appSrc40.indexOf('function normalizeText'),
+    appSrc40.indexOf('/* =====', appSrc40.indexOf('function normalizeText')),
+  );
+  const normalizeText = new Function(`${normalizeTextSrc}; return normalizeText;`)();
+  check('40d: normalizeText trims and lower-cases',
+    normalizeText('  Nguyễn Văn A  ') === 'nguyễn văn a', normalizeText('  Nguyễn Văn A  '));
+  check('40d: normalizeText collapses internal whitespace',
+    normalizeText('Nguyễn   Văn\tA') === 'nguyễn văn a', normalizeText('Nguyễn   Văn\tA'));
+  // The whole reason for NFC: a decomposed Vietnamese name must equal the same
+  // name in composed form. The decomposed form is DERIVED with `normalize('NFD')`
+  // rather than hand-written, so the test cannot itself be wrong about which
+  // combining marks a given glyph decomposes into.
+  const composed = 'Nguyễn';
+  const decomposed = composed.normalize('NFD');
+  check('40d: the NFC fixture is meaningful (composed and decomposed really differ)',
+    composed !== decomposed, 'the two forms are identical, so the next check is vacuous');
+  check('40d: normalizeText unifies NFC-composed and decomposed diacritics',
+    normalizeText(composed) === normalizeText(decomposed),
+    `${normalizeText(composed)} vs ${normalizeText(decomposed)}`);
+  check('40d: normalizeText maps every falsy input to an empty string',
+    normalizeText('') === '' && normalizeText(null) === '' && normalizeText(undefined) === '',
+    'a falsy input did not resolve to empty');
+
+  // --- 40e. the SQL lookup is normalized on BOTH sides ------------------
+  // The client normalizes; the server must too, or a double space typed by the
+  // student would still fail. Asserted on the function source because the
+  // comparison is an authentication decision worth pinning.
+  const schemaSrc40 = readFileSync(new URL('../supabase/schema.sql', import.meta.url), 'utf8');
+  const verifySrc40 = schemaSrc40.slice(
+    schemaSrc40.indexOf('create or replace function public.verify_and_acquire_session'),
+    schemaSrc40.indexOf('-- C.2  record_student_heartbeat'),
+  );
+  check('40e: the RPC normalizes the supplied name and class',
+    verifySrc40.includes("v_name  := nullif(lower(regexp_replace(trim(coalesce(p_full_name, '')), '\\s+', ' ', 'g')), '')")
+      && verifySrc40.includes("v_class := nullif(lower(regexp_replace(trim(coalesce(p_class_name, '')), '\\s+', ' ', 'g')), '')"),
+    'the inputs are not normalized');
+  check('40e: the RPC normalizes the stored row before comparing',
+    verifySrc40.includes("lower(regexp_replace(trim(s.full_name),  '\\s+', ' ', 'g')) = v_name")
+      && verifySrc40.includes("lower(regexp_replace(trim(s.class_name), '\\s+', ' ', 'g')) = v_class"),
+    'the stored side is not normalized');
+  check('40e: the code is a fast path and the name+class pair the fallback',
+    verifySrc40.includes('if v_code is not null then')
+      && verifySrc40.includes('elsif v_name is not null and v_class is not null then'),
+    'the two lookup strategies are not both present');
+  check('40e: a blank/whitespace code degrades to the fallback (nullif)',
+    verifySrc40.includes("v_code  := nullif(lower(trim(coalesce(p_student_code, ''))), '')"),
+    'a blank code would be treated as a real code');
+
+  // --- 40f. every security guard survived the rewrite -------------------
+  // The rewrite touched a SECURITY DEFINER authentication path, so the guards
+  // that existed before it are re-asserted explicitly.
+  check('40f: the duplicate-submission guard is keyed on the RESOLVED code',
+    verifySrc40.includes('exam_code = p_exam_code and student_code = v_student.student_code'),
+    'the ALREADY_SUBMITTED probe uses the caller-supplied code');
+  check('40f: the single-device lock is keyed on the RESOLVED code',
+    verifySrc40.includes('and student_code = v_student.student_code')
+      && verifySrc40.includes('for update'),
+    'the session lock uses the caller-supplied code');
+  check('40f: the PIN gate still fails closed via is distinct from',
+    (verifySrc40.match(/is distinct from/g) || []).length >= 3,
+    'a fail-closed PIN comparison was lost');
+  check('40f: the F5 token-resume tolerance survived',
+    verifySrc40.includes('p_existing_token = v_session.session_token'), 'token resume removed');
+  check('40f: the 60-second stale-session takeover survived',
+    verifySrc40.includes("interval '60 seconds'"), 'stale takeover removed');
+  check('40f: the function is still SECURITY DEFINER with a pinned search_path',
+    verifySrc40.includes('security definer') && verifySrc40.includes('set search_path = public, pg_temp'),
+    'security context changed');
+
+  // --- 40g. the resolved identity is echoed back (live, against the DB) ---
+  // Exercised end to end: seed a candidate whose stored name has EXTRA whitespace
+  // and a mixed-case class, then log in with a differently-cased, differently-
+  // spaced typing of the same identity and NO student code. This is the exact
+  // scenario the migration exists for.
+  const FLEX_EXAM = {
+    code: 'FLX' + String(Math.floor(100 + Math.random() * 900)),
+    title: 'E2E Flexible Lookup',
+    duration: 25,
+  };
+  const FLEX_CLASS_STORED = 'e2e-flex-' + String(Math.floor(1000 + Math.random() * 9000));
+  const FLEX_MEMBER = {
+    code: 'E2EFLX01',
+    // Deliberately messy on the STORED side: doubled spaces in both fields.
+    fullNameStored: 'Nguyễn  Văn   Linh',
+    classNameStored: FLEX_CLASS_STORED.toUpperCase() + '  X',
+  };
+  const flex40Anon = createClient(SB_URL, SB_PUBLISHABLE, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const flexAdmin = createClient(SB_URL, SB_SECRET, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+
+  await teacher.from('exams').delete().eq('code', FLEX_EXAM.code);
+  const flexExamInsert = await teacher.from('exams').insert({
+    user_id: teacherId,
+    code: FLEX_EXAM.code,
+    title: FLEX_EXAM.title,
+    duration_minutes: FLEX_EXAM.duration,
+    is_active: true,
+    pin_mode: 'NONE',
+  });
+  check('40g: flexible-lookup exam created', !flexExamInsert.error, flexExamInsert.error?.message);
+  await teacher.from('students').insert({
+    exam_code: FLEX_EXAM.code,
+    student_code: FLEX_MEMBER.code,
+    full_name: FLEX_MEMBER.fullNameStored,
+    class_name: FLEX_MEMBER.classNameStored,
+  });
+
+  const tryFlexLogin = async (overrides) => {
+    await flexAdmin.from('active_sessions').delete()
+      .eq('exam_code', FLEX_EXAM.code).eq('student_code', FLEX_MEMBER.code);
+    return flex40Anon.rpc('verify_and_acquire_session', {
+      p_exam_code: FLEX_EXAM.code,
+      p_student_code: null,
+      p_full_name: null,
+      p_class_name: null,
+      p_device_info: 'e2e-flex/1.0',
+      p_existing_token: null,
+      p_pin: null,
+      ...overrides,
+    });
+  };
+
+  // The core case: no code, and the typed identity differs only in case and
+  // whitespace from what is stored.
+  const flexTyped = await tryFlexLogin({
+    p_full_name: '  nguyễn văn linh ',
+    p_class_name: `${FLEX_CLASS_STORED.toLowerCase()} x`,
+  });
+  check('40g: a NULL student code authenticates via the (class, name) fallback',
+    flexTyped.data?.success === true, JSON.stringify(flexTyped.data));
+  check('40g: it resolves the roster row despite case + whitespace differences',
+    flexTyped.data?.student_code === FLEX_MEMBER.code, String(flexTyped.data?.student_code));
+  check('40g: it echoes the CANONICAL stored identity, not the typed one',
+    flexTyped.data?.student_name === FLEX_MEMBER.fullNameStored
+      && flexTyped.data?.class_name === FLEX_MEMBER.classNameStored,
+    JSON.stringify({ name: flexTyped.data?.student_name, cls: flexTyped.data?.class_name }));
+  // The banner + session metadata the SPA needs from this one round-trip.
+  check('40g: it returns exam_title for the banner',
+    flexTyped.data?.exam_title === FLEX_EXAM.title, String(flexTyped.data?.exam_title));
+  check('40g: it returns duration_minutes for the banner',
+    Number(flexTyped.data?.duration_minutes) === FLEX_EXAM.duration,
+    String(flexTyped.data?.duration_minutes));
+  check('40g: it returns shuffle_questions so the sitting can honour the toggle',
+    typeof flexTyped.data?.shuffle_questions === 'boolean',
+    String(flexTyped.data?.shuffle_questions));
+
+  // A whitespace-only code must behave identically to NULL (the `nullif` path).
+  const flexBlankCode = await tryFlexLogin({
+    p_student_code: '   ',
+    p_full_name: 'Nguyễn Văn Linh',
+    p_class_name: `${FLEX_CLASS_STORED} X`,
+  });
+  check('40g: a whitespace-only student code degrades to the fallback',
+    flexBlankCode.data?.success === true && flexBlankCode.data?.student_code === FLEX_MEMBER.code,
+    JSON.stringify(flexBlankCode.data));
+
+  // The code fast path still works and is still dominant when both are sent.
+  const flexByCode = await tryFlexLogin({
+    p_student_code: FLEX_MEMBER.code,
+    p_full_name: 'Nguyễn Văn Linh',
+    p_class_name: `${FLEX_CLASS_STORED} X`,
+  });
+  check('40g: supplying the code still works (fast path)',
+    flexByCode.data?.success === true && flexByCode.data?.student_code === FLEX_MEMBER.code,
+    JSON.stringify(flexByCode.data));
+
+  // A wrong NAME with a correct code must still be refused: the code alone must
+  // never seat someone under another candidate's identity.
+  const flexWrongName = await tryFlexLogin({
+    p_student_code: FLEX_MEMBER.code,
+    p_full_name: 'Kẻ Mạo Danh',
+    p_class_name: `${FLEX_CLASS_STORED} X`,
+  });
+  check('40g: a correct code with the wrong name is still refused',
+    flexWrongName.data?.success === false && flexWrongName.data?.message === 'IDENTITY_MISMATCH',
+    JSON.stringify(flexWrongName.data));
+
+  // An unknown identity must NOT be admitted, and must not leak which half was
+  // wrong.
+  const flexUnknown = await tryFlexLogin({
+    p_full_name: 'Người Không Có Trong Danh Sách',
+    p_class_name: FLEX_CLASS_STORED,
+  });
+  check('40g: an unknown (class, name) pair is refused',
+    flexUnknown.data?.success === false
+      && flexUnknown.data?.message === 'STUDENT_NOT_WHITELISTED',
+    JSON.stringify(flexUnknown.data));
+  check('40g: neither identity input alone is enough',
+    (await tryFlexLogin({ p_full_name: 'Nguyễn Văn Linh' })).data?.success === false
+      && (await tryFlexLogin({ p_class_name: `${FLEX_CLASS_STORED} X` })).data?.success === false,
+    'a half-supplied identity was admitted');
+
+  // A wrong class with the right name must also fail (the pair is the key).
+  const flexWrongClass = await tryFlexLogin({
+    p_full_name: 'Nguyễn Văn Linh',
+    p_class_name: 'LỚP-KHÔNG-ĐÚNG',
+  });
+  check('40g: a correct name with the wrong class is refused',
+    flexWrongClass.data?.success === false, JSON.stringify(flexWrongClass.data));
+
+  // --- 40h. the roster reports duration_minutes for the banner ----------
+  const flexRoster = await flex40Anon.rpc('get_exam_roster', { p_exam_code: FLEX_EXAM.code });
+  check('40h: get_exam_roster still succeeds', flexRoster.data?.success === true,
+    JSON.stringify(flexRoster.data));
+  check('40h: get_exam_roster now exposes duration_minutes for the banner',
+    Number(flexRoster.data?.duration_minutes) === FLEX_EXAM.duration,
+    String(flexRoster.data?.duration_minutes));
+  check('40h: the candidate projection still leaks neither pin nor dob',
+    Array.isArray(flexRoster.data?.candidates)
+      && flexRoster.data.candidates.every((c) => !('pin' in c) && !('dob' in c)),
+    JSON.stringify(flexRoster.data?.candidates));
+
+  // --- 40i. the SPA is wired to the resolved identity -------------------
+  check('40i: the login submit sends NULL rather than an empty code',
+    appSrc40.includes('p_student_code: state.studentCode || null'),
+    'an empty string could be sent as the code');
+  check('40i: the SPA adopts the server-resolved identity after login',
+    appSrc40.includes('if (payload.student_code) state.studentCode = String(payload.student_code);'),
+    'the resolved code is not kept for later RPCs');
+  check('40i: the login completeness check no longer demands a student code',
+    !appSrc40.includes('Mã đề, Mã học sinh, Họ tên và Lớp'),
+    'the old code-required message survived');
+  // Both the SPA matcher and the practice matcher must use the same normalizer.
+  check('40i: the practice candidate matcher uses normalizeText',
+    appSrc40.slice(appSrc40.indexOf('function matchPracticeCandidate'))
+      .includes('normalizeText(row.class_name)'),
+    'the practice matcher still compares raw strings');
+  check('40i: the exam code can be verified via the explicit button',
+    appSrc40.includes("$('btnVerifyExamCode')"), 'the verify button is not wired');
+  check('40i: the exam banner is rendered from the roster payload',
+    appSrc40.includes('renderExamBanner(payload)'), 'the banner is never shown');
+
+  // --- 40l. cleanup -----------------------------------------------------
+  await teacher.from('exams').delete().eq('code', FLEX_EXAM.code); // cascades
 
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);

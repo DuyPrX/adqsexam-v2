@@ -618,6 +618,11 @@ declare
     v_student   public.students%rowtype;
     v_session   public.active_sessions%rowtype;
     v_new_token uuid := gen_random_uuid();
+    -- Phase 8.8 — normalized copies of the caller-supplied identity, used for
+    -- both the candidate lookup and the identity assertion (see step 2).
+    v_code      varchar;
+    v_name      varchar;
+    v_class     varchar;
 begin
     -- 1. Exam must exist and be open.
     select * into v_exam from public.exams where code = p_exam_code;
@@ -645,18 +650,59 @@ begin
         return jsonb_build_object('success', false, 'message', 'EXAM_EXPIRED');
     end if;
 
-    -- 2. Candidate must be whitelisted for this exam.
-    select * into v_student
-      from public.students
-     where exam_code = p_exam_code
-       and student_code = p_student_code;
-    if not found then
+    -- 2. Resolve the whitelisted candidate (Phase 8.8).
+    --
+    --    The SPA no longer has a student-code input, so it resolves one from the
+    --    roster when it can and sends NULL when it cannot. Matching server-side
+    --    on (class_name, full_name) removes that hard dependency: a candidate
+    --    whose name and class are exactly right can log in even when the roster
+    --    RPC failed or the exam has an empty roster.
+    --
+    --    Both inputs are normalized in SQL (collapsed whitespace, trimmed,
+    --    case-folded) rather than trusting the client to have done it: this is
+    --    the authentication path, and a legitimate candidate must never be
+    --    rejectable by a stray double space.
+    v_code  := nullif(lower(trim(coalesce(p_student_code, ''))), '');
+    v_name  := nullif(lower(regexp_replace(trim(coalesce(p_full_name, '')), '\s+', ' ', 'g')), '');
+    v_class := nullif(lower(regexp_replace(trim(coalesce(p_class_name, '')), '\s+', ' ', 'g')), '');
+
+    if v_code is not null then
+        -- Fast path: the client resolved a roster row and sent its code.
+        select * into v_student
+          from public.students s
+         where s.exam_code = p_exam_code
+           and lower(trim(s.student_code)) = v_code;
+    elsif v_name is not null and v_class is not null then
+        -- Fallback: no usable code, so match the normalized name + class.
+        --
+        -- `order by student_code` + `limit 1` makes a duplicate roster row
+        -- deterministic instead of "whichever the planner returns first". The
+        -- `students_code_exam_uniq` constraint is on (student_code, exam_code),
+        -- NOT on (full_name, class_name), so two students may share a name in
+        -- one class; the lowest code is stable, and the PIN/DOB check below
+        -- still has to pass, so a wrong pick cannot authenticate.
+        select * into v_student
+          from public.students s
+         where s.exam_code = p_exam_code
+           and lower(regexp_replace(trim(s.full_name),  '\s+', ' ', 'g')) = v_name
+           and lower(regexp_replace(trim(s.class_name), '\s+', ' ', 'g')) = v_class
+         order by s.student_code
+         limit 1;
+    end if;
+
+    if not found or v_student.student_code is null then
         return jsonb_build_object('success', false, 'message', 'STUDENT_NOT_WHITELISTED');
     end if;
 
-    -- 3. Identity must match the whitelist (case-insensitive, trimmed).
-    if lower(trim(v_student.full_name)) <> lower(trim(coalesce(p_full_name, '')))
-       or lower(trim(v_student.class_name)) <> lower(trim(coalesce(p_class_name, ''))) then
+    -- 3. Identity must match the whitelist.
+    --
+    --    When the code was supplied, step 2 matched only on it, so this checks
+    --    the name/class the student typed against THAT row — a code alone must
+    --    never let someone sit an exam under another candidate's name. When the
+    --    fallback matched on name+class this holds by construction, but it is
+    --    kept unconditional so both paths run the same assertion.
+    if lower(regexp_replace(trim(v_student.full_name),  '\s+', ' ', 'g')) <> coalesce(v_name, '')
+       or lower(regexp_replace(trim(v_student.class_name), '\s+', ' ', 'g')) <> coalesce(v_class, '') then
         return jsonb_build_object('success', false, 'message', 'IDENTITY_MISMATCH');
     end if;
 
@@ -705,19 +751,25 @@ begin
     -- pin_mode is one of the three, so no ELSE branch is reachable.
 
     -- 4. One submission per candidate, ever.
+    --
+    --    Keyed on the RESOLVED roster code (Phase 8.8), not the caller's input:
+    --    the same candidate must not be able to dodge this by omitting
+    --    `p_student_code` and logging in through the name+class fallback.
     if exists (
         select 1 from public.exam_results
-         where exam_code = p_exam_code and student_code = p_student_code
+         where exam_code = p_exam_code and student_code = v_student.student_code
     ) then
         return jsonb_build_object('success', false, 'message', 'ALREADY_SUBMITTED');
     end if;
 
     -- 5. Atomic single-device lock.
-    --    FOR UPDATE serialises concurrent logins for the same candidate.
+    --    FOR UPDATE serialises concurrent logins for the same candidate. Also
+    --    keyed on the resolved code, so the fallback path is subject to exactly
+    --    the same lock as the fast path.
     select * into v_session
       from public.active_sessions
      where exam_code = p_exam_code
-       and student_code = p_student_code
+       and student_code = v_student.student_code
      for update;
 
     if found then
@@ -729,10 +781,16 @@ begin
                    set last_heartbeat = now(),
                        device_info    = coalesce(p_device_info, device_info)
                  where exam_code = p_exam_code
-                   and student_code = p_student_code;
+                   and student_code = v_student.student_code;
                 return jsonb_build_object(
                     'success', true,
                     'session_token', v_session.session_token,
+                    'student_code', v_student.student_code,
+                    'student_name', v_student.full_name,
+                    'class_name',   v_student.class_name,
+                    'exam_title',   v_exam.title,
+                    'duration_minutes', v_exam.duration_minutes,
+                    'shuffle_questions', v_exam.shuffle_questions,
                     'message', 'SESSION_RESUMED'
                 );
             end if;
@@ -750,10 +808,16 @@ begin
                fullscreen_exit_count = 0,
                device_info           = p_device_info
          where exam_code = p_exam_code
-           and student_code = p_student_code;
+           and student_code = v_student.student_code;
         return jsonb_build_object(
             'success', true,
             'session_token', v_new_token,
+            'student_code', v_student.student_code,
+            'student_name', v_student.full_name,
+            'class_name',   v_student.class_name,
+            'exam_title',   v_exam.title,
+            'duration_minutes', v_exam.duration_minutes,
+            'shuffle_questions', v_exam.shuffle_questions,
             'message', 'SESSION_ACQUIRED'
         );
     end if;
@@ -763,12 +827,18 @@ begin
         student_code, exam_code, session_token, last_heartbeat,
         current_question, answered_count, blur_count, fullscreen_exit_count, device_info
     ) values (
-        p_student_code, p_exam_code, v_new_token, now(),
+        v_student.student_code, p_exam_code, v_new_token, now(),
         0, 0, 0, 0, p_device_info
     );
     return jsonb_build_object(
         'success', true,
         'session_token', v_new_token,
+        'student_code', v_student.student_code,
+        'student_name', v_student.full_name,
+        'class_name',   v_student.class_name,
+        'exam_title',   v_exam.title,
+        'duration_minutes', v_exam.duration_minutes,
+        'shuffle_questions', v_exam.shuffle_questions,
         'message', 'SESSION_ACQUIRED'
     );
 
@@ -2042,6 +2112,9 @@ begin
         'success',        true,
         'exam_code',      v_exam.code,
         'title',          v_exam.title,
+        -- Phase 8.8 — lets the login banner show the paper's length before the
+        -- student commits, without a second round-trip.
+        'duration_minutes', v_exam.duration_minutes,
         'pin_mode',       v_exam.pin_mode,
         -- Lets the practice picker distinguish "closed" from "not open for
         -- practice" without a second round-trip.

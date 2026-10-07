@@ -99,6 +99,28 @@ function clear(node) { while (node.firstChild) node.removeChild(node.firstChild)
 function show(node) { node.classList.remove('hidden'); }
 function hide(node) { node.classList.add('hidden'); }
 
+/**
+ * Phase 8.8 — canonical form for comparing a student's typed text with a roster
+ * row.
+ *
+ * Three normalizations, each fixing a real way two "equal" strings differ:
+ *
+ *   - `normalize('NFC')` unifies composed vs decomposed Vietnamese diacritics.
+ *     A name typed on a phone (or pasted from a PDF) can be a DIFFERENT byte
+ *     sequence than the one stored in the database while looking identical, so
+ *     `'ế' === 'ế'` is false without this.
+ *   - `trim()` + collapsing `\s+` to a single space absorbs stray double spaces,
+ *     non-breaking spaces and tabs around/between words.
+ *   - `toLowerCase()` makes the comparison case-insensitive.
+ *
+ * The server applies the same whitespace + case normalization in SQL
+ * (verify_and_acquire_session, Phase 8.8), so the two agree on what "matches".
+ */
+function normalizeText(str) {
+  if (!str) return '';
+  return str.toString().normalize('NFC').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
 /* =====================================================================
    Application state
    ===================================================================== */
@@ -528,6 +550,67 @@ function applyPinVisibility(pinMode) {
 }
 
 /**
+ * Phase 8.8 — rewrites the PIN field's label/hint for the exam's policy.
+ *
+ * The server's three pin modes need three different things typed into one field:
+ *   GLOBAL     — one shared code the teacher announced to the whole room.
+ *   INDIVIDUAL — the student's own PIN, or DDMM of their DOB as the fallback.
+ *   null       — the manual fallback, where pin_mode is unknown: keep the
+ *                original wording that covers both possibilities.
+ * Telling the student which one to type avoids a failed attempt that (per the
+ * RPC) is not merely cosmetic — a wrong PIN is rejected.
+ */
+function applyPinLabels(pinMode) {
+  const label = $('labelStudentPin');
+  const hint = $('hintStudentPin');
+  if (!label || !hint) return;
+
+  if (pinMode === 'GLOBAL') {
+    label.textContent = 'Mã PIN của phòng thi';
+    hint.textContent = 'Nhập mã PIN chung mà giáo viên đã thông báo cho cả lớp.';
+  } else if (pinMode === 'INDIVIDUAL') {
+    label.textContent = 'Mã PIN cá nhân';
+    hint.textContent = 'Nhập mã PIN riêng của bạn, hoặc ngày sinh dạng DDMM (VD: 0509 nếu sinh 05/09).';
+  } else {
+    label.textContent = 'Mã PIN bảo vệ';
+    hint.textContent = 'Nhập mã PIN do giáo viên cấp, hoặc ngày sinh dạng DDMM (VD: 0509 nếu sinh 05/09).';
+  }
+}
+
+/**
+ * Phase 8.8 — renders the exam identity banner from a roster payload.
+ *
+ * Showing the title is a correctness aid, not decoration: several exams can be
+ * open at once and a mistyped code that happens to be valid would otherwise
+ * silently seat the student in the wrong paper.
+ */
+function renderExamBanner(payload) {
+  const banner = $('examMetaBanner');
+  const titleNode = $('examMetaTitle');
+  const statusNode = $('examMetaStatus');
+  if (!banner || !titleNode || !statusNode) return;
+
+  const title = String(payload.title || '').trim();
+  if (!title) { hide(banner); return; }
+
+  titleNode.textContent = title;
+
+  // The duration is the other number a student wants before committing.
+  const minutes = Number(payload.duration_minutes);
+  statusNode.textContent = Number.isFinite(minutes) && minutes > 0
+    ? `⏱ ${minutes} phút`
+    : '';
+
+  show(banner);
+}
+
+/** Hides the exam banner (on a blank/invalid code, or any failed load). */
+function clearExamBanner() {
+  const banner = $('examMetaBanner');
+  if (banner) hide(banner);
+}
+
+/**
  * Fetches and renders the roster for `examCode`.
  *
  * Any failure is non-fatal: the form silently reverts to manual entry with a
@@ -547,6 +630,8 @@ async function loadExamRoster(examCode) {
   if (code.length !== EXAM_CODE_LENGTH) {
     setRosterMode('manual');
     applyPinVisibility(null);
+    applyPinLabels(null);
+    clearExamBanner();
     rosterStatus('');
     return;
   }
@@ -561,6 +646,8 @@ async function loadExamRoster(examCode) {
   if (!result.ok) {
     setRosterMode('manual');
     applyPinVisibility(null);
+    applyPinLabels(null);
+    clearExamBanner();
     rosterStatus('Không tải được danh sách dự thi. Vui lòng kiểm tra mạng và thử lại.', true);
     return;
   }
@@ -571,12 +658,19 @@ async function loadExamRoster(examCode) {
     // identity can only be resolved against a loaded roster (Phase 8.1).
     setRosterMode('manual');
     applyPinVisibility(null);
+    applyPinLabels(null);
+    clearExamBanner();
     rosterStatus(rpcMessage(payload.code, payload.message), true);
     return;
   }
 
+  // Phase 8.8 — the exam is valid: show its title/duration so the student can
+  // confirm this is the right paper before choosing a name.
+  renderExamBanner(payload);
+
   state.rosterPinMode = payload.pin_mode || null;
   applyPinVisibility(state.rosterPinMode);
+  applyPinLabels(state.rosterPinMode);
 
   const candidates = Array.isArray(payload.candidates) ? payload.candidates : [];
   state.roster = candidates;
@@ -657,11 +751,15 @@ function onStudentSelected() {
  * Phase 8.1 — there is no visible student-code input anywhere, so BOTH branches
  * must resolve the code themselves:
  *   - picker: the code is the selected `<option>` value (a roster row).
- *   - manual: class + name are matched against the roster already fetched for
- *     this exam. Without a roster there is nothing to match, and
- *     `verify_and_acquire_session` (which matches on student_code) cannot be
- *     called — so a missing roster is reported as a clear error instead of being
- *     sent as a blank code.
+ *   - manual: class + name are matched against whatever roster was fetched.
+ *
+ * Phase 8.8 — the manual branch no longer REQUIRES a roster. The server's
+ * `verify_and_acquire_session` now resolves the candidate from (class_name,
+ * full_name) when the code is absent, so a failed/empty roster fetch is no
+ * longer a login blocker: the student submits name + class and the server
+ * decides. The roster is consulted only to attach the code when it happens to
+ * know it, which stays useful as a disambiguator between two same-named
+ * candidates in one class.
  */
 function readIdentity() {
   if (state.roster !== null && !$('rosterFields').classList.contains('hidden')) {
@@ -683,31 +781,30 @@ function readIdentity() {
     };
   }
 
-  // Manual fallback: class + name, resolved against the roster.
+  // Manual fallback: class + name, resolved against the roster when available.
   const className = $('class-name-input').value.trim();
   const fullName = $('student-name-input').value.trim();
 
   if (!className || !fullName) {
     return { error: 'Vui lòng nhập đầy đủ Họ tên và Lớp.' };
   }
-  if (!state.roster || state.roster.length === 0) {
-    return {
-      error: 'Đề thi chưa có danh sách dự thi nên không thể xác minh. Vui lòng liên hệ giáo viên.',
-    };
-  }
 
-  const match = state.roster.find(
-    (row) => row.class_name.toLowerCase() === className.toLowerCase()
-      && row.full_name.toLowerCase() === fullName.toLowerCase(),
+  // Phase 8.8 — a missing roster is no longer fatal. Send no code and let the
+  // server match the normalized (class_name, full_name) pair itself; it applies
+  // the same normalization and answers STUDENT_NOT_WHITELISTED if there is no
+  // such candidate.
+  const match = (state.roster || []).find(
+    (row) => normalizeText(row.class_name) === normalizeText(className)
+      && normalizeText(row.full_name) === normalizeText(fullName),
   );
-  if (!match) {
-    return { error: 'Họ tên hoặc lớp không khớp với danh sách dự thi của đề này.' };
-  }
 
   return {
-    studentCode: match.student_code,
-    className: match.class_name,
-    fullName: match.full_name,
+    // Prefer the roster row's canonical spelling when we found one: the server
+    // compares normalized text either way, but echoing the stored value keeps
+    // the certificate and result screens consistent with the paper.
+    studentCode: match ? match.student_code : null,
+    className: match ? match.class_name : className,
+    fullName: match ? match.full_name : fullName,
   };
 }
 
@@ -722,8 +819,11 @@ async function handleLoginSubmit(event) {
   if (identity.error) { loginError(identity.error); return; }
 
   const { studentCode, className, fullName } = identity;
-  if (!examCode || !studentCode || !fullName || !className) {
-    loginError('Vui lòng nhập đầy đủ Mã đề, Mã học sinh, Họ tên và Lớp.');
+  // Phase 8.8 — `studentCode` may legitimately be null: the server resolves the
+  // candidate from (class_name, full_name) in that case, so it is no longer part
+  // of the completeness check. Name + class + a valid exam code are.
+  if (!examCode || !fullName || !className) {
+    loginError('Vui lòng nhập đầy đủ Mã đề, Họ tên và Lớp.');
     return;
   }
   if (!/^\d{6}$/.test(examCode)) {
@@ -732,7 +832,7 @@ async function handleLoginSubmit(event) {
   }
 
   state.examCode = examCode;
-  state.studentCode = studentCode;
+  state.studentCode = studentCode || '';
   state.fullName = fullName;
   state.className = className;
   // Held for the resume path only (see writeSession); never rendered.
@@ -751,7 +851,10 @@ async function handleLoginSubmit(event) {
   try {
     const result = await callRpc('verify_and_acquire_session', {
       p_exam_code: state.examCode,
-      p_student_code: state.studentCode,
+      // Phase 8.8 — NULL (never '') when the roster could not supply a code.
+      // The RPC treats a blank string the same as NULL, but sending NULL is the
+      // honest signal and keeps the SQL's `nullif(trim(...))` path the only one.
+      p_student_code: state.studentCode || null,
       p_full_name: state.fullName,
       p_class_name: state.className,
       p_device_info: deviceInfo(),
@@ -775,6 +878,14 @@ async function handleLoginSubmit(event) {
     }
 
     state.sessionToken = payload.session_token;
+    // Phase 8.8 — adopt the SERVER's resolved identity. When the manual branch
+    // sent no code, the RPC matched on (class_name, full_name) and echoed the
+    // roster row back; every later call (heartbeat, submit, certificate) is
+    // keyed on `student_code`, so without this the session would be live on the
+    // server while the client held an empty code.
+    if (payload.student_code) state.studentCode = String(payload.student_code);
+    if (payload.student_name) state.fullName = String(payload.student_name);
+    if (payload.class_name) state.className = String(payload.class_name);
     if (!state.startedAt) state.startedAt = Date.now();
     writeSession();
 
@@ -2135,11 +2246,11 @@ function fillPracticeDatalists(candidates) {
 function matchPracticeCandidate(className, fullName) {
   const roster = state.practiceRoster;
   if (!Array.isArray(roster)) return null;
-  const wantClass = className.trim().toLowerCase();
-  const wantName = fullName.trim().toLowerCase();
+  const wantClass = normalizeText(className);
+  const wantName = normalizeText(fullName);
   return roster.find(
-    (row) => String(row.class_name || '').trim().toLowerCase() === wantClass
-      && String(row.full_name || '').trim().toLowerCase() === wantName,
+    (row) => normalizeText(row.class_name) === wantClass
+      && normalizeText(row.full_name) === wantName,
   ) || null;
 }
 
@@ -2597,11 +2708,22 @@ function prefillFromUrl() {
  * `change` (not `input`) on the exam code: the roster RPC should fire once the
  * student finishes typing, not on every keystroke. The listener re-runs
  * `loadExamRoster` for ANY edit, which is also what clears a stale roster.
+ *
+ * Phase 8.8 — `#btnVerifyExamCode` gives the same lookup an explicit trigger, so
+ * a student who typed the code without blurring the field (common on mobile,
+ * where the keyboard can stay open) can still pull the roster and see the exam
+ * banner. Both paths call the same loader.
  */
 function bindRosterControls() {
   $('exam-code').addEventListener('change', () => {
     loadExamRoster($('exam-code').value);
   });
+  const verifyBtn = $('btnVerifyExamCode');
+  if (verifyBtn) {
+    verifyBtn.addEventListener('click', () => {
+      loadExamRoster($('exam-code').value);
+    });
+  }
   $('class-select').addEventListener('change', populateStudentSelect);
   $('student-select').addEventListener('change', onStudentSelected);
 }
