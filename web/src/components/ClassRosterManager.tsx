@@ -4,6 +4,7 @@ import { useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   AlertTriangle,
+  ChevronDown,
   Loader2,
   Plus,
   Trash2,
@@ -13,18 +14,47 @@ import {
 import { createClient } from '@/lib/supabase/client';
 import { PersistenceError } from '@/lib/exams';
 import {
+  autoBalanceClassGroups,
   createClass,
   deleteClass,
   deleteClassMember,
   listClassMembers,
   saveClassMembers,
   togglePracticePermission,
+  updateMemberGroup,
 } from '@/lib/classes';
 import { parseStudentRosterFile } from '@/lib/excel';
 import { downloadStudentCsvTemplate } from '@/lib/studentTemplate';
-import type { ClassMemberInput, ClassMemberRow, ClassRow } from '@/lib/types';
+import type { ClassMemberInput, ClassMemberRow, ClassRow, GroupNumber } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { CreateTreeSessionModal } from '@/components/tree/CreateTreeSessionModal';
+
+/**
+ * Phase 8.11 — the four group colours called for by the task, extended to the
+ * full 1..8 range so every group in the picker is identifiable at a glance.
+ *
+ * A lookup (rather than a template literal) because Tailwind's build-time
+ * scanner only emits classes it can see VERBATIM in the source: an interpolated
+ * `bg-${colour}-100` produces no CSS at all.
+ */
+const GROUP_BADGE_CLASSES: Record<GroupNumber, string> = {
+  1: 'bg-blue-100 text-blue-800 border-blue-300',
+  2: 'bg-emerald-100 text-emerald-800 border-emerald-300',
+  3: 'bg-amber-100 text-amber-800 border-amber-300',
+  4: 'bg-purple-100 text-purple-800 border-purple-300',
+  5: 'bg-rose-100 text-rose-800 border-rose-300',
+  6: 'bg-cyan-100 text-cyan-800 border-cyan-300',
+  7: 'bg-lime-100 text-lime-800 border-lime-300',
+  8: 'bg-indigo-100 text-indigo-800 border-indigo-300',
+};
+
+/** Every group index the roster UI offers. */
+const GROUP_OPTIONS: readonly GroupNumber[] = [1, 2, 3, 4, 5, 6, 7, 8];
+
+/** Narrows an arbitrary number to a valid group index, defaulting to 1. */
+function toGroupNumber(value: number | null | undefined): GroupNumber {
+  return value && value >= 1 && value <= 8 ? (value as GroupNumber) : 1;
+}
 
 interface ClassRosterManagerProps {
   initialClasses: ClassRow[];
@@ -58,11 +88,90 @@ export function ClassRosterManager({ initialClasses }: ClassRosterManagerProps) 
    */
   const [practiceOverrides, setPracticeOverrides] = useState<Record<string, boolean>>({});
   const [busyPracticeId, setBusyPracticeId] = useState<string | null>(null);
+  /**
+   * Phase 8.11 — optimistic overrides for `class_members.group_number`, keyed by
+   * member id, plus the group the roster is filtered to.
+   *
+   * The override map exists because the inline `<select>` must move the instant
+   * the teacher picks a value; the server is reconciled afterwards, and a failed
+   * RPC deletes only its OWN entry so the other pending edits keep their
+   * optimistic position.
+   */
+  const [groupOverrides, setGroupOverrides] = useState<Record<string, GroupNumber>>({});
+  const [busyGroupId, setBusyGroupId] = useState<string | null>(null);
+  const [selectedGroupFilter, setSelectedGroupFilter] = useState<number | 'all'>('all');
+  const [isBalancing, setIsBalancing] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const selected = initialClasses.find((c) => c.id === selectedId) ?? null;
 
   const isPracticeAllowed = (klass: ClassRow) => practiceOverrides[klass.id] ?? klass.allow_practice;
+
+  /** Phase 8.11 — a member's group, preferring a pending optimistic edit. */
+  const groupOf = (member: ClassMemberRow) => groupOverrides[member.id] ?? toGroupNumber(member.group_number);
+
+  /** Phase 8.11 — how many members fall in each group, for the filter pills. */
+  const groupCounts = (members ?? []).reduce<Record<number, number>>((acc, member) => {
+    const group = groupOf(member);
+    acc[group] = (acc[group] ?? 0) + 1;
+    return acc;
+  }, {});
+
+  /** Phase 8.11 — the roster rows visible under the active filter pill. */
+  const visibleMembers = (members ?? []).filter(
+    (member) => selectedGroupFilter === 'all' || groupOf(member) === selectedGroupFilter,
+  );
+
+  const handleChangeGroup = async (member: ClassMemberRow, next: GroupNumber) => {
+    if (next === groupOf(member)) return;
+    setError(null);
+    setGroupOverrides((prev) => ({ ...prev, [member.id]: next }));
+    setBusyGroupId(member.id);
+    try {
+      await updateMemberGroup(createClient(), member.id, next);
+      // Drop the override once the server agrees, so the refetched row becomes
+      // the source of truth again and the map does not grow unboundedly.
+      setGroupOverrides((prev) => {
+        const { [member.id]: _confirmed, ...rest } = prev;
+        return rest;
+      });
+      if (selected) await reloadMembers(selected.id);
+    } catch (err) {
+      setGroupOverrides((prev) => {
+        const { [member.id]: _reverted, ...rest } = prev;
+        return rest;
+      });
+      setError(err instanceof PersistenceError ? err.message : 'Không đổi được tổ cho học sinh này.');
+    } finally {
+      setBusyGroupId(null);
+    }
+  };
+
+  /**
+   * Phase 8.11 — re-partitions the whole class.
+   *
+   * Confirmed for the RANDOM shuffle only: it destroys any manual arrangement, so
+   * it is worth an explicit prompt. The deterministic name-order split is
+   * reproducible and is applied directly.
+   */
+  const handleAutoBalance = async (randomize: boolean) => {
+    if (!selected || isBalancing) return;
+    if (randomize && !window.confirm(`Chia ngẫu nhiên ${selected.name} thành 4 tổ? Thao tác này thay đổi toàn bộ tổ hiện tại.`)) {
+      return;
+    }
+    setError(null);
+    setIsBalancing(true);
+    try {
+      await autoBalanceClassGroups(createClient(), selected.id, 4, randomize);
+      // A full reshuffle invalidates every optimistic edit at once.
+      setGroupOverrides({});
+      await reloadMembers(selected.id);
+    } catch (err) {
+      setError(err instanceof PersistenceError ? err.message : 'Không chia tổ được.');
+    } finally {
+      setIsBalancing(false);
+    }
+  };
 
   const handleTogglePractice = async (klass: ClassRow) => {
     const next = !isPracticeAllowed(klass);
@@ -87,6 +196,11 @@ export function ClassRosterManager({ initialClasses }: ClassRosterManagerProps) 
     setSelectedId(classId);
     setMembers(null);
     setError(null);
+    // Phase 8.11 — a filter (and any pending group edit) belongs to one roster,
+    // so both are reset; otherwise the next class could open pre-filtered to an
+    // empty group.
+    setSelectedGroupFilter('all');
+    setGroupOverrides({});
     setIsLoadingMembers(true);
     try {
       setMembers(await listClassMembers(createClient(), classId));
@@ -321,6 +435,64 @@ export function ClassRosterManager({ initialClasses }: ClassRosterManagerProps) 
               </div>
             </div>
 
+            {/* Phase 8.11 — group toolbar. Rendered only when a roster is loaded,
+                because every control here acts on members. */}
+            {!isLoadingMembers && members && members.length > 0 && (
+              <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2">
+                <button
+                  type="button"
+                  onClick={() => void handleAutoBalance(true)}
+                  disabled={isBalancing}
+                  className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-indigo-500 disabled:opacity-50"
+                >
+                  {isBalancing && <Loader2 size={13} className="animate-spin" />}
+                  🎲 Chia ngẫu nhiên 4 tổ
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleAutoBalance(false)}
+                  disabled={isBalancing}
+                  className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
+                >
+                  📋 Chia theo thứ tự (1..4)
+                </button>
+
+                <span className="mx-1 hidden h-5 w-px bg-slate-200 sm:block" />
+
+                {/* Filter pills. Counts are derived from the same override map
+                    the badges use, so a pending edit moves the number at once. */}
+                <div className="flex flex-wrap items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedGroupFilter('all')}
+                    className={cn(
+                      'rounded-full border px-2.5 py-0.5 text-[11px] font-semibold transition',
+                      selectedGroupFilter === 'all'
+                        ? 'border-slate-900 bg-slate-900 text-white'
+                        : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50',
+                    )}
+                  >
+                    Tất cả ({members.length})
+                  </button>
+                  {GROUP_OPTIONS.slice(0, 4).map((group) => (
+                    <button
+                      key={group}
+                      type="button"
+                      onClick={() => setSelectedGroupFilter(group)}
+                      className={cn(
+                        'rounded-full border px-2.5 py-0.5 text-[11px] font-semibold transition',
+                        selectedGroupFilter === group
+                          ? 'border-slate-900 bg-slate-900 text-white'
+                          : cn('hover:opacity-80', GROUP_BADGE_CLASSES[group]),
+                      )}
+                    >
+                      Tổ {group} ({groupCounts[group] ?? 0})
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
               {isLoadingMembers ? (
                 <div className="flex items-center justify-center gap-2 p-8 text-sm text-slate-500">
@@ -330,6 +502,10 @@ export function ClassRosterManager({ initialClasses }: ClassRosterManagerProps) 
               ) : !members || members.length === 0 ? (
                 <p className="p-8 text-center text-sm text-slate-500">
                   Lớp chưa có học sinh. Tải file mẫu, điền và nhập lại.
+                </p>
+              ) : visibleMembers.length === 0 ? (
+                <p className="p-8 text-center text-sm text-slate-500">
+                  Không có học sinh nào trong tổ này.
                 </p>
               ) : (
                 <div className="overflow-x-auto">
@@ -341,11 +517,14 @@ export function ClassRosterManager({ initialClasses }: ClassRosterManagerProps) 
                         <th className="px-3 py-2.5 font-semibold">Họ và tên</th>
                         <th className="px-3 py-2.5 font-semibold">Ngày sinh</th>
                         <th className="px-3 py-2.5 font-semibold">Mã PIN</th>
+                        <th className="px-3 py-2.5 font-semibold">Tổ / Nhóm</th>
                         <th className="px-3 py-2.5" />
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {members.map((member, index) => (
+                      {visibleMembers.map((member, index) => {
+                        const group = groupOf(member);
+                        return (
                         <tr key={member.id} className="transition hover:bg-slate-50">
                           <td className="px-3 py-2 text-slate-500">{index + 1}</td>
                           <td className="px-3 py-2 font-mono text-xs">{member.student_code}</td>
@@ -355,6 +534,40 @@ export function ClassRosterManager({ initialClasses }: ClassRosterManagerProps) 
                           <td className="px-3 py-2 text-slate-500">{member.dob ?? '—'}</td>
                           <td className="px-3 py-2 font-mono text-xs">
                             {member.pin ?? <span className="text-slate-400">DDMM</span>}
+                          </td>
+                          <td className="px-3 py-2">
+                            {/* The badge shows the group as a colour swatch; the
+                                select on top of it is what the teacher actually
+                                clicks, so the two never disagree. */}
+                            <div className="relative inline-flex items-center">
+                              <span
+                                className={cn(
+                                  'pointer-events-none inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs font-semibold',
+                                  GROUP_BADGE_CLASSES[group],
+                                )}
+                              >
+                                Tổ {group}
+                                <ChevronDown size={11} />
+                              </span>
+                              <select
+                                value={group}
+                                onChange={(event) =>
+                                  void handleChangeGroup(
+                                    member,
+                                    Number(event.target.value) as GroupNumber,
+                                  )
+                                }
+                                disabled={busyGroupId === member.id}
+                                aria-label={`Tổ của ${member.full_name}`}
+                                className="absolute inset-0 h-full w-full cursor-pointer opacity-0 disabled:cursor-wait"
+                              >
+                                {GROUP_OPTIONS.map((option) => (
+                                  <option key={option} value={option}>
+                                    Tổ {option}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
                           </td>
                           <td className="px-3 py-2 text-right">
                             <button
@@ -371,7 +584,8 @@ export function ClassRosterManager({ initialClasses }: ClassRosterManagerProps) 
                             </button>
                           </td>
                         </tr>
-                      ))}
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>

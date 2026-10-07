@@ -19,20 +19,23 @@ export const STUDENT_TEMPLATE_HEADERS = [
   'Ma_hoc_sinh',
   'Ma_PIN',
   'To_nhom',
+  'Nhom',
 ] as const;
 
 /**
  * Three illustrative rows exercising every column combination the parser
- * supports, plus the Phase 8.4 `To_nhom` team column:
+ * supports, plus the Phase 8.4 `To_nhom` team column and the Phase 8.11 `Nhom`
+ * classroom-group column:
  *   1. Name + DOB only   -> code auto-generated, PIN derived from DOB (DDMM),
- *                           team omitted (the parser assigns it round-robin)
- *   2. Name + code + PIN -> both used verbatim, explicit team 2
- *   3. Name only         -> code auto-generated, no PIN, explicit team 3
+ *                           team omitted (the parser assigns it round-robin),
+ *                           group omitted (the DB default of 1 applies)
+ *   2. Name + code + PIN -> both used verbatim, explicit team 2, group 2
+ *   3. Name only         -> code auto-generated, no PIN, explicit team 3, group 3
  */
 export const STUDENT_TEMPLATE_SAMPLE_ROWS: readonly (readonly string[])[] = [
-  ['1', 'Nguyễn Văn An', '05/09/2008', '', '', ''],
-  ['2', 'Trần Thị Bình', '12/03/2008', 'HS001', '123456', '2'],
-  ['3', 'Lê Văn Cường', '', '', '', '3'],
+  ['1', 'Nguyễn Văn An', '05/09/2008', '', '', '', ''],
+  ['2', 'Trần Thị Bình', '12/03/2008', 'HS001', '123456', '2', '2'],
+  ['3', 'Lê Văn Cường', '', '', '', '3', '3'],
 ];
 
 /** RFC 4180 cell: quote when the value contains a delimiter, quote or newline. */

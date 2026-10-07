@@ -2648,7 +2648,7 @@ async function main() {
 
   const templateHeaderLine = template.slice(1).split(/\r?\n/)[0];
   check('template header line is exact',
-    templateHeaderLine === 'STT,Ho_va_ten,Ngay_sinh,Ma_hoc_sinh,Ma_PIN,To_nhom', templateHeaderLine);
+    templateHeaderLine === 'STT,Ho_va_ten,Ngay_sinh,Ma_hoc_sinh,Ma_PIN,To_nhom,Nhom', templateHeaderLine);
   check('template header constant matches the emitted line',
     STUDENT_TEMPLATE_HEADERS.join(',') === templateHeaderLine,
     STUDENT_TEMPLATE_HEADERS.join(','));
@@ -2657,11 +2657,11 @@ async function main() {
   check('template ships a header + 3 sample rows', templateRows.length === 4,
     String(templateRows.length));
   check('sample row 1 = name + DOB only (auto code + DDMM PIN + round-robin team)',
-    templateRows[1] === '1,Nguyễn Văn An,05/09/2008,,,', templateRows[1]);
-  check('sample row 2 = custom code + custom PIN + explicit team 2',
-    templateRows[2] === '2,Trần Thị Bình,12/03/2008,HS001,123456,2', templateRows[2]);
-  check('sample row 3 = name only + explicit team 3',
-    templateRows[3] === '3,Lê Văn Cường,,,,3', templateRows[3]);
+    templateRows[1] === '1,Nguyễn Văn An,05/09/2008,,,,', templateRows[1]);
+  check('sample row 2 = custom code + custom PIN + explicit team 2 + group 2',
+    templateRows[2] === '2,Trần Thị Bình,12/03/2008,HS001,123456,2,2', templateRows[2]);
+  check('sample row 3 = name only + explicit team 3 + group 3',
+    templateRows[3] === '3,Lê Văn Cường,,,,3,3', templateRows[3]);
   check('template filename falls back to "Lop"',
     studentTemplateFilename() === 'Mau_Danh_Sach_Hoc_Sinh_Lop.csv', studentTemplateFilename());
   check('template filename embeds the class name',
@@ -2714,6 +2714,20 @@ async function main() {
   check('every parsed member carries a team_number in 1..4',
     parsed.every((m) => Number.isInteger(m.team_number) && m.team_number >= 1 && m.team_number <= 4),
     JSON.stringify(parsed.map((m) => m.team_number)));
+
+  // Phase 8.11 — the `Nhom` column. Unlike `To_nhom` there is NO round-robin
+  // fallback: a blank cell leaves the field UNDEFINED so the DB default (or the
+  // member's existing group) survives a re-import.
+  check('row 1 with a blank Nhom leaves group_number undefined',
+    parsedAn?.group_number === undefined, JSON.stringify(parsedAn?.group_number));
+  check('row 2 keeps its explicit Nhom = 2', parsedBinh?.group_number === 2,
+    JSON.stringify(parsedBinh?.group_number));
+  check('row 3 keeps its explicit Nhom = 3', parsedCuong?.group_number === 3,
+    JSON.stringify(parsedCuong?.group_number));
+  check('a parsed group_number, when present, is in 1..8',
+    parsed.every((m) => m.group_number === undefined
+      || (Number.isInteger(m.group_number) && m.group_number >= 1 && m.group_number <= 8)),
+    JSON.stringify(parsed.map((m) => m.group_number)));
 
   // --- 26d. class roster CRUD through the client SDK --------------------
   await teacher.from('exams').delete().eq('code', CLASS_EXAM.code);
@@ -6899,6 +6913,241 @@ async function main() {
 
   await teacher.from('exams').delete().in('code', [PCODE_EXAM.code, PCODE_OFF_EXAM.code]);
 
+  /* --- 43. Class member groups + auto-balancing (Phase 8.11) ------------- */
+  // `class_members.group_number` (1..8) is a CLASSROOM grouping for seat-work,
+  // deliberately independent of the Phase 8.4 arena `team_number` (1..4). 43f
+  // asserts that independence, because a regression that aliased the two would
+  // silently re-partition the Tree of Knowledge arena.
+  step(43, 'class member group management and auto-balancing');
+
+  // --- 43a. column + constraint -----------------------------------------
+  const groupColumn = step32Sql(
+    `select is_nullable || '|' || coalesce(column_default, '') || '|' || data_type `
+    + `from information_schema.columns where table_schema = 'public' `
+    + `and table_name = 'class_members' and column_name = 'group_number'`,
+  );
+  check('43a: class_members.group_number is NOT NULL smallint defaulting to 1',
+    groupColumn === 'NO|1|smallint', groupColumn);
+
+  const groupCheck = step32Sql(
+    `select pg_get_constraintdef(oid) from pg_constraint `
+    + `where conrelid = 'public.class_members'::regclass `
+    + `and conname = 'class_members_group_number_check'`,
+  );
+  check('43a: the CHECK constraint exists and spans 1..8',
+    groupCheck.includes('>= 1') && groupCheck.includes('<= 8'), groupCheck);
+  check('43a: the (class_id, group_number) index exists',
+    step32Sql(`select count(*) from pg_indexes where schemaname = 'public' `
+      + `and indexname = 'idx_class_members_group'`) === '1');
+
+  // The RPCs must NOT be reachable by a student client.
+  const aclFor = (signature) => step32Sql(
+    `select has_function_privilege('anon', 'public.${signature}'::regprocedure, 'execute')`,
+  );
+  check('43a: anon may NOT execute update_class_member_group',
+    aclFor('update_class_member_group(uuid, integer)') === 'f');
+  check('43a: anon may NOT execute auto_balance_class_groups',
+    aclFor('auto_balance_class_groups(uuid, integer, boolean)') === 'f');
+  check('43a: authenticated MAY execute both group RPCs',
+    step32Sql(`select has_function_privilege('authenticated', `
+      + `'public.update_class_member_group(uuid, integer)'::regprocedure, 'execute')`) === 't'
+    && step32Sql(`select has_function_privilege('authenticated', `
+      + `'public.auto_balance_class_groups(uuid, integer, boolean)'::regprocedure, 'execute')`) === 't');
+  check('43a: both group RPCs have exactly one signature each',
+    procCount('update_class_member_group') === 1 && procCount('auto_balance_class_groups') === 1,
+    `${procCount('update_class_member_group')}/${procCount('auto_balance_class_groups')}`);
+
+  // --- 43b. the DB default -----------------------------------------------
+  const GROUP_CLASS = 'E2E-GRP-' + String(Math.floor(1000 + Math.random() * 9000));
+  // Deliberately constant, so an aborted run's rows are cleared before re-insert.
+  // (classes_user_name_uniq would otherwise reject the second attempt.)
+  await teacher.from('classes').delete().eq('name', GROUP_CLASS);
+  const groupClass = await teacher
+    .from('classes')
+    .insert({ user_id: teacherId, name: GROUP_CLASS, academic_year: '2026-2027' })
+    .select('id')
+    .single();
+  check('43b: the group test class is created', !groupClass.error, groupClass.error?.message);
+  const groupClassId = groupClass.data?.id;
+
+  // 13 students: an odd count that does NOT divide by 4, so the balance check
+  // below has real work to do (13/4 -> 4,3,3,3).
+  const GROUP_SIZE = 13;
+  const groupMembers = Array.from({ length: GROUP_SIZE }, (_, i) => ({
+    class_id: groupClassId,
+    // Zero-padded so `student_code` ORDER matches the numeric order.
+    student_code: `E2EGRP${String(i + 1).padStart(2, '0')}`,
+    full_name: `Học Sinh Tổ ${String(i + 1).padStart(2, '0')}`,
+  }));
+  const groupInsert = await teacher.from('class_members').insert(groupMembers).select('id, group_number');
+  check('43b: 13 members inserted', !groupInsert.error && groupInsert.data?.length === GROUP_SIZE,
+    groupInsert.error?.message ?? String(groupInsert.data?.length));
+  check('43b: a member inserted without the column defaults to group 1',
+    groupInsert.data?.every((row) => row.group_number === 1),
+    JSON.stringify(groupInsert.data?.map((r) => r.group_number)));
+
+  // --- 43c. the CHECK constraint rejects out-of-range values -------------
+  const groupTarget = groupInsert.data?.[0]?.id;
+  const groupBadHigh = await teacher
+    .from('class_members').update({ group_number: 9 }).eq('id', groupTarget);
+  check('43c: the constraint rejects group_number = 9', !!groupBadHigh.error,
+    'a 9 was accepted');
+  const groupBadLow = await teacher
+    .from('class_members').update({ group_number: 0 }).eq('id', groupTarget);
+  check('43c: the constraint rejects group_number = 0', !!groupBadLow.error,
+    'a 0 was accepted');
+
+  // --- 43d. auto-balancing ----------------------------------------------
+  const balanced = await teacher.rpc('auto_balance_class_groups', {
+    p_class_id: groupClassId, p_num_groups: 4, p_randomize: true,
+  });
+  check('43d: auto_balance_class_groups succeeds',
+    balanced.data?.success === true, JSON.stringify(balanced.data));
+  check('43d: it reports every member as assigned',
+    balanced.data?.total_assigned === GROUP_SIZE, String(balanced.data?.total_assigned));
+  check('43d: it echoes the requested group count',
+    balanced.data?.num_groups === 4, String(balanced.data?.num_groups));
+
+  const afterBalance = await teacher
+    .from('class_members').select('group_number').eq('class_id', groupClassId);
+  const groupSizes = (afterBalance.data ?? [])
+    .reduce((acc, row) => {
+      acc[row.group_number] = (acc[row.group_number] ?? 0) + 1;
+      return acc;
+    }, {});
+  const sizes = Object.values(groupSizes);
+  check('43d: all 13 members fall in groups 1..4',
+    afterBalance.data?.length === GROUP_SIZE
+      && Object.keys(groupSizes).every((g) => Number(g) >= 1 && Number(g) <= 4),
+    JSON.stringify(groupSizes));
+  // The balance guarantee: max - min <= 1. For 13/4 that is exactly {4,3,3,3}.
+  check('43d: the split is balanced (max - min <= 1)',
+    sizes.length === 4 && Math.max(...sizes) - Math.min(...sizes) <= 1,
+    JSON.stringify(sizes));
+  check('43d: 13 members over 4 groups yields sizes 4/3/3/3',
+    JSON.stringify([...sizes].sort((a, b) => b - a)) === JSON.stringify([4, 3, 3, 3]),
+    JSON.stringify(sizes));
+
+  // A no-randomize run must be deterministic AND still balanced.
+  const orderedSplit = await teacher.rpc('auto_balance_class_groups', {
+    p_class_id: groupClassId, p_num_groups: 4, p_randomize: false,
+  });
+  check('43d: the ordered split also succeeds', orderedSplit.data?.success === true,
+    JSON.stringify(orderedSplit.data));
+  const afterOrdered = await teacher
+    .from('class_members').select('student_code, group_number')
+    .eq('class_id', groupClassId).order('student_code');
+  // Re-run and compare the FULL assignment, so "deterministic" is actually
+  // asserted rather than inferred from the second call merely succeeding.
+  await teacher.rpc('auto_balance_class_groups', {
+    p_class_id: groupClassId, p_num_groups: 4, p_randomize: false,
+  });
+  const afterOrderedAgain = await teacher
+    .from('class_members').select('student_code, group_number')
+    .eq('class_id', groupClassId).order('student_code');
+  check('43d: the ordered split is repeatable (identical assignments on re-run)',
+    JSON.stringify(afterOrderedAgain.data) === JSON.stringify(afterOrdered.data),
+    JSON.stringify(afterOrderedAgain.data?.map((r) => r.group_number)));
+  // Alphabetical split: student 01 -> Tổ 1, 02 -> Tổ 2, ... 05 -> Tổ 1 again.
+  check('43d: the ordered split follows the roster order (1,2,3,4,1,…)',
+    afterOrdered.data?.[0]?.group_number === 1
+      && afterOrdered.data?.[1]?.group_number === 2
+      && afterOrdered.data?.[3]?.group_number === 4
+      && afterOrdered.data?.[4]?.group_number === 1,
+    JSON.stringify(afterOrdered.data?.map((r) => r.group_number)));
+
+  // --- 43e. update_class_member_group ------------------------------------
+  const switched = await teacher.rpc('update_class_member_group', {
+    p_member_id: groupTarget, p_group_number: 3,
+  });
+  check('43e: update_class_member_group succeeds',
+    switched.data?.success === true && switched.data?.group_number === 3,
+    JSON.stringify(switched.data));
+
+  const reread = await teacher
+    .from('class_members').select('group_number').eq('id', groupTarget).single();
+  check('43e: the new group persisted', reread.data?.group_number === 3,
+    String(reread.data?.group_number));
+
+  const outOfRange = await teacher.rpc('update_class_member_group', {
+    p_member_id: groupTarget, p_group_number: 9,
+  });
+  check('43e: an out-of-range group is refused with INVALID_GROUP',
+    outOfRange.data?.success === false && outOfRange.data?.code === 'INVALID_GROUP',
+    JSON.stringify(outOfRange.data));
+
+  // A random (real) uuid is not a member of any class this teacher owns.
+  const foreign = await teacher.rpc('update_class_member_group', {
+    p_member_id: '00000000-0000-0000-0000-000000000000', p_group_number: 2,
+  });
+  check('43e: an unknown member is refused with NOT_FOUND',
+    foreign.data?.success === false && foreign.data?.code === 'NOT_FOUND',
+    JSON.stringify(foreign.data));
+
+  const foreignClass = await teacher.rpc('auto_balance_class_groups', {
+    p_class_id: '00000000-0000-0000-0000-000000000000', p_num_groups: 4, p_randomize: true,
+  });
+  check('43e: an unknown class is refused with NOT_FOUND',
+    foreignClass.data?.success === false && foreignClass.data?.code === 'NOT_FOUND',
+    JSON.stringify(foreignClass.data));
+
+  const badCount = await teacher.rpc('auto_balance_class_groups', {
+    p_class_id: groupClassId, p_num_groups: 9, p_randomize: true,
+  });
+  check('43e: a group count of 9 is refused with INVALID_GROUP_COUNT',
+    badCount.data?.success === false && badCount.data?.code === 'INVALID_GROUP_COUNT',
+    JSON.stringify(badCount.data));
+
+  // --- 43f. independence from the arena team_number ---------------------
+  // A student client must not be able to reach either RPC at all (43a asserted
+  // the ACL; this proves the call actually fails end-to-end).
+  const anonGroupCall = await flex40Anon.rpc('update_class_member_group', {
+    p_member_id: groupTarget, p_group_number: 2,
+  });
+  check('43f: an anon client cannot call update_class_member_group',
+    !!anonGroupCall.error || anonGroupCall.data?.success !== true,
+    JSON.stringify(anonGroupCall.data ?? anonGroupCall.error?.message));
+
+  // group_number and team_number are separate columns: writing one leaves the
+  // other untouched, so the arena keeps its own four-team split.
+  const before = await teacher
+    .from('class_members').select('team_number').eq('id', groupTarget).single();
+  await teacher.rpc('update_class_member_group', { p_member_id: groupTarget, p_group_number: 6 });
+  const after = await teacher
+    .from('class_members').select('team_number, group_number').eq('id', groupTarget).single();
+  check('43f: changing group_number does NOT touch team_number',
+    after.data?.team_number === before.data?.team_number && after.data?.group_number === 6,
+    JSON.stringify(after.data));
+
+  // --- 43g. the teacher web is wired to the new layer -------------------
+  const classesSrc43 = readFileSync(
+    new URL('../web/src/lib/classes.ts', import.meta.url), 'utf8');
+  const rosterSrc43 = readFileSync(
+    new URL('../web/src/components/ClassRosterManager.tsx', import.meta.url), 'utf8');
+  const excelSrc43 = readFileSync(new URL('../web/src/lib/excel.ts', import.meta.url), 'utf8');
+  check('43g: MEMBER_COLUMNS selects group_number',
+    classesSrc43.includes('group_number'), 'the column is never read');
+  check('43g: the client wraps both group RPCs',
+    classesSrc43.includes("rpc('update_class_member_group'")
+      && classesSrc43.includes("rpc('auto_balance_class_groups'"),
+    'a group RPC wrapper is missing');
+  check('43g: the CSV parser reads a group header',
+    excelSrc43.includes('GROUP_HEADERS') && excelSrc43.includes('normalizeGroupNumber'),
+    'the group column is not parsed');
+  check('43g: the roster UI renders the four group badges',
+    rosterSrc43.includes('bg-blue-100 text-blue-800 border-blue-300')
+      && rosterSrc43.includes('bg-emerald-100 text-emerald-800 border-emerald-300')
+      && rosterSrc43.includes('bg-amber-100 text-amber-800 border-amber-300')
+      && rosterSrc43.includes('bg-purple-100 text-purple-800 border-purple-300'),
+    'a group badge colour is missing');
+  check('43g: the roster UI has the filter pills and both auto-balance buttons',
+    rosterSrc43.includes('Tất cả (')
+      && rosterSrc43.includes('🎲 Chia ngẫu nhiên 4 tổ')
+      && rosterSrc43.includes('📋 Chia theo thứ tự (1..4)'),
+    'a group toolbar control is missing');
+
+  await teacher.from('classes').delete().eq('id', groupClassId); // members cascade
+
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);
   await teacher.from('exams').delete().eq('code', EXAM.code); // cascades
@@ -6927,6 +7176,9 @@ async function main() {
   // Deleted by NAME because a failed insert leaves `canClassId`/`gateClassId`
   // undefined and the rows must not survive into the next run.
   await teacher.from('classes').delete().in('name', [STUDENT.className, CAN_CLASS]);
+  // Phase 8.11 — Step 43's scaffold is deleted in-step; this is the safety net
+  // for an aborted run (the name carries a random suffix, so match the prefix).
+  await teacher.from('classes').delete().like('name', 'E2E-GRP-%');
 
   console.log(`\n${'='.repeat(74)}`);
   console.log(`RESULT: ${passed} passed, ${failed} failed`);

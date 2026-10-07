@@ -262,6 +262,10 @@ create table if not exists public.class_members (
     created_at   timestamptz  default now(),
     -- Phase 8.4 — competition team (Tổ) 1..4 for the Tree of Knowledge arena.
     team_number  smallint     not null default 1 check (team_number between 1 and 4),
+    -- Phase 8.11 — classroom group (Tổ/Nhóm) 1..8 for seat-work. Deliberately
+    -- INDEPENDENT of team_number above: the arena caps at 4 and reads this row's
+    -- team, so re-shuffling seat groups must not re-partition the arena's trees.
+    group_number smallint     not null default 1 check (group_number between 1 and 8),
     constraint class_members_class_code_uniq unique (class_id, student_code)
 );
 
@@ -270,8 +274,15 @@ create table if not exists public.class_members (
 -- already got it above) does not end up with two identical constraints.
 alter table public.class_members add column if not exists team_number smallint not null default 1 check (team_number between 1 and 4);
 
+-- Idempotency for databases created before Phase 8.11, same rule: the whole
+-- statement (inline CHECK included) is skipped when the column already exists.
+alter table public.class_members add column if not exists group_number smallint not null default 1 check (group_number between 1 and 8);
+
+create index if not exists idx_class_members_group on public.class_members (class_id, group_number);
+
 comment on table public.class_members is 'Roster rows for a class. `pin` NULL -> DOB (DDMM) fallback; both NULL -> no PIN required.';
 comment on column public.class_members.team_number is 'Competition team (Tổ) 1..4 for the Tree of Knowledge arena (Phase 8.4).';
+comment on column public.class_members.group_number is 'Classroom group (Tổ/Nhóm) 1..8 for seat-work, independent of the Phase 8.4 arena team_number (1..4). (Phase 8.11)';
 
 -- ----------------------------------------------------------------------------
 -- A.9  tree_sessions — teacher-owned "Cây tri thức" activity (Phase 7.1).
@@ -2520,6 +2531,177 @@ end;
 $$;
 
 
+-- ----------------------------------------------------------------------------
+-- C.18  update_class_member_group  (teacher — authenticated, Phase 8.11)
+--       C.19  auto_balance_class_groups  (teacher — authenticated, Phase 8.11)
+--
+--       Classroom grouping (Tổ/Nhóm, 1..8) for seat-work. Kept INDEPENDENT of the
+--       Phase 8.4 arena `team_number` (1..4): the arena caps at four and reads that
+--       row's team, so re-shuffling seat groups must not re-partition its trees.
+--
+--       Both are SECURITY DEFINER — the house pattern for teacher RPCs (see
+--       import_class_to_exam above), chosen so they behave identically whether
+--       called through PostgREST or psql. RLS is therefore BYPASSED inside the
+--       body, so each re-checks ownership EXPLICITLY against `classes.user_id`.
+--
+--       Callers that must not reach them: students. Both are revoked from PUBLIC
+--       AND from `anon` (Supabase's database default privileges grant EXECUTE to
+--       `anon` directly, so a `revoke ... from public` alone is not enough) and
+--       granted to `authenticated` only.
+-- ----------------------------------------------------------------------------
+create or replace function public.update_class_member_group(
+    p_member_id    uuid,
+    p_group_number int
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+    v_teacher_id uuid;
+    v_class_id   uuid;
+begin
+    v_teacher_id := auth.uid();
+    if v_teacher_id is null then
+        return jsonb_build_object(
+            'success', false,
+            'code',    'UNAUTHORIZED',
+            'message', 'Yêu cầu đăng nhập giáo viên.'
+        );
+    end if;
+
+    -- Validated here rather than left to the CHECK constraint: a raw 23514 would
+    -- surface to the teacher as an untranslated Postgres error.
+    if p_group_number is null or p_group_number < 1 or p_group_number > 8 then
+        return jsonb_build_object(
+            'success', false,
+            'code',    'INVALID_GROUP',
+            'message', 'Số tổ phải nằm trong khoảng từ 1 đến 8.'
+        );
+    end if;
+
+    -- SECURITY DEFINER bypasses RLS, so ownership is asserted explicitly: the
+    -- member's parent class must belong to the caller. The join also proves the
+    -- member id is real, collapsing "unknown member" and "not yours" into one
+    -- indistinguishable answer — a foreign teacher learns nothing either way.
+    select cm.class_id into v_class_id
+      from public.class_members cm
+      join public.classes c on c.id = cm.class_id
+     where cm.id = p_member_id
+       and c.user_id = v_teacher_id;
+
+    if not found then
+        return jsonb_build_object(
+            'success', false,
+            'code',    'NOT_FOUND',
+            'message', 'Không tìm thấy học sinh hoặc bạn không có quyền.'
+        );
+    end if;
+
+    update public.class_members
+       set group_number = p_group_number::smallint
+     where id = p_member_id;
+
+    return jsonb_build_object(
+        'success',      true,
+        'member_id',    p_member_id,
+        'group_number', p_group_number
+    );
+end;
+$$;
+
+comment on function public.update_class_member_group(uuid, int) is
+    'Teacher-only: set one class_members.group_number (1..8). Ownership asserted via classes.user_id (Phase 8.11).';
+
+create or replace function public.auto_balance_class_groups(
+    p_class_id   uuid,
+    p_num_groups int     default 4,
+    p_randomize  boolean default true
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+    v_teacher_id     uuid;
+    v_total_assigned int;
+begin
+    v_teacher_id := auth.uid();
+    if v_teacher_id is null then
+        return jsonb_build_object(
+            'success', false,
+            'code',    'UNAUTHORIZED',
+            'message', 'Yêu cầu đăng nhập giáo viên.'
+        );
+    end if;
+
+    if p_num_groups is null or p_num_groups < 1 or p_num_groups > 8 then
+        return jsonb_build_object(
+            'success', false,
+            'code',    'INVALID_GROUP_COUNT',
+            'message', 'Số lượng tổ phải từ 1 đến 8.'
+        );
+    end if;
+
+    -- Same explicit ownership check as above (SECURITY DEFINER bypasses RLS).
+    if not exists (
+        select 1 from public.classes c
+         where c.id = p_class_id
+           and c.user_id = v_teacher_id
+    ) then
+        return jsonb_build_object(
+            'success', false,
+            'code',    'NOT_FOUND',
+            'message', 'Lớp học không tồn tại hoặc bạn không có quyền.'
+        );
+    end if;
+
+    -- Round-robin over a RANKED list. Assigning `rank % n + 1` gives group sizes
+    -- that differ by at most 1 for ANY member count — 13 members over 4 groups
+    -- become 4/3/3/3 — which is exactly the balance guarantee Step 43 asserts.
+    --
+    -- `case when p_randomize then random() end` (no ELSE) yields NULL for every
+    -- row when randomising is off; NULLs compare equal, so the sort falls
+    -- through to `full_name` — i.e. "chia theo thứ tự danh sách" is a plain
+    -- alphabetical split, and the same class always splits the same way.
+    -- `id` is the final tie-break so two identically-named students still get a
+    -- deterministic order.
+    with ordered_members as (
+        select cm.id,
+               row_number() over (
+                   order by case when p_randomize then random() end,
+                            cm.full_name asc,
+                            cm.id asc
+               ) - 1 as row_idx
+          from public.class_members cm
+         where cm.class_id = p_class_id
+    ),
+    assignments as (
+        select om.id,
+               ((om.row_idx % p_num_groups) + 1)::smallint as assigned_group
+          from ordered_members om
+    )
+    update public.class_members cm
+       set group_number = a.assigned_group
+      from assignments a
+     where cm.id = a.id;
+
+    -- ROW_COUNT after a joined UPDATE is the number of rows actually written.
+    get diagnostics v_total_assigned = row_count;
+
+    return jsonb_build_object(
+        'success',        true,
+        'class_id',       p_class_id,
+        'total_assigned', v_total_assigned,
+        'num_groups',     p_num_groups
+    );
+end;
+$$;
+
+comment on function public.auto_balance_class_groups(uuid, int, boolean) is
+    'Teacher-only: re-partition a class into 1..8 balanced groups, randomly or in name order. Group sizes differ by at most 1 (Phase 8.11).';
+
+
 -- ============================================================================
 -- SECTION D — EXECUTE GRANTS
 -- ----------------------------------------------------------------------------
@@ -2554,6 +2736,14 @@ revoke all on function public.submit_tree_answer(uuid, varchar, varchar, text)  
 revoke all on function public.get_public_tree_session(uuid)                                               from public;
 -- Phase 7.1 — RLS predicate helper, needs EXECUTE from the policy's role.
 revoke all on function public.tree_session_is_public(uuid)                                                from public;
+-- Phase 8.11 — teacher-only group management. The `from anon` revoke is REQUIRED
+-- for the same reason as import_class_to_exam below: Supabase's database default
+-- privileges grant EXECUTE to `anon` directly, and an explicit grant survives a
+-- `revoke ... from public`.
+revoke all on function public.update_class_member_group(uuid, int)                                        from public;
+revoke all on function public.update_class_member_group(uuid, int)                                        from anon;
+revoke all on function public.auto_balance_class_groups(uuid, int, boolean)                               from public;
+revoke all on function public.auto_balance_class_groups(uuid, int, boolean)                               from anon;
 
 grant execute on function public.verify_and_acquire_session(varchar, varchar, varchar, varchar, text, uuid, varchar)   to anon, authenticated;
 grant execute on function public.record_student_heartbeat(varchar, varchar, uuid, integer, integer, integer, integer) to anon, authenticated;
@@ -2586,6 +2776,9 @@ grant execute on function public.delete_exam(varchar)                           
 grant execute on function public.restore_exam(varchar)                                                         to authenticated;
 grant execute on function public.purge_expired_exams()                                                         to authenticated;
 grant execute on function public.recalculate_exam_scores(varchar)                                              to authenticated;
+-- Phase 8.11 — teacher-only group management (ownership re-checked in the body).
+grant execute on function public.update_class_member_group(uuid, int)                                          to authenticated;
+grant execute on function public.auto_balance_class_groups(uuid, int, boolean)                                 to authenticated;
 -- Phase 6.1 — teacher-only. The explicit `from anon` revoke is REQUIRED:
 -- Supabase's database default privileges grant EXECUTE to `anon` directly, and an
 -- explicit grant survives `revoke ... from public` (verified locally: after a

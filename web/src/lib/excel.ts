@@ -4,6 +4,7 @@ import type {
   CorrectedAnswer,
   ExamResultRow,
   ExamRow,
+  GroupNumber,
   QuestionBankRow,
   RosterEntry,
   TeamNumber,
@@ -83,8 +84,13 @@ const PIN_HEADERS = [
 ];
 
 /**
- * Phase 8.4 — competition-team column (Tổ). Accepts the template's `To_nhom`
- * spelling plus the natural Vietnamese variants a teacher might type.
+ * Phase 8.4 — competition-team column (Tổ, 1..4). Accepts the template's
+ * `To_nhom` spelling plus the natural Vietnamese variants a teacher might type.
+ *
+ * Kept ALIASED to the group column's vocabulary on purpose: `Tổ`/`to`/`team` mean
+ * the arena team here, while `Nhóm`/`nhom`/`group` (below) mean the Phase 8.11
+ * classroom group. The template ships BOTH columns, so a file can set each
+ * independently and neither feature is shadowed.
  */
 const TEAM_HEADERS = [
   'to_nhom',
@@ -92,10 +98,22 @@ const TEAM_HEADERS = [
   'to nhom',
   'tổ',
   'to',
-  'nhóm',
-  'nhom',
   'team',
   'team_number',
+];
+
+/**
+ * Phase 8.11 — classroom-group column (Tổ/Nhóm, 1..8).
+ *
+ * Disjoint from TEAM_HEADERS above: `group`/`nhóm` route here, `tổ`/`team` route
+ * there. A header like `Tổ nhóm` (two words) stays with the team, which is what
+ * the Phase 8.4 template shipped under that exact spelling.
+ */
+const GROUP_HEADERS = [
+  'group',
+  'group_number',
+  'nhóm',
+  'nhom',
 ];
 
 function normalizeHeader(value: unknown): string {
@@ -258,6 +276,22 @@ export function normalizeTeamNumber(value: unknown): TeamNumber | null {
 }
 
 /**
+ * Phase 8.11 — normalises a `group` / `Nhóm` cell to a group index 1..8, or null.
+ *
+ * Mirrors `normalizeTeamNumber`: returns null (rather than a default) for a blank
+ * or out-of-range value, and accepts the common "Tổ 2" / "2" / "2.0" spellings.
+ */
+export function normalizeGroupNumber(value: unknown): GroupNumber | null {
+  if (value === null || value === undefined || value === '') return null;
+  const text = cellText(value);
+  const match = text.match(/(\d+)/);
+  if (!match) return null;
+  const n = Number(match[1]);
+  if (!Number.isFinite(n) || n < 1 || n > 8) return null;
+  return n as GroupNumber;
+}
+
+/**
  * Parses an RFC 4180 CSV document into rows.
  *
  * `.csv` is read as TEXT rather than handed to SheetJS because `XLSX.read`
@@ -360,6 +394,7 @@ export async function parseStudentRosterFile(
   const dobCol = headers.findIndex((h) => DOB_HEADERS.includes(h));
   const pinCol = headers.findIndex((h) => PIN_HEADERS.includes(h));
   const teamCol = headers.findIndex((h) => TEAM_HEADERS.includes(h));
+  const groupCol = headers.findIndex((h) => GROUP_HEADERS.includes(h));
 
   const members: ClassMemberInput[] = [];
   const seen = new Set<string>();
@@ -390,7 +425,22 @@ export async function parseStudentRosterFile(
     const explicitTeam = teamCol === -1 ? null : normalizeTeamNumber(row[teamCol]);
     const teamNumber: TeamNumber = explicitTeam ?? (((members.length % 4) + 1) as TeamNumber);
 
-    members.push({ student_code: studentCode, full_name: fullName, dob, pin, team_number: teamNumber });
+    // Phase 8.11 — classroom group. Unlike the team above there is NO round-robin
+    // fallback: the field is optional, and leaving it undefined lets the DB
+    // default (1) or the member's EXISTING group survive a re-import, so fixing a
+    // typo in a name list does not silently scatter a group layout the teacher
+    // arranged in the roster UI with the auto-balance buttons.
+    const explicitGroup = groupCol === -1 ? null : normalizeGroupNumber(row[groupCol]);
+    const groupNumber = explicitGroup ?? undefined;
+
+    members.push({
+      student_code: studentCode,
+      full_name: fullName,
+      dob,
+      pin,
+      team_number: teamNumber,
+      ...(groupNumber === undefined ? {} : { group_number: groupNumber }),
+    });
   }
 
   if (members.length === 0) {

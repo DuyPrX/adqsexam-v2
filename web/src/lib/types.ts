@@ -133,6 +133,12 @@ export interface ClassMemberRow {
   pin: string | null;
   /** Phase 8.4 — competition team (Tổ) 1..4. */
   team_number: TeamNumber;
+  /**
+   * Phase 8.11 — classroom group (Tổ/Nhóm) 1..8 for seat-work. Independent of
+   * `team_number`: the arena caps at four and reads that value, so reshuffling
+   * seat groups must not re-partition its trees.
+   */
+  group_number: GroupNumber;
   created_at: string;
 }
 
@@ -144,10 +150,28 @@ export interface ClassMemberInput {
   pin: string | null;
   /** Phase 8.4 — competition team (Tổ) 1..4, defaulted by the parser. */
   team_number: TeamNumber;
+  /**
+   * Phase 8.11 — classroom group (Tổ/Nhóm) 1..8 from a `group`/`Nhóm` column.
+   *
+   * OPTIONAL, unlike `team_number`: it is omitted when the file says nothing, so
+   * a re-import of a corrected name list does NOT reset a group layout the
+   * teacher already arranged in the roster UI. The DB default of 1 then applies
+   * to genuinely new rows only.
+   */
+  group_number?: GroupNumber;
 }
 
 /** Phase 8.4 — a competition team index (Tổ 1..4). */
 export type TeamNumber = 1 | 2 | 3 | 4;
+
+/**
+ * Phase 8.11 — a classroom group index (Tổ/Nhóm 1..8), matching the
+ * `class_members.group_number` CHECK constraint.
+ */
+export type GroupNumber = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+
+/** Phase 8.11 — every valid group index, for the group pickers/filters. */
+export const GROUP_NUMBERS: readonly GroupNumber[] = [1, 2, 3, 4, 5, 6, 7, 8];
 
 /** Phase 8.4 — per-team class sizes: `{ 1: n1, 2: n2, 3: n3, 4: n4 }`. */
 export type TeamCounts = Record<TeamNumber, number>;

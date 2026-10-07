@@ -1,6 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { PersistenceError } from './exams';
-import type { ClassMemberInput, ClassMemberRow, ClassRow } from './types';
+import type { ClassMemberInput, ClassMemberRow, ClassRow, GroupNumber } from './types';
 
 /**
  * Class roster persistence (Phase 6.2) for `public.classes` /
@@ -15,7 +15,8 @@ import type { ClassMemberInput, ClassMemberRow, ClassRow } from './types';
 
 /** Columns read for a class row. */
 const CLASS_COLUMNS = 'id, user_id, name, academic_year, allow_practice, created_at, updated_at';
-const MEMBER_COLUMNS = 'id, class_id, student_code, full_name, dob, pin, team_number, created_at';
+const MEMBER_COLUMNS =
+  'id, class_id, student_code, full_name, dob, pin, team_number, group_number, created_at';
 
 /** Shape of the nested aggregate `class_members(count)`. */
 interface ClassRowWithCount extends ClassRow {
@@ -160,6 +161,9 @@ export async function saveClassMembers(
     pin: member.pin,
     // Phase 8.4 — the parser always assigns a team (explicit or round-robin).
     team_number: member.team_number,
+    // Phase 8.11 — only sent when the file carried a group column, so an absent
+    // one leaves the member's existing group (or the DB default) alone.
+    ...(member.group_number === undefined ? {} : { group_number: member.group_number }),
   }));
 
   const { error } = await supabase
@@ -184,6 +188,69 @@ export async function deleteClassMember(
 
   if (error) throw new PersistenceError(`Không xóa được học sinh: ${error.message}`);
   if (!data) throw new PersistenceError('Không tìm thấy học sinh để xóa.');
+}
+
+/**
+ * Phase 8.11 — moves one class member to another group (Tổ/Nhóm 1..8).
+ *
+ * The RPC is SECURITY DEFINER and re-checks `classes.user_id` server-side, so a
+ * foreign `memberId` yields `NOT_FOUND` rather than an RLS no-op. It returns a
+ * `{ success, code, message }` envelope (the house convention for teacher RPCs),
+ * which is unwrapped here into a throw — the roster UI's optimistic update needs
+ * a clear success/failure signal, and a silently-failed RPC would leave the badge
+ * showing a group the database never stored.
+ */
+export async function updateMemberGroup(
+  supabase: SupabaseClient,
+  memberId: string,
+  groupNumber: GroupNumber,
+): Promise<void> {
+  const { data, error } = await supabase.rpc('update_class_member_group', {
+    p_member_id: memberId,
+    p_group_number: groupNumber,
+  });
+
+  if (error) throw new PersistenceError(`Không đổi được tổ: ${error.message}`);
+  if (data?.success !== true) {
+    throw new PersistenceError(data?.message || 'Không đổi được tổ cho học sinh này.');
+  }
+}
+
+export interface AutoBalanceSummary {
+  /** Number of roster rows written by the RPC. */
+  totalAssigned: number;
+  numGroups: number;
+}
+
+/**
+ * Phase 8.11 — re-partitions a whole class into `numGroups` balanced groups.
+ *
+ * `randomize` picks the algorithm, not just a seed: true shuffles the members,
+ * false splits them in `full_name` order (so the same class always produces the
+ * same layout and a teacher can reproduce a seating plan). Either way the group
+ * sizes differ by at most 1.
+ */
+export async function autoBalanceClassGroups(
+  supabase: SupabaseClient,
+  classId: string,
+  numGroups = 4,
+  randomize = true,
+): Promise<AutoBalanceSummary> {
+  const { data, error } = await supabase.rpc('auto_balance_class_groups', {
+    p_class_id: classId,
+    p_num_groups: numGroups,
+    p_randomize: randomize,
+  });
+
+  if (error) throw new PersistenceError(`Không chia tổ được: ${error.message}`);
+  if (data?.success !== true) {
+    throw new PersistenceError(data?.message || 'Không chia tổ được cho lớp này.');
+  }
+
+  return {
+    totalAssigned: Number(data.total_assigned) || 0,
+    numGroups: Number(data.num_groups) || numGroups,
+  };
 }
 
 /**
