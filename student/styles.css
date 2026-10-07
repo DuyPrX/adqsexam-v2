@@ -607,6 +607,19 @@ body {
   white-space: nowrap;
 }
 
+/* Phase 8.10 — the practice variant of the banner carries a VERDICT, not just
+   an identity: the same component reports "Cho phép tự luyện" or the server's
+   refusal. Colour is the fastest signal, so the whole banner is tinted and the
+   status text inherits the semantic colour. Text may be long here (an RPC
+   message), so it is allowed to wrap instead of being clamped to one line. */
+.exam-meta-banner.is-success { background: var(--ok-weak); border-color: var(--ok); }
+.exam-meta-banner.is-success .exam-meta-banner__status { color: var(--ok); }
+.exam-meta-banner.is-error { background: var(--danger-weak); border-color: var(--danger); }
+.exam-meta-banner.is-error .exam-meta-banner__title { color: var(--danger); }
+.exam-meta-banner.is-error .exam-meta-banner__status {
+  color: var(--danger); white-space: normal; text-align: right;
+}
+
 /* ---------- buttons ---------- */
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 8px;

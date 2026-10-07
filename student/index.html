@@ -201,9 +201,24 @@
             <div id="practiceCodeFields">
               <div class="field">
                 <label for="practice-exam-code">Mã đề luyện tập</label>
-                <input id="practice-exam-code" name="practice-exam-code" type="text"
-                       inputmode="numeric" autocomplete="off" maxlength="20"
-                       placeholder="Nhập mã đề (VD: 839201)" />
+                <!-- Phase 8.10 — mirrors #loginForm: the code input and an explicit
+                     "Kiểm tra đề" trigger share one row, and the exam's identity is
+                     revealed below before the student commits. -->
+                <div class="input-with-button">
+                  <input id="practice-exam-code" name="practice-exam-code" type="text"
+                         inputmode="numeric" autocomplete="off" maxlength="20"
+                         placeholder="Nhập mã đề (VD: 839201)" />
+                  <button type="button" id="btnVerifyPracticeCode" class="btn btn--ghost">
+                    Kiểm tra đề
+                  </button>
+                </div>
+                <!-- Phase 8.10 — practice-exam identity. Hidden until the code is
+                     verified; turns error-coloured when the teacher has not opened
+                     this exam for self-practice. -->
+                <div id="practiceMetaBanner" class="exam-meta-banner hidden" role="status">
+                  <span id="practiceMetaTitle" class="exam-meta-banner__title"></span>
+                  <span id="practiceMetaStatus" class="exam-meta-banner__status"></span>
+                </div>
                 <small class="hint-text">
                   Nhập mã đề để gợi ý danh sách lớp và tên, hoặc tự điền ở dưới.
                 </small>

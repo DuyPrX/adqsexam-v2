@@ -219,6 +219,19 @@ const state = {
    */
   practiceClasses: [],
   practiceClassesLoaded: false,
+  /**
+   * Phase 8.10 — the by-code verification verdict for `#practiceMetaBanner`:
+   * `null` (not verified yet), `'ok'`, or `'error'`. Drives whether the shared
+   * submit button is disabled while the by-code source is selected.
+   */
+  practiceCodeStatus: null,
+  /** The code `practiceCodeStatus` refers to, so a stale verdict is detectable. */
+  practiceVerifiedCode: '',
+  /**
+   * Phase 8.10 — true once a practice code has been taken from the URL, so
+   * re-opening the practice tab does not re-fire the verification RPC.
+   */
+  practiceUrlPrefilled: false,
   /** Phase 7.2 — Tree of Knowledge screen state. */
   treeRenderer: null,
   treeData: null,
@@ -2114,7 +2127,37 @@ function selectModeTab(mode) {
     practiceError('');
     // Phase 8.9 — populate the class picker the first time this tab opens.
     void loadPracticeClasses();
+    // Phase 8.10 — a `?practice_code=` / `?code=` link pre-fills the practice
+    // code and verifies it as soon as this tab is actually shown.
+    applyPracticeCodeFromUrl();
   }
+}
+
+/**
+ * Phase 8.10 — pre-fills the practice exam code from the URL and verifies it.
+ *
+ * Read on the FIRST practice-tab activation rather than in `boot()`, because the
+ * panel is hidden by default: verifying a code the student cannot see would fire
+ * an RPC for a screen they have not opened. `?code=` is shared with the official
+ * form (see `prefillFromUrl`); `?practice_code=` is its unambiguous twin for a
+ * link that must land in practice mode.
+ */
+function applyPracticeCodeFromUrl() {
+  if (state.practiceUrlPrefilled) return;
+
+  const params = new URLSearchParams(window.location.search);
+  const codeParam = params.get('practice_code') || params.get('code');
+  if (!codeParam) return;
+
+  const input = $('practice-exam-code');
+  if (!input) return;
+
+  const code = codeParam.trim().toUpperCase().slice(0, 20);
+  if (!code) return;
+
+  state.practiceUrlPrefilled = true;
+  input.value = code;
+  void loadPracticeRoster(code);
 }
 
 /**
@@ -2132,6 +2175,9 @@ function selectPracticeSource(source) {
   if (byCode) { show($('practiceCodeFields')); hide($('practiceFileFields')); }
   else { hide($('practiceCodeFields')); show($('practiceFileFields')); }
   practiceError('');
+  // Phase 8.10 — the disabled state belongs to the by-code source alone; the
+  // .docx source must stay startable even when the typed code is unusable.
+  updatePracticeStartState();
 }
 
 /**
@@ -2181,35 +2227,118 @@ async function loadPracticeFromExamCode(examCode) {
 }
 
 /**
- * Phase 8.1 — loads the practice roster for an exam code and fills the datalists.
+ * Phase 8.1 / 8.10 — verifies a practice exam code and renders its identity.
  *
- * Called when the practice code is entered. `p_for_practice: true` is what makes
- * this work on a CLOSED exam: the official-exam scheduling gates are skipped for
- * practice (migration 20261005140000), so a student can self-practise after the
- * sitting has ended.
+ * `p_for_practice: true` is what makes this work on a CLOSED exam: the
+ * official-exam scheduling gates are skipped for practice (migration
+ * 20261005140000), so a student can self-practise after the sitting has ended.
  *
- * Best-effort: a failure only means the student types their identity manually.
+ * Phase 8.10 — the result is now REVEALED instead of swallowed. A failure is a
+ * real answer the student needs ("chưa mở cho tự luyện tập" vs "không tồn
+ * tại"), and the success path confirms the paper before they commit. The
+ * submit path still re-checks server-side, so this banner is an affordance,
+ * never the gate.
  */
 async function loadPracticeRoster(examCode) {
-  const code = String(examCode || '').trim();
+  const code = String(examCode || '').trim().toUpperCase();
   const requestId = ++state.practiceRosterRequestId;
   state.practiceRoster = null;
+  state.practiceVerifiedCode = code;
+  state.practiceCodeStatus = null;
   clearPracticeDatalists();
 
-  if (!code) return;
-
-  const result = await callRpc('get_exam_roster', { p_exam_code: code, p_for_practice: true });
-  if (requestId !== state.practiceRosterRequestId) return;
-
-  if (!result.ok || result.data?.success !== true) {
-    // Silent by design: this is a convenience layer, and a loud error here would
-    // interrupt the student mid-typing. The submit path reports the real refusal.
+  if (!code) {
+    clearPracticeBanner();
+    updatePracticeStartState();
     return;
   }
 
-  const candidates = Array.isArray(result.data.candidates) ? result.data.candidates : [];
+  const result = await callRpc('get_exam_roster', { p_exam_code: code, p_for_practice: true });
+  // A slower earlier request must not overwrite a newer one's verdict.
+  if (requestId !== state.practiceRosterRequestId) return;
+
+  if (!result.ok) {
+    state.practiceCodeStatus = 'error';
+    renderPracticeBannerError('Không tải được đề', 'Không kết nối được máy chủ. Vui lòng kiểm tra mạng và thử lại.');
+    updatePracticeStartState();
+    return;
+  }
+
+  const payload = result.data || {};
+  if (payload.success !== true) {
+    state.practiceCodeStatus = 'error';
+    renderPracticeBannerError(
+      'Không thể mở đề này',
+      // The RPC's own message is authoritative here (it is the wording the spec
+      // asks for); the local map only backstops a code that arrives without one.
+      payload.message || rpcMessage(payload.code),
+    );
+    updatePracticeStartState();
+    return;
+  }
+
+  state.practiceCodeStatus = 'ok';
+  renderPracticeBanner(payload);
+
+  const candidates = Array.isArray(payload.candidates) ? payload.candidates : [];
   state.practiceRoster = candidates;
   fillPracticeDatalists(candidates);
+  updatePracticeStartState();
+}
+
+/**
+ * Phase 8.10 — renders the practice identity banner from a successful roster
+ * payload: the exam title plus the "Cho phép tự luyện" confirmation.
+ */
+function renderPracticeBanner(payload) {
+  const banner = $('practiceMetaBanner');
+  const titleNode = $('practiceMetaTitle');
+  const statusNode = $('practiceMetaStatus');
+  if (!banner || !titleNode || !statusNode) return;
+
+  const title = String(payload.title || '').trim();
+  titleNode.textContent = title ? `📚 ${title}` : '📚 Đề luyện tập';
+  statusNode.textContent = 'Cho phép tự luyện';
+  banner.classList.remove('is-error');
+  banner.classList.add('is-success');
+  show(banner);
+}
+
+/** Phase 8.10 — renders the practice banner in its refusal/error state. */
+function renderPracticeBannerError(title, message) {
+  const banner = $('practiceMetaBanner');
+  const titleNode = $('practiceMetaTitle');
+  const statusNode = $('practiceMetaStatus');
+  if (!banner || !titleNode || !statusNode) return;
+
+  titleNode.textContent = title;
+  statusNode.textContent = message;
+  banner.classList.remove('is-success');
+  banner.classList.add('is-error');
+  show(banner);
+}
+
+/** Phase 8.10 — hides the practice banner (blank code, or a source switch). */
+function clearPracticeBanner() {
+  const banner = $('practiceMetaBanner');
+  if (banner) {
+    hide(banner);
+    banner.classList.remove('is-success', 'is-error');
+  }
+}
+
+/**
+ * Phase 8.10 — reflects the by-code verification verdict on the shared submit
+ * button.
+ *
+ * The button is shared with the personal-.docx source, so it may only be
+ * disabled while the BY-CODE source is selected: a code that is closed for
+ * practice must never take the .docx flow down with it (Phase 8.9).
+ */
+function updatePracticeStartState() {
+  const btn = $('practiceStartBtn');
+  if (!btn) return;
+  btn.disabled = state.practiceSource === 'code' && state.practiceCodeStatus === 'error';
 }
 
 /** Clears the practice suggestion lists. */
@@ -2335,7 +2464,9 @@ async function handlePracticeSubmit(event) {
     }
   } finally {
     busy(false);
-    $('practiceStartBtn').disabled = false;
+    // Phase 8.10 — re-enabling is delegated so a known-bad code keeps the button
+    // disabled instead of the blanket re-enable this used to do.
+    updatePracticeStartState();
   }
 }
 
@@ -3485,10 +3616,43 @@ async function boot() {
   $('tabPractice').addEventListener('click', () => selectModeTab('practice'));
   $('practiceSourceCodeBtn').addEventListener('click', () => selectPracticeSource('code'));
   $('practiceSourceFileBtn').addEventListener('click', () => selectPracticeSource('file'));
-  // Phase 8.1 — fetch the practice roster (closed-but-practiceable exams included)
-  // once a code is entered, so the class/name datalists can suggest the identity.
-  $('practice-exam-code').addEventListener('change', (event) => {
+  // Phase 8.10 — verify the practice exam code, mirroring #loginForm's
+  // "Kiểm tra đề". Four triggers (change / explicit button / Enter / blur) all
+  // funnel into the same loader, so a mobile keyboard that never closes can
+  // still be resolved by tapping the button.
+  const practiceCodeInput = $('practice-exam-code');
+  practiceCodeInput.addEventListener('change', (event) => {
     void loadPracticeRoster(event.target.value);
+  });
+  const verifyPracticeBtn = $('btnVerifyPracticeCode');
+  if (verifyPracticeBtn) {
+    verifyPracticeBtn.addEventListener('click', () => {
+      void loadPracticeRoster(practiceCodeInput.value);
+    });
+  }
+  practiceCodeInput.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    // The field lives inside #practiceForm: without this, Enter would submit the
+    // form and start practice instead of merely verifying the code.
+    event.preventDefault();
+    void loadPracticeRoster(practiceCodeInput.value);
+  });
+  practiceCodeInput.addEventListener('blur', () => {
+    // Clicking "Bắt đầu ôn luyện" blurs this field, and re-verifying then would
+    // race the submit: the loader clears `state.practiceRoster` before its await,
+    // so `handlePracticeSubmit` would lose the canonical student code. An
+    // unchanged code has no new verdict to fetch, so skip it.
+    const current = practiceCodeInput.value.trim().toUpperCase();
+    if (current && current === state.practiceVerifiedCode && state.practiceCodeStatus) return;
+    void loadPracticeRoster(practiceCodeInput.value);
+  });
+  // Any edit invalidates the previous verdict, so the banner must not keep
+  // claiming a code the student has since changed.
+  practiceCodeInput.addEventListener('input', () => {
+    state.practiceCodeStatus = null;
+    state.practiceVerifiedCode = '';
+    clearPracticeBanner();
+    updatePracticeStartState();
   });
 
   // Phase 8.5 — exam navigation controls.

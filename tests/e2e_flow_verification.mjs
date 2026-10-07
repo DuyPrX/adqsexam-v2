@@ -680,6 +680,9 @@ async function main() {
   // Phase 8.9 — the .docx self-practice gate reads `classes` + `class_members`,
   // not `students` (the whitelist above), so the same identity must also exist
   // on a class roster. Step 11 exercises the gate on exactly this pair.
+  // `(user_id, name)` is unique, and the name is a constant — clear any row left
+  // by an earlier aborted run so this insert is idempotent.
+  await teacher.from('classes').delete().eq('name', STUDENT.className);
   const practiceClassInsert = await teacher
     .from('classes')
     .insert({ user_id: teacherId, name: STUDENT.className, academic_year: '2026-2027' })
@@ -4273,7 +4276,9 @@ async function main() {
   // Phase 8.9 — `verify_student_practice` now resolves against `classes` +
   // `class_members`, not the exam whitelist above, so 32c needs a matching class
   // roster with practice ENABLED (this step is about the payload RPC, not the
-  // class gate — Step 41 owns the disabled/unknown-class branches).
+  // class gate — Step 41 owns the disabled/unknown-class branches). CAN_CLASS is
+  // a constant, so clear any leftover row first (see Step 2).
+  await teacher.from('classes').delete().eq('name', CAN_CLASS);
   const canClass = await teacher
     .from('classes')
     .insert({ user_id: teacherId, name: CAN_CLASS, academic_year: '2026-2027', allow_practice: true })
@@ -6711,6 +6716,189 @@ async function main() {
 
   await teacher.from('classes').delete().eq('id', gateClassId); // members cascade
 
+  /* --- 42. Practice exam code verification + meta banner (Phase 8.10) ---- */
+  // The practice panel gains the same explicit "Kiểm tra đề" affordance the
+  // official form has (Phase 8.8): the code is verified up-front and the exam's
+  // identity — or the server's refusal — is revealed before the student commits.
+  step(42, 'practice exam code verification and meta banner');
+
+  const indexHtml42 = readFileSync(new URL('../student/index.html', import.meta.url), 'utf8');
+  const appSrc42 = readFileSync(new URL('../student/app.js', import.meta.url), 'utf8');
+  const practicePanel42 = indexHtml42.slice(indexHtml42.indexOf('id="practicePanel"'));
+
+  // --- 42a. markup -------------------------------------------------------
+  check('42a: the practice code input sits in an .input-with-button row',
+    practicePanel42.includes('id="btnVerifyPracticeCode"')
+      && /id="practice-exam-code"[\s\S]{0,400}?id="btnVerifyPracticeCode"/.test(practicePanel42),
+    'the verify button is not next to the practice code input');
+  check('42a: the practice meta banner exists with both slots',
+    practicePanel42.includes('id="practiceMetaBanner"')
+      && practicePanel42.includes('id="practiceMetaTitle"')
+      && practicePanel42.includes('id="practiceMetaStatus"'),
+    'practice banner markup missing');
+  check('42a: the banner starts hidden so an unverified code shows nothing',
+    /id="practiceMetaBanner"[^>]*class="[^"]*\bhidden\b/.test(practicePanel42),
+    'the banner is visible before verification');
+  check('42a: the banner renders after the code row, before the class field',
+    practicePanel42.indexOf('id="practiceMetaBanner"') !== -1
+      && practicePanel42.indexOf('id="practiceMetaBanner"')
+        < practicePanel42.indexOf('id="practiceClassName"')
+      && practicePanel42.indexOf('id="practiceMetaBanner"')
+        > practicePanel42.indexOf('id="btnVerifyPracticeCode"'),
+    'banner is not between the code row and the identity fields');
+  check('42a: the verify button is type="button" so it cannot submit the form',
+    /id="btnVerifyPracticeCode"[^>]*/.test(practicePanel42)
+      && practicePanel42.slice(
+        practicePanel42.lastIndexOf('<button', practicePanel42.indexOf('id="btnVerifyPracticeCode"')),
+        practicePanel42.indexOf('id="btnVerifyPracticeCode"'),
+      ).includes('type="button"'),
+    'a type=button guard is missing — the button would submit #practiceForm');
+
+  // --- 42b. the SPA is wired to the RPC ---------------------------------
+  const verifyFn42 = appSrc42.slice(
+    appSrc42.indexOf('async function loadPracticeRoster'),
+    appSrc42.indexOf('function renderPracticeBanner'),
+  );
+  check('42b: verification calls get_exam_roster with p_for_practice: true',
+    verifyFn42.includes("callRpc('get_exam_roster'")
+      && verifyFn42.includes('p_for_practice: true'),
+    'the practice-roster RPC call is missing or lacks the practice flag');
+  check('42b: the verify button is bound to the loader',
+    /btnVerifyPracticeCode'\)[\s\S]{0,400}?loadPracticeRoster\(/.test(appSrc42),
+    'the verify button is never wired');
+  check('42b: Enter in the code field verifies instead of submitting',
+    appSrc42.includes("practiceCodeInput.addEventListener('keydown'")
+      && appSrc42.includes("event.key !== 'Enter'")
+      && appSrc42.includes('event.preventDefault()'),
+    'Enter is not intercepted, so it would start practice');
+  check('42b: blur also triggers verification',
+    appSrc42.includes("practiceCodeInput.addEventListener('blur'"),
+    'blur is not wired');
+  check('42b: editing the code clears the stale banner',
+    appSrc42.includes("practiceCodeInput.addEventListener('input'")
+      && appSrc42.includes('clearPracticeBanner()'),
+    'a stale verdict can survive an edit');
+  check('42b: the success branch renders the title and the permission badge',
+    appSrc42.includes('`📚 ${title}`')
+      && appSrc42.includes("statusNode.textContent = 'Cho phép tự luyện'"),
+    'the success banner copy is missing');
+  check('42b: the success branch carries the is-success class',
+    appSrc42.includes("banner.classList.add('is-success')"),
+    'the success banner is not colour-coded');
+  check('42b: the failure branch carries the is-error class',
+    appSrc42.includes("banner.classList.add('is-error')"),
+    'the error banner is not colour-coded');
+  check('42b: the failure branch disables the start button',
+    appSrc42.includes('updatePracticeStartState'), 'the start button is never disabled');
+  // The start button is shared with the .docx source: a bad code must not
+  // disable the personal-file flow (Phase 8.9 regression guard).
+  check('42b: the disabled state is scoped to the by-code source',
+    appSrc42.includes("state.practiceSource === 'code' && state.practiceCodeStatus === 'error'"),
+    'a bad code would disable the .docx flow too');
+  check('42b: a slow earlier verification cannot overwrite a newer verdict',
+    verifyFn42.includes('requestId !== state.practiceRosterRequestId'),
+    'the request-id guard was dropped');
+
+  // --- 42c. URL prefill -------------------------------------------------
+  check('42c: the URL can carry the practice code',
+    appSrc42.includes("params.get('practice_code') || params.get('code')"),
+    'the ?practice_code= / ?code= params are not read');
+  check('42c: the URL prefill runs on first practice-tab activation',
+    appSrc42.includes('applyPracticeCodeFromUrl()'),
+    'the URL prefill is never called');
+  check('42c: the URL prefill runs at most once',
+    appSrc42.includes('practiceUrlPrefilled'), 'the prefill is not latched');
+
+  // --- 42d. live RPC round-trips ----------------------------------------
+  // Practice mode must succeed on a CLOSED exam (that is the whole point of
+  // p_for_practice) and expose `title` for the banner.
+  const PCODE_EXAM = {
+    code: 'PCV' + String(Math.floor(100 + Math.random() * 900)),
+    title: 'E2E Practice Verify',
+    duration: 30,
+  };
+  const PCODE_OFF_EXAM = {
+    code: 'PCO' + String(Math.floor(100 + Math.random() * 900)),
+    title: 'E2E Practice Closed',
+    duration: 30,
+  };
+  const PCODE_MEMBER = { code: 'E2EPCV01', fullName: 'Nguyễn Văn Ôn', className: '12PCV' };
+
+  await teacher.from('exams').delete().in('code', [PCODE_EXAM.code, PCODE_OFF_EXAM.code]);
+  const pcodeOn = await teacher.from('exams').insert({
+    user_id: teacherId,
+    code: PCODE_EXAM.code,
+    title: PCODE_EXAM.title,
+    duration_minutes: PCODE_EXAM.duration,
+    allow_practice: true,
+    is_active: false, // closed: practice must still work
+  }).select('id').single();
+  check('42d: the practice-enabled exam is created (closed)', !pcodeOn.error,
+    pcodeOn.error?.message);
+
+  const pcodeOff = await teacher.from('exams').insert({
+    user_id: teacherId,
+    code: PCODE_OFF_EXAM.code,
+    title: PCODE_OFF_EXAM.title,
+    duration_minutes: PCODE_OFF_EXAM.duration,
+    allow_practice: false,
+    is_active: false,
+  }).select('id').single();
+  check('42d: the practice-disabled exam is created', !pcodeOff.error,
+    pcodeOff.error?.message);
+
+  await teacher.from('students').insert({
+    exam_code: PCODE_EXAM.code,
+    student_code: PCODE_MEMBER.code,
+    full_name: PCODE_MEMBER.fullName,
+    class_name: PCODE_MEMBER.className,
+  });
+
+  const practiceVerify = await flex40Anon.rpc('get_exam_roster', {
+    p_exam_code: PCODE_EXAM.code,
+    p_for_practice: true,
+  });
+  check('42d: a closed-but-practice-enabled exam verifies for practice',
+    practiceVerify.data?.success === true, JSON.stringify(practiceVerify.data));
+  check('42d: the payload carries the title the banner renders',
+    practiceVerify.data?.title === PCODE_EXAM.title, String(practiceVerify.data?.title));
+  check('42d: the payload confirms allow_practice for the badge',
+    practiceVerify.data?.allow_practice === true, String(practiceVerify.data?.allow_practice));
+  check('42d: the payload returns candidates for the datalists',
+    Array.isArray(practiceVerify.data?.candidates)
+      && practiceVerify.data.candidates.some((c) => c.student_code === PCODE_MEMBER.code),
+    JSON.stringify(practiceVerify.data?.candidates));
+
+  // The refusal path the banner must render, verbatim.
+  const practiceOff = await flex40Anon.rpc('get_exam_roster', {
+    p_exam_code: PCODE_OFF_EXAM.code,
+    p_for_practice: true,
+  });
+  check('42d: a practice-disabled exam is refused with PRACTICE_NOT_ALLOWED',
+    practiceOff.data?.success === false && practiceOff.data?.code === 'PRACTICE_NOT_ALLOWED',
+    JSON.stringify(practiceOff.data));
+  check('42d: the refusal message is the one the banner shows',
+    practiceOff.data?.message === 'Đề thi này chưa mở cho tự luyện tập.',
+    String(practiceOff.data?.message));
+
+  const practiceUnknown = await flex40Anon.rpc('get_exam_roster', {
+    p_exam_code: 'ZZZ' + String(Math.floor(100 + Math.random() * 900)),
+    p_for_practice: true,
+  });
+  check('42d: an unknown code is refused with EXAM_NOT_FOUND',
+    practiceUnknown.data?.success === false && practiceUnknown.data?.code === 'EXAM_NOT_FOUND',
+    JSON.stringify(practiceUnknown.data));
+  check('42d: the not-found message is the one the banner shows',
+    practiceUnknown.data?.message === 'Đề thi không tồn tại.',
+    String(practiceUnknown.data?.message));
+  // Both refusal codes must be in the SPA's local map, so a payload that omits
+  // the message still renders Vietnamese rather than a raw code.
+  check('42d: the SPA maps PRACTICE_NOT_ALLOWED to Vietnamese',
+    appSrc42.includes("PRACTICE_NOT_ALLOWED: 'Giáo viên chưa mở đề này cho chế độ luyện tập.'"),
+    'the PRACTICE_NOT_ALLOWED copy is missing');
+
+  await teacher.from('exams').delete().in('code', [PCODE_EXAM.code, PCODE_OFF_EXAM.code]);
+
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);
   await teacher.from('exams').delete().eq('code', EXAM.code); // cascades
@@ -6735,6 +6923,10 @@ async function main() {
   // The class outlives its exams; delete it explicitly (members cascade).
   await teacher.from('classes').delete().eq('id', classId);
   await teacher.from('classes').delete().eq('id', webClassId);
+  // Phase 8.9/8.10 — the constant-named rosters seeded by Steps 2, 32b and 41.
+  // Deleted by NAME because a failed insert leaves `canClassId`/`gateClassId`
+  // undefined and the rows must not survive into the next run.
+  await teacher.from('classes').delete().in('name', [STUDENT.className, CAN_CLASS]);
 
   console.log(`\n${'='.repeat(74)}`);
   console.log(`RESULT: ${passed} passed, ${failed} failed`);
