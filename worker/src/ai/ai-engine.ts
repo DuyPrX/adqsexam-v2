@@ -17,8 +17,10 @@ import { stripMarkers } from '../parser/xml-preprocessor';
 /**
  * Hard-coded last-resort model.
  *
- * Resolution order (Phase 5.3): explicit `modelName` option -> the
- * `DEFAULT_AI_MODEL` Worker binding -> this constant.
+ * Resolution order (Phase 5.3): explicit `modelName` option -> the Worker's
+ * `AI_MODEL_NAME` binding -> this constant. The binding exists so retargeting a
+ * deployment is a config edit; this constant is only the floor that keeps the
+ * engine callable when nothing is configured at all.
  */
 export const DEFAULT_MODEL = 'gemini-3.5-flash-lite';
 
@@ -303,7 +305,7 @@ export interface AiEngineOptions {
   apiKey: string | undefined;
   /** Explicit model id. Highest priority in the resolution chain. */
   model?: string;
-  /** Worker binding fallback (`DEFAULT_AI_MODEL`). Lower priority than `model`. */
+  /** Worker binding fallback (`AI_MODEL_NAME`). Lower priority than `model`. */
   envModel?: string;
   /** Marked-up text (markers are stripped before sending). */
   text: string;

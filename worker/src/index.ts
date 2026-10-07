@@ -31,9 +31,15 @@ export interface Env {
   /** Shared secret required in the X-Internal-Secret header. Unset = bypassed. */
   INTERNAL_SECRET?: string;
   /** Worker-level default model (see wrangler.toml [vars]). */
+  AI_MODEL_NAME?: string;
+  /** Legacy name for AI_MODEL_NAME, and the older GEMINI_MODEL before that. */
   DEFAULT_AI_MODEL?: string;
-  /** Legacy alias for DEFAULT_AI_MODEL, kept for already-deployed configs. */
   GEMINI_MODEL?: string;
+  /**
+   * Browser origins allowed to call this Worker. `*` (the default) permits any
+   * origin; otherwise a comma-separated allow-list. See `corsOptions()`.
+   */
+  ALLOWED_ORIGINS?: string;
   /** Supabase project URL, used only by the keep-alive cron (Phase 5.7). */
   SUPABASE_URL?: string;
   /** Supabase anon/publishable key, used only by the keep-alive cron. */
@@ -102,7 +108,10 @@ function checkRateLimit(ip: string, now: number): boolean {
 
 const app = new Hono<{ Bindings: Env }>();
 
-app.use('*', cors());
+// Origins come from the `ALLOWED_ORIGINS` binding rather than a hardcoded `*`,
+// so a deployment can narrow them without a code change. Hono passes the
+// request context, which is where the resolved bindings live.
+app.use('*', (c, next) => cors(corsOptions(c.env))(c, next));
 
 app.get('/', (c) =>
   c.json({
@@ -127,9 +136,43 @@ function errorResponse(message: string, status: number, code: string) {
   return { success: false, engine_used: null, count: 0, data: [], error: { code, message } };
 }
 
-/** The Worker-level default model binding (new name wins over the legacy one). */
+/**
+ * The Worker-level default model binding.
+ *
+ * Priority puts the current name first so an operator can retarget the
+ * deployment by setting `AI_MODEL_NAME` alone; the two older names keep
+ * already-deployed configurations working without a dashboard edit.
+ */
 function envDefaultModel(env: Env): string | undefined {
-  return env.DEFAULT_AI_MODEL ?? env.GEMINI_MODEL;
+  for (const candidate of [env.AI_MODEL_NAME, env.DEFAULT_AI_MODEL, env.GEMINI_MODEL]) {
+    if (typeof candidate === 'string' && candidate.trim() !== '') return candidate.trim();
+  }
+  return undefined;
+}
+
+/**
+ * Builds the Hono CORS options from the `ALLOWED_ORIGINS` binding.
+ *
+ * `*` (or an unset binding) permits any origin, which is correct for this
+ * deployment: the public practice endpoint is secret-free and rule-engine-only,
+ * and the SPA's Pages hostname varies per preview build. A comma-separated list
+ * narrows it to an explicit allow-list instead.
+ *
+ * A single-entry list is returned as a bare string because Hono treats a
+ * one-element array and that string identically — but keeping the list form
+ * only when it is genuinely a list makes the intent obvious.
+ */
+function corsOptions(env: Env) {
+  const configured = env.ALLOWED_ORIGINS?.trim();
+  if (!configured || configured === '*') return { origin: '*' };
+
+  const origins = configured
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter((origin) => origin !== '');
+
+  if (origins.length === 0) return { origin: '*' };
+  return { origin: origins.length === 1 ? origins[0] : origins };
 }
 
 /** Reads and validates the `file` field of a multipart body. */

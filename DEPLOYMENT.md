@@ -131,6 +131,17 @@ npx wrangler secret put GEMINI_API_KEY    # Engine 2 (AI). Required for mode=ai/
 npx wrangler secret put INTERNAL_SECRET   # Shared secret for the X-Internal-Secret header.
 ```
 
+Non-secret defaults live in `wrangler.toml` `[vars]` — edit and redeploy, no
+`secret put` needed:
+
+| `[vars]` key | Default | Purpose |
+|---|---|---|
+| `AI_MODEL_NAME` | `gemini-3.5-flash-lite` | Engine 2's default model. A caller's `?model=` overrides it |
+| `ALLOWED_ORIGINS` | `*` | Browser origins allowed to call the Worker; a comma-separated allow-list narrows it |
+
+For local runs `Copy-Item .dev.vars.example .dev.vars` — see
+[worker/README.md](worker/README.md).
+
 Generate a strong shared secret:
 
 ```bash
@@ -178,15 +189,20 @@ Vercel → **Add New → Project** → select the repo → **Root Directory: `v2
 
 ### 3.2 Environment variables
 
-Project → **Settings → Environment Variables** (Production + Preview):
+Project → **Settings → Environment Variables** (Production + Preview).
+[web/.env.example](web/.env.example) is the canonical, fully-commented list —
+this table is the short version:
 
 | Variable | Value | Secret? |
 |---|---|---|
 | `NEXT_PUBLIC_SUPABASE_URL` | `https://<project-ref>.supabase.co` | no |
-| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | `sb_publishable_…` | no |
-| `SUPABASE_SECRET_KEY` | `sb_secret_…` | **yes** |
+| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | `sb_publishable_…` (alias: `NEXT_PUBLIC_SUPABASE_ANON_KEY`) | no |
+| `SUPABASE_SECRET_KEY` | `sb_secret_…` (alias: `SUPABASE_SERVICE_ROLE_KEY`) | **yes** |
 | `NEXT_PUBLIC_EXTRACTOR_API_URL` | `https://docx-extractor-v2.<account>.workers.dev/api/v1/extract` | no |
 | `EXTRACTOR_INTERNAL_SECRET` | same value as the Worker's `INTERNAL_SECRET` | **yes** |
+| `NEXT_PUBLIC_AI_MODEL_NAME` | e.g. `gemini-3.5-flash-lite` — label/default for the AI model picker | no |
+| `NEXT_PUBLIC_AI_PROVIDER` | `gemini` (default) | no |
+| `NEXT_PUBLIC_STUDENT_APP_URL` | `https://adqs-exam-student.pages.dev` — **required in production** | no |
 
 Rules:
 
@@ -195,6 +211,11 @@ Rules:
   prefix, so they stay server-side.
 - Set variables **before** the first build; `NEXT_PUBLIC_*` is baked in at build
   time, so changing them requires a redeploy.
+- Both Supabase key schemes are accepted. `lib/env.ts` resolves the modern name
+  first and falls back to the legacy one, so paste whichever your dashboard
+  shows.
+- Omitting `NEXT_PUBLIC_STUDENT_APP_URL` makes every student join link and QR
+  code point at the teacher app, where the student views do not exist.
 
 ### 3.3 Deploy
 
@@ -219,17 +240,34 @@ The SPA is plain static assets (no build step).
 
 ### 4.1 Point it at Supabase
 
-Edit [config.js](student/config.js) before deploying, or override at runtime:
+The SPA has **no committed configuration**. Create it from the template:
+
+```bash
+cd v2/student
+cp config.example.js config.js     # Windows: Copy-Item config.example.js config.js
+```
+
+Then edit `config.js`:
 
 ```js
-window.APP_CONFIG = {
+window.__APP_CONFIG__ = {
   supabaseUrl: 'https://<project-ref>.supabase.co',
-  supabaseKey: 'sb_publishable_…',
+  supabasePublishableKey: 'sb_publishable_…',
+  // Optional: base origin of the Worker, for the personal-.docx practice mode.
+  workerApiUrl: 'https://docx-extractor-v2.<account>.workers.dev',
 };
 ```
 
-Both values are **public by design**: students hold zero table privileges and
-every action goes through a `SECURITY DEFINER` RPC. There is no secret here.
+`config.js` is **git-ignored**: it names one specific project, and a committed
+copy would point every other operator's students at it. It must exist in the
+deployed asset directory, so create it on the build machine (or add a CI step
+that writes it from a platform secret).
+
+Nothing in `config.js` is a secret — see the security note in the template.
+
+`Verify with`: open the deployed site with `config.js` missing → the SPA shows
+**"Chưa cấu hình Supabase"** rather than failing obscurely. That is the expected
+behaviour, not a bug.
 
 ### 4.2 Deploy via Wrangler (direct)
 

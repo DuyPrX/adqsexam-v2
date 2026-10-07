@@ -36,22 +36,29 @@ npm install
 ```
 
 Secrets are read from the Worker environment and are **never** committed.
+Non-secret defaults live in `wrangler.toml` `[vars]`; secrets are provisioned
+with `wrangler secret put`. `.dev.vars.example` documents the local set.
 
-| Variable | Required | Purpose |
-|---|---|---|
-| `GEMINI_API_KEY` | only for `mode=ai` / `auto` fallback | Google AI Studio key |
-| `INTERNAL_SECRET` | production | Must match the `X-Internal-Secret` header. Unset ⇒ check bypassed (local dev) |
-| `DEFAULT_AI_MODEL` | no | Worker-level default AI model. Overridden per-request by `?model=` (or the `model` form field) |
-| `SUPABASE_URL` | no | Keep-alive ping target (Phase 5.7). Unset ⇒ the cron handler logs a skip and does nothing |
-| `SUPABASE_ANON_KEY` | no | Anon/publishable key for the keep-alive ping. Unset ⇒ same skip |
+| Variable | Required | Where | Purpose |
+|---|---|---|---|
+| `GEMINI_API_KEY` | only for `mode=ai` / `auto` fallback | secret | Google AI Studio key |
+| `INTERNAL_SECRET` | production | secret | Must match the `X-Internal-Secret` header. Unset ⇒ check bypassed (local dev) |
+| `AI_MODEL_NAME` | no | `[vars]` | Worker-level default AI model. Overridden per-request by `?model=` (or the `model` form field) |
+| `DEFAULT_AI_MODEL` | no | `[vars]` | Legacy name for `AI_MODEL_NAME`, still honoured |
+| `GEMINI_MODEL` | no | `[vars]` | Oldest alias, still honoured |
+| `ALLOWED_ORIGINS` | no | `[vars]` | Browser origins allowed to call the Worker. `*` (default) or a comma-separated allow-list |
+| `SUPABASE_URL` | no | `[vars]` | Keep-alive ping target (Phase 5.7). Unset ⇒ the cron handler logs a skip and does nothing |
+| `SUPABASE_ANON_KEY` | no | `[vars]` | Anon/publishable key for the keep-alive ping. Unset ⇒ same skip |
 
 Local development — create `worker/.dev.vars` (git-ignored):
 
+```powershell
+Copy-Item .dev.vars.example .dev.vars
+```
+
 ```ini
 GEMINI_API_KEY=""
-INTERNAL_SECRET="local-dev-secret"
-SUPABASE_URL="http://127.0.0.1:54321"
-SUPABASE_ANON_KEY="<local publishable key>"
+INTERNAL_SECRET="local-dev-secret"   # must match the web's EXTRACTOR_INTERNAL_SECRET
 ```
 
 Production:
@@ -131,9 +138,11 @@ where no fallback runs) so the teacher UI can suggest re-scanning with AI.
 ### Model selection
 
 `?model=<model-id>` (or the `model` multipart field) chooses the Engine 2 model.
-Fallback priority: `model` parameter → `DEFAULT_AI_MODEL` binding →
-`gemini-2.5-flash`. The effective model is echoed back as `meta.model_used`
-(`null` when the rule engine produced the payload).
+Fallback priority: `model` parameter → `AI_MODEL_NAME` binding →
+`gemini-3.5-flash-lite` (the `DEFAULT_MODEL` constant in
+`src/ai/ai-engine.ts`). The effective model is echoed back as `meta.model_used`
+(`null` when the rule engine produced the payload), so a caller can always tell
+which model actually ran.
 
 ```powershell
 curl.exe -X POST "http://127.0.0.1:8787/api/v1/extract?mode=ai&model=gemini-2.5-pro" `

@@ -273,10 +273,11 @@ no tokens.
 
 **Engine 2 — Google AI Studio (fallback / on-demand).** Gemini / Gemma, invoked with a
 strict `responseSchema`. The default model is `gemini-3.5-flash-lite`
-(`worker/src/ai/ai-engine.ts` — `DEFAULT_MODEL`, overridable via `DEFAULT_AI_MODEL`);
-the teacher may also pick `gemini-3.8-flash` / `gemma-4-31b-it` or type a custom id
-(`UploadZone.tsx`). All shipped model ids were validated against Google AI Studio.
-Triggered only when
+(`worker/src/ai/ai-engine.ts` — `DEFAULT_MODEL`, overridable via the Worker's
+`AI_MODEL_NAME` binding); the teacher may also pick `gemini-3.8-flash` /
+`gemma-4-31b-it` or type a custom id (`UploadZone.tsx`, whose shortlist and default
+label are built from `NEXT_PUBLIC_AI_MODEL_NAME` / `AI_PROVIDER` — see `web/src/lib/ai.ts`).
+All shipped model ids were validated against Google AI Studio. Triggered only when
 `mode=ai` is requested explicitly, **or** when Engine 1 yields zero questions, **or**
 when Engine 1 produces questions with unresolved answer keys. Defaulting to Engine 1
 keeps the overwhelming majority of requests at zero token cost and inside the Worker CPU

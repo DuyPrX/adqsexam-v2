@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+import { getExtractorEndpoint, getExtractorInternalSecret } from '@/lib/env';
 
 /**
  * Server-side proxy for the Cloudflare Worker extractor.
@@ -50,7 +51,7 @@ export async function POST(request: Request) {
   }
 
   // 2. Validate the extractor configuration.
-  const endpoint = process.env.NEXT_PUBLIC_EXTRACTOR_API_URL;
+  const endpoint = getExtractorEndpoint();
   if (!endpoint) {
     return fail('Chưa cấu hình NEXT_PUBLIC_EXTRACTOR_API_URL.', 'NOT_CONFIGURED', 500);
   }
@@ -86,7 +87,7 @@ export async function POST(request: Request) {
   if (model) upstream.append('model', model);
 
   const headers: Record<string, string> = {};
-  const secret = process.env.EXTRACTOR_INTERNAL_SECRET;
+  const secret = getExtractorInternalSecret();
   if (secret) headers['X-Internal-Secret'] = secret;
 
   const upstreamQuery = new URLSearchParams({ mode });

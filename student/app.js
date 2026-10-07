@@ -15,6 +15,7 @@
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { resolveSupabaseConfig, resolveWorkerBaseUrl } from './app-config.js';
 import {
   AUTO_ADVANCE_MS, FONT_CYCLE, FONT_KEY, FONT_LABELS, THEME_KEY,
   buildPaletteCells, clampQuestionIndex, getUnansweredQuestions, nextFontStep, nextTheme, normalizeTheme,
@@ -44,39 +45,14 @@ const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingm
 /**
  * Phase 8.1 — base URL of the Cloudflare Worker that parses a personal .docx.
  *
- * The student SPA is a STATIC bundle on Cloudflare Pages, which serves only
- * files under its assets directory — there is no server-side route handler, so a
- * relative `/api/v1/extract-practice` request 405s/404s. The Worker lives at its
- * own origin and must therefore be addressed absolutely.
- *
- * Resolution order:
- *   1. `window.WORKER_API_URL` — set by a deployment's own config script.
- *   2. the configured practice URL (APP_CONFIG.practiceApiUrl), when it is
- *      already absolute — the existing `?api=` / localStorage override path.
- *   3. localhost:8787 (wrangler dev) when developing locally.
- *   4. `''` otherwise — the caller reports "chưa cấu hình" rather than issuing a
- *      request that would fail as an opaque 404 against the static host.
- *
- * Trailing slashes are stripped so path concatenation is unambiguous.
+ * Resolved from `window.__APP_CONFIG__.workerApiUrl` by `app-config.js`, which
+ * also strips trailing slashes and tolerates a full endpoint path. There is NO
+ * built-in fallback: this bundle is deployed by more than one operator, so a
+ * baked-in development URL would silently send a school's uploads to the wrong
+ * host. An empty result is reported to the student as "chưa cấu hình".
  */
-function resolveWorkerBaseUrl() {
-  const explicit = String(window.WORKER_API_URL || '').replace(/\/+$/, '');
-  if (explicit) return explicit;
-
-  const configured = String((window.APP_CONFIG || {}).practiceApiUrl || '').trim();
-  if (/^https?:\/\//i.test(configured)) {
-    // The configured value may be the FULL endpoint; strip the known path so the
-    // caller can append its own consistently.
-    return configured.replace(/\/api\/v1\/extract-practice\/?$/i, '').replace(/\/+$/, '');
-  }
-
-  if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
-    return 'http://localhost:8787';
-  }
-
-  // Unconfigured non-local deployment: surface a clear message instead of
-  // letting the request fail as an opaque 404 against the static host.
-  return 'https://docx-extractor-v2.haleduy01.workers.dev';
+function workerBaseUrl() {
+  return resolveWorkerBaseUrl(window.__APP_CONFIG__);
 }
 
 /** Server RPC result codes -> Vietnamese copy shown to the student. */
@@ -430,14 +406,14 @@ function renderFontIcon() {
    ===================================================================== */
 
 function initSupabase() {
-  const { supabaseUrl, supabaseKey } = window.APP_CONFIG || {};
-  if (!supabaseUrl || !supabaseKey
-      || supabaseUrl.startsWith('YOUR_') || supabaseKey.startsWith('YOUR_')) {
+  const { url, key, configured } = resolveSupabaseConfig(window.__APP_CONFIG__);
+  if (!configured) {
     throw new Error(
-      'Chưa cấu hình Supabase. Mở config.js hoặc thêm ?sb=<url>&sbkey=<key> vào địa chỉ.',
+      'Chưa cấu hình Supabase. Hãy tạo config.js từ config.example.js và điền '
+      + 'supabaseUrl + supabasePublishableKey.',
     );
   }
-  return createClient(supabaseUrl, supabaseKey, {
+  return createClient(url, key, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 }
@@ -2279,13 +2255,13 @@ async function startPracticeByFile() {
 /**
  * POSTs the .docx to the public practice endpoint (forced mode=rule).
  *
- * Phase 8.1 — the endpoint is built from `resolveWorkerBaseUrl()` rather than
+ * Phase 8.1 — the endpoint is built from `workerBaseUrl()` rather than
  * being used as a relative path: this SPA is served as static assets, so a
  * relative `/api/...` request would hit the Pages host (405/404) instead of the
  * Worker that actually parses the file.
  */
 async function extractPracticeDocx(file) {
-  const workerBase = resolveWorkerBaseUrl();
+  const workerBase = workerBaseUrl();
   if (!workerBase) {
     return {
       ok: false,

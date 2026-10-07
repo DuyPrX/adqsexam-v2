@@ -1,5 +1,6 @@
 import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
+import { getSupabasePublishableKey, getSupabaseUrl } from '../env';
 
 /**
  * Refreshes the Supabase auth session on every request and keeps the auth
@@ -11,16 +12,15 @@ import { NextResponse, type NextRequest } from 'next/server';
  * Invoked from src/proxy.ts (Next.js 16 replaced the `middleware` convention
  * with `proxy`).
  *
- * Key selection mirrors client.ts/server.ts so the refreshed session is usable
- * by both.
+ * URL + key resolution is shared with client.ts/server.ts so the refreshed
+ * session is usable by both.
  */
 export async function updateSession(request: NextRequest) {
   let response = NextResponse.next({ request });
 
   const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ??
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    getSupabaseUrl(),
+    getSupabasePublishableKey(),
     {
       cookies: {
         getAll() {

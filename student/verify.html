@@ -206,6 +206,7 @@
   <script src="./config.js"></script>
   <script type="module">
     import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+    import { resolveSupabaseConfig } from './app-config.js';
 
     const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     const PASS_PERCENT = 80;
@@ -279,8 +280,9 @@
         return;
       }
 
-      const { supabaseUrl, supabaseKey } = window.APP_CONFIG || {};
-      if (!supabaseUrl || !supabaseKey) {
+      const { url: supabaseUrl, key: supabaseKey, configured } =
+        resolveSupabaseConfig(window.__APP_CONFIG__);
+      if (!configured) {
         showResult({
           valid: false,
           badgeClass: 'badge--pending',

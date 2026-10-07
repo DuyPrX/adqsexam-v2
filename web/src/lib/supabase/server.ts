@@ -1,6 +1,7 @@
 import { cache } from 'react';
 import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
+import { getSupabasePublishableKey, getSupabaseUrl } from '../env';
 
 /**
  * Server-side Supabase client (Route Handlers / Server Components).
@@ -9,8 +10,9 @@ import { cookies } from 'next/headers';
  * `setAll` is wrapped in try/catch because Server Components are not allowed to
  * mutate cookies — the middleware is what actually refreshes the session.
  *
- * The publishable key is preferred; `NEXT_PUBLIC_SUPABASE_ANON_KEY` is a
- * fallback for projects created before the publishable/secret key scheme.
+ * URL + key resolution (including the legacy anon-key fallback) lives in
+ * `lib/env.ts` and is shared with the browser client and the middleware, so the
+ * session written by one is always readable by the others.
  *
  * Wrapped in React `cache` so a page (and everything it renders) shares ONE
  * client per request instead of constructing one per call site — each
@@ -20,9 +22,8 @@ export const createClient = cache(async () => {
   const cookieStore = await cookies();
 
   return createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ??
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    getSupabaseUrl(),
+    getSupabasePublishableKey(),
     {
       cookies: {
         getAll() {

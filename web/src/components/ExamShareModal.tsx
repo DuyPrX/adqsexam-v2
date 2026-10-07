@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Check, Copy, Download, Link2, QrCode, X } from 'lucide-react';
 import QRCode from 'qrcode';
+import { resolveStudentAppBaseUrl } from '@/lib/env';
 
 interface ExamShareModalProps {
   exam: { code: string; title: string };
@@ -27,14 +28,13 @@ function toSafeFilename(title: string): string {
  * `?code=` — exactly the parameter `prefillFromUrl()` reads. A path prefix such
  * as `/exam/` would 404.
  *
- * `NEXT_PUBLIC_STUDENT_APP_URL` is preferred because the SPA is a separate
- * origin; the current origin is only a local-development fallback.
+ * The SPA's origin comes from `NEXT_PUBLIC_STUDENT_APP_URL` (see lib/env.ts),
+ * because it is a separate deployment; the current origin is the documented
+ * local-development fallback.
  */
 function buildStudentUrl(code: string): string {
-  const base = (process.env.NEXT_PUBLIC_STUDENT_APP_URL ?? '').replace(/\/+$/, '');
-  if (base) return `${base}/?code=${code}`;
-  if (typeof window !== 'undefined') return `${window.location.origin}/?code=${code}`;
-  return `/?code=${code}`;
+  const base = resolveStudentAppBaseUrl();
+  return base ? `${base}/?code=${code}` : `/?code=${code}`;
 }
 
 /**

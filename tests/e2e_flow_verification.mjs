@@ -111,6 +111,18 @@
  *      120ms apart; mute silences everything and a suspended context refuses to play
  *      until `resumeAudioContext()`; the engine no-ops with no `window`; and the
  *      projector + SPA are wired to it (mute toggle, submit chime, bloom fanfare).
+ *  39. Configuration externalization (Phase 9): `web/.env.example` documents every
+ *      variable (and never prefixes a secret with `NEXT_PUBLIC_`); `student/
+ *      config.example.js` defines only `window.__APP_CONFIG__` and carries no live
+ *      endpoint; the SPA's config is untracked and loaded before its module; the SPA
+ *      resolvers strip trailing slashes, accept the legacy anon-key alias, report an
+ *      unconfigured deployment, and build a practice endpoint with no doubled
+ *      separator; the web resolvers prefer the modern Supabase key names while still
+ *      honouring the legacy ones, treat a blank value as absent, and throw an
+ *      actionable error when unconfigured; the AI picker derives its default label and
+ *      provider-gated shortlist from the environment; and the Worker resolves both its
+ *      model (`AI_MODEL_NAME`, legacy aliases still honoured) and its CORS origins
+ *      (`ALLOWED_ORIGINS`) from bindings — proven by driving the real Hono app.
  *
  * Usage:
  *   node v2/tests/e2e_flow_verification.mjs
@@ -243,7 +255,7 @@ const { zipSync, strToU8 } = await import(
 const { default: workerApp } = await import(
   new URL('../worker/src/index.ts', import.meta.url).href
 );
-const { readFileSync } = await import('node:fs');
+const { existsSync, readFileSync } = await import('node:fs');
 // Step 21 seeds/inspects cron.job_run_details, which is not API-exposed.
 const { execFileSync } = await import('node:child_process');
 
@@ -278,6 +290,22 @@ const { countTreeWords, normalizeAnswerText, treeWordCounterLabel } = await impo
 const {
   listExamCandidates, addExamCandidate, updateExamCandidate, deleteExamCandidate,
 } = await import(new URL('../web/src/lib/candidates.ts', import.meta.url).href);
+
+// Phase 9 Step 39 — the student SPA's config resolution + the teacher web's env
+// resolvers. Both are dependency-free and DOM-free, so the suite executes the
+// SAME code each app ships rather than asserting against a copy. `student/
+// app-config.js` is a relative `.js` module, hence the explicit extension.
+const { stripTrailingSlashes, resolveSupabaseConfig, resolveWorkerBaseUrl } = await import(
+  new URL('../student/app-config.js', import.meta.url).href
+);
+const {
+  getSupabaseUrl, getSupabasePublishableKey, getSupabaseSecretKey,
+  getAiModelName, getAiProvider, resolveStudentAppBaseUrl,
+  getExtractorEndpoint, getExtractorInternalSecret,
+} = await import(new URL('../web/src/lib/env.ts', import.meta.url).href);
+const { buildModelOptions, CUSTOM_MODEL } = await import(
+  new URL('../web/src/lib/ai.ts', import.meta.url).href
+);
 
 const TEACHER = { email: 'e2e.teacher@adqsexam.local', password: 'e2e-password-123' };
 const EXAM = {
@@ -4433,8 +4461,12 @@ async function main() {
   check('32e: app.js ships the switchView router',
     spaJs.includes('function switchView('), 'switchView missing');
   // The static-host fix: the .docx upload must address the Worker absolutely.
+  // Phase 9 moved the resolution into the shared `app-config.js` module, so this
+  // asserts the SPA still resolves a base and still builds the absolute
+  // practice path — not the shape of the (now imported) resolver.
   check('32e: the .docx upload resolves an absolute Worker base URL',
-    spaJs.includes('function resolveWorkerBaseUrl(') && spaJs.includes('/api/v1/extract-practice'),
+    spaJs.includes("from './app-config.js'") && spaJs.includes('workerBaseUrl(')
+      && spaJs.includes('/api/v1/extract-practice'),
     'worker URL resolution missing');
 
   // --- cleanup ------------------------------------------------------------
@@ -5740,6 +5772,417 @@ async function main() {
 
   // --- 38k. cleanup -----------------------------------------------------
   await teacher.from('exams').delete().eq('code', shuffleCode);
+
+  /* --- 39. configuration externalization (Phase 9) ---------------------- */
+  step(39, 'externalized configuration and modern Supabase key resolution');
+
+  // --- 39a. the teacher web env template documents every variable -------
+  // `.env.example` is the only place an operator learns the required set, so a
+  // missing key here is a deployment that will fail at runtime. Read the file
+  // and require each name to appear as an assignment or a commented example.
+  const envExamplePath = new URL('../web/.env.example', import.meta.url);
+  check('39a: web/.env.example exists', existsSync(envExamplePath), envExamplePath.pathname);
+  const envExample = readFileSync(envExamplePath, 'utf8');
+  const REQUIRED_ENV_KEYS = [
+    'NEXT_PUBLIC_SUPABASE_URL',
+    'NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY',
+    'NEXT_PUBLIC_SUPABASE_ANON_KEY',
+    'SUPABASE_SECRET_KEY',
+    'SUPABASE_SERVICE_ROLE_KEY',
+    'NEXT_PUBLIC_EXTRACTOR_API_URL',
+    'EXTRACTOR_INTERNAL_SECRET',
+    'NEXT_PUBLIC_AI_MODEL_NAME',
+    'NEXT_PUBLIC_AI_PROVIDER',
+    'NEXT_PUBLIC_STUDENT_APP_URL',
+  ];
+  const missingEnvKeys = REQUIRED_ENV_KEYS.filter((key) => !envExample.includes(key));
+  check('39a: web/.env.example documents every required variable',
+    missingEnvKeys.length === 0, `missing: ${missingEnvKeys.join(', ')}`);
+  check('39a: web/.env.example carries explanatory comments',
+    envExample.split('\n').filter((line) => line.trim().startsWith('#')).length >= 20,
+    'too few comments to be a usable template');
+  // A secret must never be suggested with the browser-inlining prefix.
+  check('39a: web/.env.example never prefixes a secret with NEXT_PUBLIC_',
+    !/^NEXT_PUBLIC_(SUPABASE_SECRET_KEY|SUPABASE_SERVICE_ROLE_KEY|EXTRACTOR_INTERNAL_SECRET)/m
+      .test(envExample),
+    'a server-only secret is exposed to the browser bundle');
+
+  // --- 39b. the student SPA config template -----------------------------
+  const studentExamplePath = new URL('../student/config.example.js', import.meta.url);
+  check('39b: student/config.example.js exists',
+    existsSync(studentExamplePath), studentExamplePath.pathname);
+  const studentExample = readFileSync(studentExamplePath, 'utf8');
+  check('39b: it defines window.__APP_CONFIG__',
+    studentExample.includes('window.__APP_CONFIG__'), 'the global is missing');
+  check('39b: it documents all three config keys',
+    ['supabaseUrl', 'supabasePublishableKey', 'workerApiUrl']
+      .every((key) => studentExample.includes(key)),
+    'a config key is undocumented');
+  // The template must be a template: shipping real endpoints would defeat the
+  // point of untracking config.js.
+  check('39b: the template carries no real project URL or key',
+    !/https:\/\/[a-z]{20}\.supabase\.co/.test(studentExample)
+      && !/sb_publishable_[A-Za-z0-9_-]{10,}/.test(studentExample),
+    'a live endpoint leaked into the template');
+
+  // --- 39c. config.js is untracked and config-load order is correct -----
+  // The concrete config names one deployment's project, so it must not be
+  // committed; index.html and verify.html must still load it before the module
+  // that reads it.
+  const studentGitignore = readFileSync(
+    new URL('../student/.gitignore', import.meta.url), 'utf8',
+  );
+  check('39c: student/.gitignore excludes config.js',
+    /^config\.js\s*$/m.test(studentGitignore), 'config.js is still committable');
+  const indexHtml39 = readFileSync(new URL('../student/index.html', import.meta.url), 'utf8');
+  const verifyHtml39 = readFileSync(new URL('../student/verify.html', import.meta.url), 'utf8');
+  check('39c: index.html loads config.js before app.js',
+    indexHtml39.indexOf('src="./config.js"') !== -1
+      && indexHtml39.indexOf('src="./config.js"') < indexHtml39.indexOf('src="./app.js"'),
+    'config.js is not loaded first');
+  check('39c: verify.html loads config.js before its module script',
+    verifyHtml39.indexOf('src="./config.js"') !== -1
+      && verifyHtml39.indexOf('src="./config.js"') < verifyHtml39.indexOf('type="module"'),
+    'config.js is not loaded first');
+
+  // --- 39d. the SPA reads ONLY __APP_CONFIG__ ---------------------------
+  const appJs39 = readFileSync(new URL('../student/app.js', import.meta.url), 'utf8');
+  check('39d: app.js reads window.__APP_CONFIG__',
+    appJs39.includes('window.__APP_CONFIG__'), 'the new global is not read');
+  check('39d: app.js declares no legacy config read',
+    !appJs39.includes('window.APP_CONFIG') && !appJs39.includes('window.WORKER_API_URL'),
+    'a legacy global is still consulted');
+  check('39d: app.js hardcodes no development URL',
+    !appJs39.includes('127.0.0.1:8787') && !appJs39.includes('localhost:8787')
+      && !appJs39.includes('workers.dev'),
+    'a private development endpoint is baked into the bundle');
+  check('39d: app.js resolves config through the shared module',
+    appJs39.includes("from './app-config.js'"), 'app-config.js is not imported');
+
+  // --- 39e. the SPA resolvers behave (executed) -------------------------
+  // Trailing slashes are the defect this guards: both values are concatenated
+  // with a leading '/', so a trailing slash silently doubles the separator.
+  check('39e: stripTrailingSlashes removes one or many trailing slashes',
+    stripTrailingSlashes('https://host///') === 'https://host'
+      && stripTrailingSlashes('https://host/') === 'https://host'
+      && stripTrailingSlashes('https://host') === 'https://host',
+    stripTrailingSlashes('https://host///'));
+
+  const supabaseConfig = resolveSupabaseConfig({
+    supabaseUrl: 'https://example.supabase.co/',
+    supabasePublishableKey: '  sb_publishable_abc  ',
+  });
+  check('39e: resolveSupabaseConfig strips the URL and trims the key',
+    supabaseConfig.url === 'https://example.supabase.co'
+      && supabaseConfig.key === 'sb_publishable_abc'
+      && supabaseConfig.configured === true,
+    JSON.stringify(supabaseConfig));
+  check('39e: resolveSupabaseConfig accepts the legacy anon-key name',
+    resolveSupabaseConfig({
+      supabaseUrl: 'https://example.supabase.co',
+      supabaseAnonKey: 'legacy-anon',
+    }).key === 'legacy-anon',
+    'the anon-key alias is not resolved');
+  check('39e: resolveSupabaseConfig reports an unconfigured deployment',
+    resolveSupabaseConfig({}).configured === false
+      && resolveSupabaseConfig({ supabaseUrl: 'https://x.supabase.co' }).configured === false,
+    'a partial config reported as configured');
+
+  // WORKER_BASE_URL resolution + trailing-slash stripping.
+  check('39e: resolveWorkerBaseUrl strips trailing slashes from the origin',
+    resolveWorkerBaseUrl({ workerApiUrl: 'https://worker.example.workers.dev///' })
+      === 'https://worker.example.workers.dev',
+    resolveWorkerBaseUrl({ workerApiUrl: 'https://worker.example.workers.dev///' }));
+  check('39e: resolveWorkerBaseUrl strips the full practice endpoint path',
+    resolveWorkerBaseUrl({
+      workerApiUrl: 'https://worker.example.workers.dev/api/v1/extract-practice/',
+    }) === 'https://worker.example.workers.dev',
+    'the endpoint path survived, so the caller would build a doubled path');
+  check('39e: resolveWorkerBaseUrl is empty when unconfigured',
+    resolveWorkerBaseUrl({}) === '' && resolveWorkerBaseUrl({ workerApiUrl: '   ' }) === '',
+    'an unconfigured Worker did not resolve to empty');
+  // The built endpoint the SPA actually issues must have exactly one separator.
+  const builtEndpoint = `${resolveWorkerBaseUrl({
+    workerApiUrl: 'https://worker.example.workers.dev/',
+  })}/api/v1/extract-practice`;
+  check('39e: the built practice endpoint has no doubled separator',
+    builtEndpoint === 'https://worker.example.workers.dev/api/v1/extract-practice',
+    builtEndpoint);
+
+  // --- 39f. the web env resolvers accept BOTH key schemes ---------------
+  const ENV_NAMES = [
+    'NEXT_PUBLIC_SUPABASE_URL', 'SUPABASE_URL',
+    'NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY', 'NEXT_PUBLIC_SUPABASE_ANON_KEY',
+    'SUPABASE_ANON_KEY', 'SUPABASE_SECRET_KEY', 'SUPABASE_SERVICE_ROLE_KEY',
+    'NEXT_PUBLIC_AI_MODEL_NAME', 'AI_MODEL_NAME',
+    'NEXT_PUBLIC_AI_PROVIDER', 'AI_PROVIDER',
+    'NEXT_PUBLIC_STUDENT_APP_URL',
+    'NEXT_PUBLIC_EXTRACTOR_API_URL', 'EXTRACTOR_INTERNAL_SECRET',
+  ];
+  // Snapshot so the suite leaves the process environment as it found it.
+  const envBackup = {};
+  for (const name of ENV_NAMES) envBackup[name] = process.env[name];
+  const setEnv = (name, value) => {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  };
+  const clearEnv = () => ENV_NAMES.forEach((name) => setEnv(name, undefined));
+
+  try {
+    clearEnv();
+    // Modern names only.
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://modern.supabase.co/';
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_modern';
+    process.env.SUPABASE_SECRET_KEY = 'sb_secret_modern';
+    check('39f: the URL resolver strips a trailing slash',
+      getSupabaseUrl() === 'https://modern.supabase.co', getSupabaseUrl());
+    check('39f: the publishable resolver prefers the modern key',
+      getSupabasePublishableKey() === 'sb_publishable_modern', getSupabasePublishableKey());
+    check('39f: the secret resolver reads the modern secret key',
+      getSupabaseSecretKey() === 'sb_secret_modern', getSupabaseSecretKey());
+
+    // Legacy names only — the whole point of the fallback chain.
+    clearEnv();
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://legacy.supabase.co';
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = 'legacy-anon-key';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'legacy-service-role';
+    check('39f: the publishable resolver falls back to NEXT_PUBLIC_SUPABASE_ANON_KEY',
+      getSupabasePublishableKey() === 'legacy-anon-key', getSupabasePublishableKey());
+    check('39f: the secret resolver falls back to SUPABASE_SERVICE_ROLE_KEY',
+      getSupabaseSecretKey() === 'legacy-service-role', getSupabaseSecretKey());
+
+    // Both present: the modern name must win, not merely work.
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_wins';
+    process.env.SUPABASE_SECRET_KEY = 'sb_secret_wins';
+    check('39f: the modern publishable key wins over the legacy anon key',
+      getSupabasePublishableKey() === 'sb_publishable_wins', getSupabasePublishableKey());
+    check('39f: the modern secret key wins over the legacy service role key',
+      getSupabaseSecretKey() === 'sb_secret_wins', getSupabaseSecretKey());
+
+    // A blank value is not a value: it must fall through, not resolve to ''.
+    clearEnv();
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://blank.supabase.co';
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = '   ';
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = 'real-anon';
+    check('39f: a blank preferred key falls through to the fallback',
+      getSupabasePublishableKey() === 'real-anon', JSON.stringify(getSupabasePublishableKey()));
+
+    // Fully unconfigured: every resolver must throw with an actionable message
+    // rather than handing `undefined` to a client constructor.
+    clearEnv();
+    const throwsWith = (fn) => {
+      try {
+        fn();
+        return null;
+      } catch (error) {
+        return error.message;
+      }
+    };
+    const urlError = throwsWith(getSupabaseUrl);
+    const keyError = throwsWith(getSupabasePublishableKey);
+    const secretError = throwsWith(getSupabaseSecretKey);
+    check('39f: an unconfigured Supabase URL throws',
+      typeof urlError === 'string' && urlError.includes('.env.example'), String(urlError));
+    check('39f: an unconfigured publishable key throws',
+      typeof keyError === 'string' && keyError.includes('.env.example'), String(keyError));
+    check('39f: an unconfigured secret key throws',
+      typeof secretError === 'string' && secretError.includes('.env.example'), String(secretError));
+
+    // --- 39g. AI model configuration ------------------------------------
+    clearEnv();
+    check('39g: the AI model is null when unset (the Worker then decides)',
+      getAiModelName() === null, JSON.stringify(getAiModelName()));
+    check('39g: the AI provider defaults to gemini',
+      getAiProvider() === 'gemini', getAiProvider());
+    check('39g: the default model option carries an EMPTY value',
+      buildModelOptions()[0].value === '', JSON.stringify(buildModelOptions()[0]));
+    check('39g: with no model configured the default label is generic',
+      buildModelOptions()[0].label === 'Mặc định hệ thống', buildModelOptions()[0].label);
+    check('39g: the gemini shortlist is offered without configuration',
+      buildModelOptions().length === 4, String(buildModelOptions().length));
+
+    process.env.NEXT_PUBLIC_AI_MODEL_NAME = 'gemini-9-experimental';
+    process.env.NEXT_PUBLIC_AI_PROVIDER = 'GEMINI';
+    check('39g: the env model reaches the picker label',
+      buildModelOptions()[0].label === 'Mặc định hệ thống (gemini-9-experimental)',
+      buildModelOptions()[0].label);
+    check('39g: the provider id is lower-cased before comparison',
+      buildModelOptions().length === 4, String(buildModelOptions().length));
+
+    // An unknown provider must not advertise a shortlist it cannot call, but
+    // the default option (the Worker's own model) always survives.
+    process.env.NEXT_PUBLIC_AI_PROVIDER = 'some-other-vendor';
+    check('39g: an unknown provider drops the gemini shortlist',
+      buildModelOptions().length === 1 && buildModelOptions()[0].value === '',
+      JSON.stringify(buildModelOptions()));
+    check('39g: the custom-model sentinel is still exported',
+      CUSTOM_MODEL === '__custom__', CUSTOM_MODEL);
+
+    // --- 39h. deep links + extractor endpoints ---------------------------
+    clearEnv();
+    check('39h: the student app base is empty with no window and no config',
+      resolveStudentAppBaseUrl() === '', resolveStudentAppBaseUrl());
+    process.env.NEXT_PUBLIC_STUDENT_APP_URL = 'https://student.example.pages.dev/';
+    check('39h: the student app base strips a trailing slash',
+      resolveStudentAppBaseUrl() === 'https://student.example.pages.dev',
+      resolveStudentAppBaseUrl());
+
+    check('39h: the extractor endpoint is null when unset',
+      getExtractorEndpoint() === null, String(getExtractorEndpoint()));
+    process.env.NEXT_PUBLIC_EXTRACTOR_API_URL = 'http://localhost:8787/api/v1/extract/';
+    check('39h: the extractor endpoint strips a trailing slash',
+      getExtractorEndpoint() === 'http://localhost:8787/api/v1/extract',
+      String(getExtractorEndpoint()));
+    check('39h: the internal secret is null when unset',
+      getExtractorInternalSecret() === null, String(getExtractorInternalSecret()));
+    process.env.EXTRACTOR_INTERNAL_SECRET = 'shared-secret';
+    check('39h: the internal secret is read when set',
+      getExtractorInternalSecret() === 'shared-secret', String(getExtractorInternalSecret()));
+  } finally {
+    for (const name of ENV_NAMES) setEnv(name, envBackup[name]);
+  }
+
+  // --- 39i. the web call sites go through the resolvers (static) --------
+  // Importing `lib/env.ts` proves the resolvers work; these checks prove the
+  // app actually USES them, so `process.env` reads cannot creep back in.
+  const clientSrc39 = readFileSync(
+    new URL('../web/src/lib/supabase/client.ts', import.meta.url), 'utf8',
+  );
+  const serverSrc39 = readFileSync(
+    new URL('../web/src/lib/supabase/server.ts', import.meta.url), 'utf8',
+  );
+  const sessionSrc39 = readFileSync(
+    new URL('../web/src/lib/supabase/session.ts', import.meta.url), 'utf8',
+  );
+  check('39i: all three Supabase clients resolve through lib/env.ts',
+    [clientSrc39, serverSrc39, sessionSrc39].every((src) => src.includes("from '../env'")),
+    'a client still reads process.env directly');
+  check('39i: no Supabase client reads process.env anymore',
+    [clientSrc39, serverSrc39, sessionSrc39].every((src) => !src.includes('process.env')),
+    'a raw process.env lookup survived');
+  const routeSrc39 = readFileSync(
+    new URL('../web/src/app/api/extract/route.ts', import.meta.url), 'utf8',
+  );
+  check('39i: the extract proxy resolves its endpoint and secret through lib/env.ts',
+    routeSrc39.includes('getExtractorEndpoint') && routeSrc39.includes('getExtractorInternalSecret')
+      && !routeSrc39.includes('process.env'),
+    'the proxy still reads process.env');
+  const shareSrc39 = readFileSync(
+    new URL('../web/src/components/ExamShareModal.tsx', import.meta.url), 'utf8',
+  );
+  const projectorSrc39 = readFileSync(
+    new URL('../web/src/components/tree/TreeProjector.tsx', import.meta.url), 'utf8',
+  );
+  check('39i: both deep-link builders use the shared student-base resolver',
+    shareSrc39.includes('resolveStudentAppBaseUrl')
+      && projectorSrc39.includes('resolveStudentAppBaseUrl')
+      && !shareSrc39.includes('process.env')
+      && !projectorSrc39.includes('process.env'),
+    'a link builder still reads process.env');
+  const uploadSrc39 = readFileSync(
+    new URL('../web/src/components/UploadZone.tsx', import.meta.url), 'utf8',
+  );
+  check('39i: the upload UI builds its model list from lib/ai.ts',
+    uploadSrc39.includes('buildModelOptions') && !uploadSrc39.includes('MODEL_OPTIONS'),
+    'the hardcoded model list survived');
+
+  // --- 39j. the Worker reads its model + origins from bindings ----------
+  const workerSrc39 = readFileSync(new URL('../worker/src/index.ts', import.meta.url), 'utf8');
+  check('39j: the Worker resolves its model from env.AI_MODEL_NAME',
+    workerSrc39.includes('env.AI_MODEL_NAME'), 'the new binding is not read');
+  check('39j: the Worker resolves CORS origins from env.ALLOWED_ORIGINS',
+    workerSrc39.includes('env.ALLOWED_ORIGINS'), 'the origins binding is not read');
+  check('39j: the Worker no longer hardcodes a wildcard CORS origin',
+    !workerSrc39.includes("cors()") && workerSrc39.includes('corsOptions(c.env)'),
+    'the CORS middleware still uses the default wildcard');
+  const wranglerToml = readFileSync(new URL('../worker/wrangler.toml', import.meta.url), 'utf8');
+  check('39j: wrangler.toml [vars] declares AI_MODEL_NAME',
+    /^AI_MODEL_NAME\s*=\s*"[^"]+"/m.test(wranglerToml), 'the var is missing');
+  check('39j: wrangler.toml [vars] declares ALLOWED_ORIGINS',
+    /^ALLOWED_ORIGINS\s*=\s*"[^"]+"/m.test(wranglerToml), 'the var is missing');
+  const devVarsPath = new URL('../worker/.dev.vars.example', import.meta.url);
+  check('39j: worker/.dev.vars.example exists', existsSync(devVarsPath), devVarsPath.pathname);
+  const devVars = readFileSync(devVarsPath, 'utf8');
+  check('39j: .dev.vars.example declares both worker secrets',
+    devVars.includes('GEMINI_API_KEY') && devVars.includes('INTERNAL_SECRET'),
+    'a required local secret is undocumented');
+
+  // --- 39k. the resolved bindings actually drive the Worker -------------
+  // Executed rather than inspected: a GET / must carry the configured origin,
+  // and the allow-list branch must refuse an origin that is not on it.
+  const corsProbe = async (env, origin) => {
+    const response = await workerApp.fetch(
+      new Request('http://localhost/health', { headers: { Origin: origin } }),
+      env,
+    );
+    return response.headers.get('Access-Control-Allow-Origin');
+  };
+  check('39k: a wildcard binding echoes * for any origin',
+    await corsProbe({ ALLOWED_ORIGINS: '*' }, 'https://any.example') === '*',
+    String(await corsProbe({ ALLOWED_ORIGINS: '*' }, 'https://any.example')));
+  check('39k: an unset binding still defaults to *',
+    await corsProbe({}, 'https://any.example') === '*',
+    String(await corsProbe({}, 'https://any.example')));
+  check('39k: an allow-list admits a listed origin',
+    await corsProbe({ ALLOWED_ORIGINS: 'https://a.example, https://b.example' }, 'https://b.example')
+      === 'https://b.example',
+    String(await corsProbe(
+      { ALLOWED_ORIGINS: 'https://a.example, https://b.example' }, 'https://b.example')));
+  check('39k: an allow-list omits the header for an unlisted origin',
+    await corsProbe({ ALLOWED_ORIGINS: 'https://a.example' }, 'https://evil.example') === null,
+    String(await corsProbe({ ALLOWED_ORIGINS: 'https://a.example' }, 'https://evil.example')));
+  check('39k: a blank binding falls back to * rather than blocking everyone',
+    await corsProbe({ ALLOWED_ORIGINS: '   ' }, 'https://any.example') === '*',
+    String(await corsProbe({ ALLOWED_ORIGINS: '   ' }, 'https://any.example')));
+
+  // The model binding must be consumed, not merely declared: the Worker echoes
+  // the effective model in `meta.model_used`, which is the observable proof.
+  const aiEnvProbe = async (env, requestedModel) => {
+    const form = new FormData();
+    form.append('file', new Blob([mismatched]), 'mismatched.docx');
+    const query = requestedModel ? `&model=${requestedModel}` : '';
+    const response = await workerApp.fetch(
+      new Request(`http://localhost/api/v1/extract?mode=ai${query}`, { method: 'POST', body: form }),
+      { GEMINI_API_KEY: 'e2e-stub-key', ...env },
+    );
+    return (await response.json()).meta?.model_used;
+  };
+  // `mismatched` is the fixture the AI-fallback step already proved reachable;
+  // its fetch stub is restored by then, so the outgoing Gemini call is stubbed
+  // again here purely to read the model the Worker chose.
+  const realFetch39 = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.includes('generativelanguage.googleapis.com')) {
+      return new Response(
+        JSON.stringify({ candidates: [{ content: { parts: [{ text: '{"questions":[]}' }] } }] }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+    return realFetch39(input, init);
+  };
+  try {
+    check('39k: the Worker reports the AI_MODEL_NAME binding as the model used',
+      await aiEnvProbe({ AI_MODEL_NAME: 'gemini-e2e-binding' }) === 'gemini-e2e-binding',
+      String(await aiEnvProbe({ AI_MODEL_NAME: 'gemini-e2e-binding' })));
+    check('39k: a caller-supplied ?model= outranks the binding',
+      await aiEnvProbe({ AI_MODEL_NAME: 'gemini-e2e-binding' }, 'gemini-e2e-requested')
+        === 'gemini-e2e-requested',
+      String(await aiEnvProbe({ AI_MODEL_NAME: 'gemini-e2e-binding' }, 'gemini-e2e-requested')));
+    check('39k: the legacy DEFAULT_AI_MODEL name is still honoured',
+      await aiEnvProbe({ DEFAULT_AI_MODEL: 'gemini-e2e-legacy' }) === 'gemini-e2e-legacy',
+      String(await aiEnvProbe({ DEFAULT_AI_MODEL: 'gemini-e2e-legacy' })));
+    check('39k: AI_MODEL_NAME outranks the legacy DEFAULT_AI_MODEL',
+      await aiEnvProbe({
+        AI_MODEL_NAME: 'gemini-e2e-new', DEFAULT_AI_MODEL: 'gemini-e2e-old',
+      }) === 'gemini-e2e-new',
+      'the legacy name is winning over the current one');
+    check('39k: a blank binding falls through to the built-in default',
+      await aiEnvProbe({ AI_MODEL_NAME: '   ' }) === 'gemini-3.5-flash-lite',
+      String(await aiEnvProbe({ AI_MODEL_NAME: '   ' })));
+  } finally {
+    globalThis.fetch = realFetch39;
+  }
 
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);

@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import type { RealtimeChannel, RealtimePostgresChangesPayload } from '@supabase/supabase-js';
 import { createClient } from '@/lib/supabase/client';
+import { resolveStudentAppBaseUrl } from '@/lib/env';
 import { PersistenceError } from '@/lib/exams';
 import { clampTeamNumber, endTreeSession, getTeamSeed } from '@/lib/tree';
 import { computeTreeState, type LayoutFruitAnchor, type TreeState } from '@/lib/tree-engine';
@@ -48,15 +49,13 @@ const TEAMS: TeamNumber[] = [1, 2, 3, 4];
  * parameter, exactly what `loadTreeFromUrl()` reads. A path like `/tree/join`
  * would be a 404 because there is no such document.
  *
- * The SPA is a separate origin from the teacher web, so
- * `NEXT_PUBLIC_STUDENT_APP_URL` is preferred; falling back to the current origin
- * keeps local development working without configuration.
+ * The SPA is a separate origin from the teacher web, so its base comes from
+ * `NEXT_PUBLIC_STUDENT_APP_URL` (see lib/env.ts); the current origin is the
+ * documented local-development fallback.
  */
 function buildJoinUrl(sessionId: string): string {
-  const base = (process.env.NEXT_PUBLIC_STUDENT_APP_URL ?? '').replace(/\/+$/, '');
-  if (base) return `${base}/?session=${sessionId}`;
-  if (typeof window !== 'undefined') return `${window.location.origin}/?session=${sessionId}`;
-  return `/?session=${sessionId}`;
+  const base = resolveStudentAppBaseUrl();
+  return base ? `${base}/?session=${sessionId}` : `/?session=${sessionId}`;
 }
 
 /** Strips characters that are illegal in a filename on Windows/macOS. */

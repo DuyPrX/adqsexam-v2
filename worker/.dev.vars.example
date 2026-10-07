@@ -1,0 +1,48 @@
+# =============================================================================
+# ADQS Exam v2 — Cloudflare Worker LOCAL development variables
+# -----------------------------------------------------------------------------
+# `wrangler dev` reads this file from `worker/.dev.vars` (git-ignored).
+# Create it once:
+#
+#     cp .dev.vars.example .dev.vars
+#
+# These are SECRETS for local use only. In production, provision them with
+# `npx wrangler secret put <NAME>` — never commit real values, and never put
+# them in wrangler.toml (which is committed).
+#
+# Non-secret defaults (AI_MODEL_NAME, ALLOWED_ORIGINS) live in wrangler.toml
+# [vars]. Anything set here OVERRIDES the wrangler.toml value for local runs.
+# =============================================================================
+
+# Google AI Studio API key. Needed only for `mode=ai` and for `mode=auto`'s
+# anomaly-triggered fallback to Engine 2. Without it those paths answer 503;
+# `mode=rule` and `/api/v1/extract-practice` keep working, since neither can
+# call the AI engine.
+GEMINI_API_KEY=""
+
+# Shared secret the caller must send in the `X-Internal-Secret` header.
+#
+# Leave it EMPTY for local development: when this binding is unset the Worker
+# BYPASSES the header check entirely, which is what lets `curl.exe` against
+# http://127.0.0.1:8787 work without ceremony.
+#
+# If you DO set it, the teacher web's EXTRACTOR_INTERNAL_SECRET must match it
+# exactly, or every extraction returns 401 UNAUTHORIZED.
+INTERNAL_SECRET=""
+
+# -----------------------------------------------------------------------------
+# Overrides for the wrangler.toml [vars] (optional)
+# -----------------------------------------------------------------------------
+# Point local runs at a different model without editing the committed config:
+# AI_MODEL_NAME="gemini-3.5-flash-lite"
+
+# Allow only the local teacher web instead of every origin:
+# ALLOWED_ORIGINS="http://localhost:3000,http://127.0.0.1:3000"
+
+# -----------------------------------------------------------------------------
+# Keep-alive cron (Phase 5.7) — optional locally
+# -----------------------------------------------------------------------------
+# The `scheduled` handler pings Supabase to reset its inactivity counter. With
+# either value unset it logs a skip and returns, so local runs need neither.
+# SUPABASE_URL="http://127.0.0.1:54321"
+# SUPABASE_ANON_KEY="sb_publishable_ACJWlzQHlZjBrEguHvfOxg_3BJgxAaH"

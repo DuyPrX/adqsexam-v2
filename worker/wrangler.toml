@@ -1,4 +1,4 @@
-﻿name = "docx-extractor-v2"
+name = "docx-extractor-v2"
 main = "src/index.ts"
 compatibility_date = "2026-01-01"
 compatibility_flags = ["nodejs_compat"]
@@ -9,16 +9,35 @@ compatibility_flags = ["nodejs_compat"]
 #   npx wrangler secret put GEMINI_API_KEY
 #   npx wrangler secret put INTERNAL_SECRET
 # For local development put them in `worker/.dev.vars` (git-ignored):
-#   GEMINI_API_KEY="..."
-#   INTERNAL_SECRET="local-dev-secret"
+#   cp .dev.vars.example .dev.vars
 # ---------------------------------------------------------------------------
 # GEMINI_API_KEY  — Google AI Studio key. Required only for mode=ai / auto fallback.
 # INTERNAL_SECRET — Shared secret required in the `X-Internal-Secret` header.
 #                   When unset (local dev), the header check is bypassed.
 
 [vars]
-# Default AI model for Engine 2. A caller-supplied `?model=` overrides this.
-DEFAULT_AI_MODEL = "gemini-3.5-flash-lite"
+# Default AI model for Engine 2. A caller-supplied `?model=` overrides this; the
+# built-in constant in src/ai/ai-engine.ts is the last resort. Read through
+# `env.AI_MODEL_NAME` so retargeting the deployment is a config edit, not a
+# rebuild — see src/index.ts `envDefaultModel()`.
+#
+# GEMINI_MODEL is still honoured as a legacy alias for already-deployed configs,
+# but AI_MODEL_NAME wins when both are set.
+AI_MODEL_NAME = "gemini-3.5-flash-lite"
+
+# Browser origins allowed to call this Worker.
+#
+# "*" is the correct value for this deployment: the student SPA is served from a
+# Cloudflare Pages hostname that changes per preview deployment, and the public
+# practice endpoint (/api/v1/extract-practice) is secret-free and forced to the
+# rule engine by design, so a permissive origin grants no extra capability.
+#
+# The teacher-side endpoint (/api/v1/extract) is NOT protected by CORS: it is
+# gated by the X-Internal-Secret header and is only ever called server-to-server
+# by the Next.js proxy. Narrow this to a comma-separated allow-list if a
+# deployment needs defence-in-depth against browser-originated practice abuse.
+ALLOWED_ORIGINS = "*"
+
 # Keep-alive ping target (Phase 5.7). Bind these so the `scheduled` handler can
 # touch Supabase every 3 days and reset its 7-day inactivity pause counter.
 # The anon/publishable key is sufficient: PostgREST only needs a valid key to
@@ -39,4 +58,3 @@ crons = ["0 0 */3 * *"]
 
 [observability]
 enabled = true
-

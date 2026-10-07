@@ -28,7 +28,7 @@ export interface ExtractOptions {
   mode?: ExtractionMode;
   /**
    * Explicit AI model id (Phase 5.3). Only meaningful when the AI engine runs;
-   * the Worker falls back to its DEFAULT_AI_MODEL binding when omitted.
+   * the Worker falls back to its `AI_MODEL_NAME` binding when omitted.
    */
   model?: string;
   signal?: AbortSignal;
