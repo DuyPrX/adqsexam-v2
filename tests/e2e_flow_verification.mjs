@@ -7849,9 +7849,11 @@ async function main() {
   for (const team of [1, 2, 3, 4]) {
     const pal = TEAM_3D_PALETTES[team];
     check(`47a: team ${team} trunk is valid hex`, HEX_COLOR_REGEX.test(pal.trunk), pal.trunk);
+    check(`47a: team ${team} trunkDark is valid hex`, HEX_COLOR_REGEX.test(pal.trunkDark), pal.trunkDark);
     check(`47a: team ${team} foliageBase is valid hex`, HEX_COLOR_REGEX.test(pal.foliageBase), pal.foliageBase);
     check(`47a: team ${team} foliageHighlight is valid hex`, HEX_COLOR_REGEX.test(pal.foliageHighlight), pal.foliageHighlight);
     check(`47a: team ${team} dew is valid hex`, HEX_COLOR_REGEX.test(pal.dew), pal.dew);
+    check(`47a: team ${team} pedestalGlow is valid hex`, HEX_COLOR_REGEX.test(pal.pedestalGlow), pal.pedestalGlow);
     check(`47a: team ${team} goldenAura is valid hex`, HEX_COLOR_REGEX.test(pal.goldenAura), pal.goldenAura);
   }
 
@@ -7908,17 +7910,21 @@ async function main() {
     new URL('../web/src/app/tree/simulator/page.tsx', import.meta.url), 'utf8');
 
   check('47d: ProceduralTree3D is marked use client', tree3DSrc.includes("'use client'"), 'missing use client');
-  check('47d: ProceduralTree3D uses useFrame and Math.sin for harmonic sway',
-    tree3DSrc.includes('useFrame') && tree3DSrc.includes('Math.sin'), 'missing useFrame/Math.sin');
-  check('47d: ProceduralTree3D renders volumetric cylinder and dodecahedron geometries',
-    tree3DSrc.includes('cylinderGeometry') && tree3DSrc.includes('dodecahedronGeometry'), 'missing geometries');
-  check('47d: ProceduralTree3D implements golden latch aura',
+  check('47d: ProceduralTree3D uses useFrame and Math.sin for harmonic sway without clock deprecation',
+    tree3DSrc.includes('useFrame') && tree3DSrc.includes('Math.sin') && tree3DSrc.includes('state.clock.elapsedTime'),
+    'missing useFrame/Math.sin/elapsedTime');
+  check('47d: ProceduralTree3D renders volumetric cylinder and faceted icosahedron geometries',
+    tree3DSrc.includes('cylinderGeometry') && tree3DSrc.includes('icosahedronGeometry'), 'missing geometries');
+  check('47d: ProceduralTree3D implements golden latch aura and runic base ring',
     tree3DSrc.includes('isGoldenLatch') && tree3DSrc.includes('ringGeometry'), 'missing golden latch aura');
 
   check('47d: ArenaStage3D enables shadows and preserveDrawingBuffer for snapshots',
     stage3DSrc.includes('shadows') && stage3DSrc.includes('preserveDrawingBuffer: true'), 'missing shadows/preserveDrawingBuffer');
+  check('47d: ArenaStage3D renders floating island diorama with atmospheric fog and sparkles',
+    stage3DSrc.includes('<fog') && stage3DSrc.includes('<Sparkles') && stage3DSrc.includes('cylinderGeometry'),
+    'missing diorama/fog/sparkles');
   check('47d: ArenaStage3D configures 4 symmetric tree positions',
-    stage3DSrc.includes('[-6, 0, 0]') && stage3DSrc.includes('[6, 0, 0]'), 'missing 4 tree positions');
+    stage3DSrc.includes('[-6.5, 0, 0]') && stage3DSrc.includes('[6.5, 0, 0]'), 'missing 4 tree positions');
 
   check('47d: Simulator page uses dynamic import with ssr: false for Canvas safety',
     simPageSrc.includes('dynamic(') && simPageSrc.includes('ssr: false'), 'missing dynamic ssr:false');
