@@ -401,6 +401,17 @@ body {
   background: var(--accent-weak); color: var(--accent-text);
 }
 .tree-badge--vitality { background: var(--ok-weak); color: var(--ok); }
+/* Phase 9.1 — the countdown badge turns urgent in the last minute. */
+.tree-badge--time { background: var(--surface-2); color: var(--text-muted); border: 1px solid var(--border); }
+.tree-badge--time.is-urgent { background: var(--danger-weak); color: var(--danger); border-color: var(--danger); }
+
+/* Phase 9.1 — SPEED_QUIZ prompt card, above the canvas. */
+.tree-quiz-prompt {
+  padding: 14px 16px; border-radius: var(--radius-sm);
+  background: var(--accent-weak); border: 1px solid var(--accent);
+  font-size: 17px; font-weight: 700; line-height: 1.5; color: var(--accent-text);
+  white-space: pre-wrap;
+}
 
 /* Phase 8.3 — compact audio toggle that sits in the workspace header. */
 .btn-icon-muted {

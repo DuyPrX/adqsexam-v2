@@ -176,6 +176,29 @@ export const GROUP_NUMBERS: readonly GroupNumber[] = [1, 2, 3, 4, 5, 6, 7, 8];
 /** Phase 8.4 — per-team class sizes: `{ 1: n1, 2: n2, 3: n3, 4: n4 }`. */
 export type TeamCounts = Record<TeamNumber, number>;
 
+/** Phase 9.1 — the lobby lifecycle of a tree session. */
+export type TreeSessionStatus = 'LOBBY' | 'ACTIVE' | 'FINISHED';
+
+/** Phase 9.1 — BRAINSTORM (open keyword) or SPEED_QUIZ (timed MCQ). */
+export type TreeGameMode = 'BRAINSTORM' | 'SPEED_QUIZ';
+
+/**
+ * Phase 9.1 — the pre-flight roster a teacher tunes before the bout starts.
+ *
+ * `absent_ids` are `class_members.id` (not student codes) because a student may be
+ * re-imported with a new code; the id is stable across that. `assignments`
+ * overrides a member's roster team for this session only, so a teacher can balance
+ * a bout without touching the class's own `team_number`.
+ */
+export interface ParticipantConfig {
+  absent_ids: string[];
+  /** member id -> team 1..4 */
+  assignments: Record<string, number>;
+}
+
+/** An empty `participant_config`, the DB default (Phase 9.1). */
+export const EMPTY_PARTICIPANT_CONFIG: ParticipantConfig = { absent_ids: [], assignments: {} };
+
 /**
  * A row of `public.tree_sessions` — one "Cây tri thức" activity (Phase 7.1).
  *
@@ -196,6 +219,20 @@ export interface TreeSessionRow {
   is_active: boolean;
   created_at: string;
   ended_at: string | null;
+  /** Phase 9.1 — LOBBY -> ACTIVE -> FINISHED, kept in sync with `is_active`. */
+  status: TreeSessionStatus;
+  /** Phase 9.1 — short join code shown as the projector PIN. */
+  session_code: string;
+  /** Phase 9.1 — activity type. */
+  game_mode: TreeGameMode;
+  /** Phase 9.1 — the source exam for `SPEED_QUIZ`, when set. */
+  exam_id: string | null;
+  /** Phase 9.1 — points a team must reach to win, in `SPEED_QUIZ`. */
+  target_score: number;
+  /** Phase 9.1 — pre-flight absent list + team overrides. */
+  participant_config: ParticipantConfig;
+  started_at: string | null;
+  ends_at: string | null;
 }
 
 /**
@@ -218,6 +255,14 @@ export interface TreeSubmissionRow {
   team_number: number;
 }
 
+/** Phase 9.1 — one roster row as the projector lobby needs it. */
+export interface TreeRosterEntry {
+  id: string;
+  full_name: string;
+  student_code: string;
+  team_number: TeamNumber;
+}
+
 /** A tree session plus the class context the projector needs (Phase 7.3). */
 export interface TreeSessionDetail extends TreeSessionRow {
   class_name: string;
@@ -225,6 +270,8 @@ export interface TreeSessionDetail extends TreeSessionRow {
   total_students: number;
   /** Phase 8.4 — per-team class sizes for the arena's four denominators. */
   team_counts: TeamCounts;
+  /** Phase 9.1 — the roster, for the lobby's four team cards. */
+  roster: TreeRosterEntry[];
 }
 
 export interface QuestionBankRow {

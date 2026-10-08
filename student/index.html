@@ -339,10 +339,12 @@
 
   <!-- ================= TREE OF KNOWLEDGE (Phase 7.4 / 8.1) ================= -->
   <!-- A dedicated full-viewport view: `switchView('tree')` hides #view-exam
-       entirely, so the exam header, tab bar and forms cannot show through. Two
+       entirely, so the exam header, tab bar and forms cannot show through. Four
        mutually exclusive states live inside:
-         #treeCheckinForm — pick your name from the class roster
-         #treeWorkspace   — live canvas + answer box
+         #treeSpectatorCard — teacher marked this student absent (Phase 9.1)
+         #treeLobbyCard     — waiting room while status = LOBBY (Phase 9.1)
+         #treeCheckinForm   — pick your name from the class roster
+         #treeWorkspace     — live canvas + answer box
        The canvas is sized from clientWidth/clientHeight, so it must be LAYOUT
        (not `display:none`) before the first render; `showTree` shows the screen
        before rendering to guarantee that. -->
@@ -350,6 +352,30 @@
     <section id="treeScreen" class="screen tree-screen hidden" aria-labelledby="treeHeading">
       <h1 id="treeHeading" class="tree-screen__title">Cây Tri Thức</h1>
       <p id="treeSubtitle" class="tree-screen__subtitle"></p>
+
+      <!-- ---------- State 0a: spectator (absent) — Phase 9.1 ---------- -->
+      <div id="treeSpectatorCard" class="tree-checkin hidden">
+        <div class="tree-checkin__card">
+          <p class="tree-checkin__eyebrow">Hoạt động của lớp</p>
+          <h2 id="treeSpectatorTitle" class="tree-checkin__title">👁️ Chế độ quan sát</h2>
+          <p id="treeSpectatorText" class="tree-checkin__question">
+            Bạn đang ở chế độ quan sát hoạt động này.
+          </p>
+          <p id="treeSpectatorMeta" class="tree-checkin__meta"></p>
+        </div>
+      </div>
+
+      <!-- ---------- State 0b: lobby waiting room — Phase 9.1 ---------- -->
+      <div id="treeLobbyCard" class="tree-checkin hidden">
+        <div class="tree-checkin__card">
+          <p class="tree-checkin__eyebrow">Đã vào phòng</p>
+          <h2 id="treeLobbyTitle" class="tree-checkin__title"></h2>
+          <p id="treeLobbyTeam" class="tree-checkin__question"></p>
+          <p id="treeLobbyHint" class="tree-checkin__meta">
+            Hãy nhìn lên máy chiếu, trận đấu sẽ bắt đầu khi thầy/cô bấm nút!
+          </p>
+        </div>
+      </div>
 
       <!-- ---------- State 1: check-in ---------- -->
       <div id="treeCheckinForm" class="tree-checkin">
@@ -378,8 +404,10 @@
       <div id="treeWorkspace" class="tree-workspace hidden">
         <div class="tree-workspace__header">
           <div class="tree-workspace__status">
+            <span id="treeModeBadge" class="tree-badge"></span>
             <span id="treeProgressBadge" class="tree-badge"></span>
             <span id="treeVitalityBadge" class="tree-badge tree-badge--vitality"></span>
+            <span id="treeTimeBadge" class="tree-badge tree-badge--time"></span>
           </div>
           <button id="btnTreeAudioToggle" type="button" class="btn-icon-muted"
                   title="Bật/Tắt âm thanh" aria-label="Bật/Tắt âm thanh" aria-pressed="true">🔊</button>
@@ -390,6 +418,10 @@
              `.is-my-team` and the first finisher with `.is-champion` (🏆). -->
         <div id="treeTeamLeaderboard" class="tree-leaderboard" role="status"
              aria-label="Bảng thi đua 4 tổ"></div>
+
+        <!-- Phase 9.1 — SPEED_QUIZ shows the prompt as a prominent fast-paced
+             card above the canvas; BRAINSTORM keeps it as the answer label. -->
+        <div id="treeQuizPrompt" class="tree-quiz-prompt hidden" role="status"></div>
 
         <div class="tree-screen__stage">
           <canvas id="tree-preview-canvas" class="tree-canvas" width="800" height="600"

@@ -1,7 +1,16 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { PersistenceError } from './exams';
 import { clampTeamNumber } from './tree-engine.js';
-import type { TeamCounts, TeamNumber, TreeSessionDetail, TreeSessionRow, TreeSubmissionRow } from './types';
+import { EMPTY_PARTICIPANT_CONFIG } from './types';
+import type {
+  ParticipantConfig,
+  TeamCounts,
+  TeamNumber,
+  TreeGameMode,
+  TreeSessionDetail,
+  TreeSessionRow,
+  TreeSubmissionRow,
+} from './types';
 
 /**
  * Tree of Knowledge persistence (Phase 7.3) for `public.tree_sessions` /
@@ -29,7 +38,7 @@ export { getTeamSeed, clampTeamNumber, TEAM_NUMBERS } from './tree-engine.js';
  * the old shape, and the projector's countdown/seed both key off these fields.
  */
 export const TREE_SESSION_COLUMNS =
-  'id, user_id, class_id, title, question_text, min_words, time_limit_minutes, max_similarity, tree_seed, is_active, created_at, ended_at';
+  'id, user_id, class_id, title, question_text, min_words, time_limit_minutes, max_similarity, tree_seed, is_active, created_at, ended_at, status, session_code, game_mode, exam_id, target_score, participant_config, started_at, ends_at';
 
 /**
  * Canonical `tree_submissions` column list (the renderer consumes every field).
@@ -66,6 +75,14 @@ export interface CreateTreeSessionParams {
   min_words: number;
   time_limit_minutes: number;
   max_similarity: number;
+  /** Phase 9.1 — activity type; defaults to BRAINSTORM. */
+  game_mode?: TreeGameMode;
+  /** Phase 9.1 — source exam for SPEED_QUIZ. */
+  exam_id?: string | null;
+  /** Phase 9.1 — points to win in SPEED_QUIZ; defaults to 20. */
+  target_score?: number;
+  /** Phase 9.1 — pre-flight roster (absent list + team overrides). */
+  participant_config?: ParticipantConfig;
 }
 
 /**
@@ -75,6 +92,11 @@ export interface CreateTreeSessionParams {
  * (`floor(random() * 1000000)`) mints it server-side, which guarantees a unique
  * seed per session even across two sessions created in the same millisecond —
  * a client-generated seed could collide and make two trees look identical.
+ *
+ * Phase 9.1 — a new session is created in `status = 'LOBBY'` (the column default)
+ * with `is_active = false` FORCED, so the two gates agree and students cannot
+ * submit before the teacher presses start. `session_code` is likewise left to the
+ * server default (a random 6-char code) — a client-chosen PIN could collide.
  */
 export async function createTreeSession(
   supabase: SupabaseClient,
@@ -82,13 +104,25 @@ export async function createTreeSession(
 ): Promise<TreeSessionRow> {
   const title = params.title.trim();
   const question = params.question_text.trim();
+  const gameMode: TreeGameMode = params.game_mode ?? 'BRAINSTORM';
 
   if (!params.class_id) throw new PersistenceError('Vui lòng chọn lớp học.');
   if (!title) throw new PersistenceError('Vui lòng nhập tiêu đề hoạt động.');
-  if (!question) throw new PersistenceError('Vui lòng nhập câu hỏi thảo luận.');
+  // A SPEED_QUIZ runs off a stored exam's questions, so it needs one; BRAINSTORM
+  // needs a free-text prompt instead.
+  if (gameMode === 'BRAINSTORM' && !question) {
+    throw new PersistenceError('Vui lòng nhập câu hỏi thảo luận.');
+  }
+  if (gameMode === 'SPEED_QUIZ' && !params.exam_id) {
+    throw new PersistenceError('Vui lòng chọn đề thi cho chế độ đua tốc độ.');
+  }
+  if (gameMode === 'SPEED_QUIZ' && !question) {
+    throw new PersistenceError('Vui lòng nhập câu hỏi hiển thị trên máy chiếu.');
+  }
 
   const minWords = Math.max(1, Math.trunc(params.min_words));
   const timeLimit = Math.max(1, Math.trunc(params.time_limit_minutes));
+  const targetScore = Math.max(1, Math.trunc(params.target_score ?? 20));
   // Guard here as well as in the modal: Phase 7.1's CHECK rejects <= 0 or > 1,
   // and a rejection would surface as an opaque constraint error rather than a
   // message the teacher can act on.
@@ -107,26 +141,65 @@ export async function createTreeSession(
       min_words: minWords,
       time_limit_minutes: timeLimit,
       max_similarity: params.max_similarity,
+      // Phase 9.1 — explicit, not left to the column default: `is_active` must be
+      // false while in the lobby or a student could submit before the start.
+      status: 'LOBBY',
+      is_active: false,
+      game_mode: gameMode,
+      exam_id: gameMode === 'SPEED_QUIZ' ? params.exam_id ?? null : null,
+      target_score: targetScore,
+      participant_config: params.participant_config ?? EMPTY_PARTICIPANT_CONFIG,
     })
     .select(TREE_SESSION_COLUMNS)
     .single<TreeSessionRow>();
 
   if (error) {
-    // 23503 = foreign_key_violation: the class was deleted (or belongs to
-    // another teacher and RLS hid it) between opening the modal and submitting.
+    // 23503 = foreign_key_violation: the class (or exam) was deleted / belongs to
+    // another teacher and RLS hid it, between opening the modal and submitting.
     if (error.code === '23503') {
-      throw new PersistenceError('Lớp học không còn tồn tại. Vui lòng chọn lớp khác.');
+      throw new PersistenceError('Lớp học hoặc đề thi không còn tồn tại. Vui lòng chọn lại.');
     }
     throw new PersistenceError(`Không tạo được hoạt động: ${error.message}`);
   }
   return data;
 }
 
+/**
+ * Phase 9.1 — LOBBY -> ACTIVE.
+ *
+ * The RPC re-checks ownership and the LOBBY precondition server-side, so a double
+ * click cannot start a bout twice and a foreign session id is refused rather than
+ * silently no-op'd.
+ */
+export async function startTreeSession(
+  supabase: SupabaseClient,
+  sessionId: string,
+): Promise<{ startedAt: string; endsAt: string }> {
+  const { data, error } = await supabase.rpc('start_tree_session', {
+    p_session_id: sessionId,
+  });
+
+  if (error) throw new PersistenceError(`Không bắt đầu được trận đấu: ${error.message}`);
+  if (data?.success !== true) {
+    throw new PersistenceError(data?.message || 'Không bắt đầu được trận đấu.');
+  }
+
+  return {
+    startedAt: String(data.started_at ?? ''),
+    endsAt: String(data.ends_at ?? ''),
+  };
+}
+
 /** Shape of the PostgREST-embedded class aggregate. */
 interface TreeSessionWithClass extends TreeSessionRow {
   classes?: {
     name: string;
-    class_members?: Array<{ team_number: number | null }>;
+    class_members?: Array<{
+      id: string;
+      full_name: string;
+      student_code: string;
+      team_number: number | null;
+    }>;
   } | null;
 }
 
@@ -155,7 +228,9 @@ export async function getTreeSession(
 ): Promise<TreeSessionDetail | null> {
   const { data, error } = await supabase
     .from('tree_sessions')
-    .select(`${TREE_SESSION_COLUMNS}, classes!inner(name, class_members(team_number))`)
+    .select(
+      `${TREE_SESSION_COLUMNS}, classes!inner(name, class_members(id, full_name, student_code, team_number))`,
+    )
     .eq('id', id)
     .maybeSingle<TreeSessionWithClass>();
 
@@ -171,6 +246,15 @@ export async function getTreeSession(
     // yield Infinity/NaN for the participation ratio.
     total_students: Math.max(members.length, 1),
     team_counts: tallyTeamCounts(members),
+    // Phase 9.1 — the lobby's four team cards list the actual names, so the
+    // roster rides along with the session (already fetched for the tally) rather
+    // than costing the projector a second round-trip on open.
+    roster: members.map((member) => ({
+      id: member.id,
+      full_name: member.full_name,
+      student_code: member.student_code,
+      team_number: clampTeamNumber(member.team_number) as TeamNumber,
+    })),
   };
 }
 
@@ -190,11 +274,15 @@ export async function getTreeSubmissions(
 }
 
 /**
- * Closes a session early (sets `is_active = false`).
+ * Closes a session early.
  *
  * `ended_at` is stamped client-side rather than left to a trigger so the
  * projector's "kết thúc lúc" display has a value immediately; `is_active` is the
  * authoritative switch `submit_tree_answer` reads.
+ *
+ * Phase 9.1 — `status` is set to FINISHED in the SAME statement. The two are
+ * separate columns, and a partial write would leave the projector reading
+ * `status` while submissions were still gated on `is_active` (or vice versa).
  */
 export async function endTreeSession(
   supabase: SupabaseClient,
@@ -202,7 +290,7 @@ export async function endTreeSession(
 ): Promise<TreeSessionRow> {
   const { data, error } = await supabase
     .from('tree_sessions')
-    .update({ is_active: false, ended_at: new Date().toISOString() })
+    .update({ is_active: false, status: 'FINISHED', ended_at: new Date().toISOString() })
     .eq('id', id)
     .select(TREE_SESSION_COLUMNS)
     .maybeSingle<TreeSessionRow>();

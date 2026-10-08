@@ -81,6 +81,9 @@ const RPC_MESSAGES = {
   SESSION_INACTIVE: 'Phiên hoạt động đã kết thúc. Cảm ơn bạn đã tham gia!',
   IDENTITY_REQUIRED: 'Vui lòng chọn tên của bạn trước khi gửi.',
   MIN_WORDS_NOT_MET: 'Câu trả lời chưa đủ số từ tối thiểu.',
+  // Phase 9.1 — the lobby gate and the absent list.
+  NOT_STARTED: 'Trận đấu chưa bắt đầu. Vui lòng chờ giáo viên!',
+  STUDENT_ABSENT: 'Bạn đã được đánh dấu vắng mặt ở hoạt động này.',
 };
 
 /* =====================================================================
@@ -254,6 +257,25 @@ const state = {
    * somehow exceeds N) cannot replay the celebration.
    */
   treeFlourished: false,
+  /**
+   * Phase 9.1 — the lobby lifecycle of the loaded session (`LOBBY` | `ACTIVE`)
+   * and its activity type (`BRAINSTORM` | `SPEED_QUIZ`). `treeSessionId` is the
+   * uuid the Realtime channel filters on, kept separately from the code the
+   * student typed because `?code=`/`?tree=` may carry either form.
+   */
+  treeStatus: 'ACTIVE',
+  treeGameMode: 'BRAINSTORM',
+  treeSessionId: null,
+  /**
+   * Phase 9.1 — the reason the student is spectating, when the teacher marked
+   * them absent: renders the spectator card instead of the check-in form.
+   */
+  treeIsAbsent: false,
+  /** Phase 9.1 — Realtime subscription on `tree_sessions` (LOBBY -> ACTIVE). */
+  treeSessionChannel: null,
+  /** Phase 9.1 — local countdown display state (server deadline is authoritative). */
+  treeRemainingSeconds: 0,
+  treeCountdownTimer: null,
   /**
    * Phase 8.4 — the student's own team (Tổ 1..4), resolved from the check-in
    * roster. The workspace renders ONLY this team's tree (`myTeamSubs`), so a
@@ -3036,7 +3058,9 @@ function renderTree(session, submissions, animate) {
     totalStudents: Math.max(teamTotal, 1),
     submissions: teamSubmissions,
     timeLimitMinutes: session.timeLimitMinutes,
-    createdAt: session.createdAt,
+    // Phase 9.1 — anchor on the start (`started_at`), not on creation: a session
+    // that waited in the lobby must not already look stale at kickoff.
+    createdAt: session.startedAt || session.createdAt,
     seed: getTeamSeed(session.seed, team),
   });
 
@@ -3137,15 +3161,64 @@ function showTree(session, submissions, animate) {
   return renderTree(session, submissions, animate);
 }
 
-/** Toggles between the check-in card and the interactive workspace. */
+/**
+ * Toggles between the tree's mutually exclusive states.
+ *
+ * Phase 9.1 — four states now: `lobby` (waiting room), `spectator` (the teacher
+ * marked this student absent), `checkin` (pick your name) and `workspace` (the
+ * live canvas). Everything is hidden first so a transition can never leave two
+ * cards stacked.
+ */
 function setTreeView(view) {
-  if (view === 'workspace') {
-    hide($('treeCheckinForm'));
-    show($('treeWorkspace'));
-  } else {
-    show($('treeCheckinForm'));
-    hide($('treeWorkspace'));
-  }
+  const panels = {
+    spectator: $('treeSpectatorCard'),
+    lobby: $('treeLobbyCard'),
+    checkin: $('treeCheckinForm'),
+    workspace: $('treeWorkspace'),
+  };
+  Object.entries(panels).forEach(([name, node]) => {
+    if (!node) return;
+    if (name === view) show(node);
+    else hide(node);
+  });
+}
+
+/**
+ * Phase 9.1 — the waiting room shown while the session is still in `LOBBY`.
+ *
+ * The student's Tổ is already known (the RPC resolves it from
+ * `participant_config.assignments`), so the card can name it outright. Falls
+ * back to a neutral line when the RPC returned no team (a walk-in code that is
+ * not on the roster).
+ */
+function renderTreeLobby() {
+  setTreeView('lobby');
+  const session = state.treeSession;
+  if (!session) return;
+
+  $('treeLobbyTitle').textContent = session.title || 'Cây Tri Thức';
+  $('treeLobbyTeam').textContent = state.studentTeam
+    ? `🌱 Bạn thuộc Cây ${state.studentTeam}. Hãy nhìn lên máy chiếu, trận đấu sẽ bắt đầu khi thầy/cô bấm nút!`
+    : '🌱 Đã vào phòng! Hãy nhìn lên máy chiếu, trận đấu sẽ bắt đầu khi thầy/cô bấm nút!';
+  $('treeLobbyHint').textContent =
+    `${session.className || ''} · ${session.gameMode === 'SPEED_QUIZ' ? 'Đua tốc độ' : 'Bão não từ khóa'}`
+    + ` · Thời gian ${session.timeLimitMinutes} phút`;
+}
+
+/**
+ * Phase 9.1 — the spectator notice for a student the teacher marked absent.
+ *
+ * Deliberately NOT an error: they are still in the room, they simply cannot
+ * answer. The tree stays visible only if they later check in, which the absent
+ * flag forbids, so this card is terminal for the session.
+ */
+function renderTreeSpectator() {
+  setTreeView('spectator');
+  const session = state.treeSession;
+  $('treeSpectatorTitle').textContent = `👁️ ${session ? session.title : 'Chế độ quan sát'}`;
+  $('treeSpectatorMeta').textContent = session
+    ? `${session.className || ''} · Bạn đã được đánh dấu vắng mặt ở hoạt động này.`
+    : '';
 }
 
 /** Non-blocking status banner inside the workspace. */
@@ -3177,7 +3250,9 @@ function treeCheckinError(message) {
  */
 function loadTreeFromUrl() {
   const params = new URLSearchParams(window.location.search);
-  const sessionId = params.get('session') || params.get('tree');
+  // Phase 9.1 — `?code=` carries the short projector PIN; `?tree=` the uuid.
+  // Both are accepted by the RPC (and `?session=` remains for older links).
+  const sessionId = params.get('code') || params.get('session') || params.get('tree');
   if (!sessionId) return false;
   loadTreeActivity(sessionId);
   return true;
@@ -3189,16 +3264,23 @@ function loadTreeFromUrl() {
  * Steps: (1) fetch the sanitised session payload, (2) show the question and the
  * candidate list, (3) pre-fetch existing submissions so the tree is already
  * populated before Realtime connects, (4) subscribe for live growth.
+ *
+ * Phase 9.1 — the loader accepts either the session uuid (legacy links) or the
+ * short `session_code` (the projector QR/PIN), so `isUuid` is no longer a
+ * precondition: the RPC resolves both. The caller's `student_code` (recovered
+ * from the stored exam session) rides along so the RPC can resolve their Tổ and
+ * the absent flag, which drives the spectator/lobby branches below.
  */
-async function loadTreeActivity(sessionId) {
+async function loadTreeActivity(sessionRef) {
   // Phase 8.1 — isolate the tree view BEFORE anything else. The error states
   // below must also render inside the tree view, so switching first means a bad
   // link shows the message there rather than leaving the exam form on screen.
   switchView('tree');
 
-  // A URL is never trusted: the RPC takes a uuid, so anything else would be a
-  // wasted round-trip and an opaque PostgREST cast error.
-  if (!isUuid(sessionId)) {
+  // A URL is never trusted. The RPC takes a varchar, so the only thing worth
+  // rejecting locally is an empty/garbage token the server would merely 404 on.
+  const ref = String(sessionRef || '').trim();
+  if (!ref) {
     showTreeError('Liên kết tham gia không hợp lệ.');
     return;
   }
@@ -3210,7 +3292,10 @@ async function loadTreeActivity(sessionId) {
   $('treeCheckinQuestion').textContent = '';
   $('treeCheckinMeta').textContent = '';
 
-  const result = await callRpc('get_public_tree_session', { p_session_id: sessionId });
+  const result = await callRpc('get_public_tree_session', {
+    p_session_code: ref,
+    p_student_code: state.studentCode || null,
+  });
 
   if (!result.ok) {
     showTreeError('Không kết nối được máy chủ. Vui lòng thử lại.');
@@ -3232,8 +3317,16 @@ async function loadTreeActivity(sessionId) {
     timeLimitMinutes: Number(session.time_limit_minutes) || 0,
     seed: Number(session.tree_seed) || 0,
     createdAt: session.created_at,
+    // Phase 9.1 — vitality is measured from the bout's START, falling back to
+    // creation for a legacy session that never went through the lobby.
+    startedAt: session.started_at || session.created_at,
     className: payload.class_name || '',
     totalStudents: Math.max(Number(payload.total_students) || 0, 1),
+    // Phase 9.1 — lobby/game-mode metadata and the resolved identity.
+    sessionCode: session.session_code || '',
+    gameMode: session.game_mode === 'SPEED_QUIZ' ? 'SPEED_QUIZ' : 'BRAINSTORM',
+    targetScore: Number(session.target_score) || 20,
+    timeRemainingSeconds: Number(session.time_remaining_seconds) || 0,
   };
   state.treeMembers = Array.isArray(payload.candidates) ? payload.candidates : [];
   state.treeSubmissions = [];
@@ -3245,8 +3338,18 @@ async function loadTreeActivity(sessionId) {
   // Phase 8.4 — per-team roster sizes and the champion latch both restart with
   // the session; the team itself is only known after check-in.
   state.treeTeamCounts = payload.team_counts || null;
-  state.studentTeam = 1;
   state.treeChampionTeam = null;
+  // Phase 9.1 — lifecycle + identity resolution. `team_number` is null when the
+  // caller is absent, so fall back to 1 rather than letting `clampTeamNumber`
+  // (which is also a null-safe 1) hide a genuine absence.
+  state.treeSessionId = session.id || null;
+  state.treeStatus = session.status === 'LOBBY' ? 'LOBBY' : 'ACTIVE';
+  state.treeGameMode = state.treeSession.gameMode;
+  state.treeIsAbsent = session.is_absent === true;
+  state.studentTeam = clampTeamNumber(session.team_number);
+  if (session.student_name && state.studentCode) {
+    state.treeIdentity = { student_code: state.studentCode, full_name: session.student_name };
+  }
 
   // Check-in copy.
   $('treeCheckinTitle').textContent = state.treeSession.title;
@@ -3260,12 +3363,29 @@ async function loadTreeActivity(sessionId) {
   // Pre-fetch so the canvas is already correct before Realtime connects (the
   // subscription only carries deltas — a student joining mid-lesson would
   // otherwise see an empty tree until the next submission).
-  await loadTreeSubmissions(sessionId);
-  subscribeTreeChannel(sessionId);
+  await loadTreeSubmissions(session.id);
+  subscribeTreeChannel(session.id);
+  // Phase 9.1 — a SECOND subscription on the session row itself: the waiting
+  // room must flip to the arena the moment the teacher starts the bout.
+  subscribeTreeSessionChannel(session.id);
 
   // Re-render even while still on the check-in card: it is behind the card, but
   // showing it means entering the workspace needs no second fetch.
   showTree(state.treeSession, state.treeSubmissions, true);
+
+  // Phase 9.1 — an absent student never sees the check-in form; a session still
+  // in the lobby shows the waiting room. The identity (when already known) skips
+  // the name picker entirely and lands straight on the correct card.
+  if (state.treeIsAbsent) {
+    renderTreeSpectator();
+    return;
+  }
+  if (state.treeIdentity) {
+    if (state.treeStatus === 'LOBBY') renderTreeLobby();
+    else finishTreeWorkspace();
+    return;
+  }
+  setTreeView('checkin');
 }
 
 /** Replaces the check-in view with a fatal error message. */
@@ -3339,6 +3459,55 @@ function unsubscribeTreeChannel() {
     state.supabase.removeChannel(state.treeChannel);
   }
   state.treeChannel = null;
+  if (state.treeSessionChannel && state.supabase) {
+    state.supabase.removeChannel(state.treeSessionChannel);
+  }
+  state.treeSessionChannel = null;
+}
+
+/**
+ * Phase 9.1 — subscribes to the session ROW itself.
+ *
+ * The waiting room is a passive screen: its ONLY exit condition is the teacher
+ * pressing "BẮT ĐẦU THI ĐẤU", which arrives as an UPDATE on `tree_sessions`.
+ * Filtering by `id=eq.` (a primary key) needs no extra replica identity, and the
+ * row is re-checked client-side anyway so a stale channel from a previous
+ * session can never promote this one.
+ */
+function subscribeTreeSessionChannel(sessionId) {
+  if (state.treeSessionChannel && state.supabase) {
+    state.supabase.removeChannel(state.treeSessionChannel);
+  }
+  state.treeSessionChannel = state.supabase
+    .channel(`tree-session-${sessionId}`)
+    .on('postgres_changes', {
+      event: 'UPDATE',
+      schema: 'public',
+      table: 'tree_sessions',
+      filter: `id=eq.${sessionId}`,
+    }, handleRealtimeSessionUpdate)
+    .subscribe();
+}
+
+/** Promotes a waiting-room student to the arena once the teacher starts. */
+function handleRealtimeSessionUpdate(payload) {
+  const row = payload.new;
+  if (!row || row.id !== state.treeSessionId) return;
+  // Absent students stay on the spectator card; the start changes nothing for
+  // them, and switching would wrongly show them an input they cannot submit.
+  if (state.treeIsAbsent) return;
+  if (state.treeStatus === 'ACTIVE') return;
+
+  state.treeStatus = row.status === 'ACTIVE' ? 'ACTIVE' : state.treeStatus;
+  if (state.treeStatus !== 'ACTIVE') return;
+
+  if (state.treeSession) {
+    state.treeSession.timeRemainingSeconds =
+      Number(row.time_remaining_seconds) || state.treeSession.timeRemainingSeconds;
+  }
+  // A student still on the name picker stays there (they have not checked in);
+  // only a student already in the waiting room is promoted automatically.
+  if (state.treeIdentity) finishTreeWorkspace();
 }
 
 /** Merges one Realtime payload and repaints the canvas immediately. */
@@ -3390,7 +3559,13 @@ function updateTreeWordCounter() {
   $('btnSubmitTreeAnswer').disabled = words < session.minWords;
 }
 
-/** Check-in: pick a name, then enter the workspace. */
+/**
+ * Check-in: pick a name, then enter the workspace (or the waiting room).
+ *
+ * Phase 9.1 — if the session is still in `LOBBY` the student is parked on the
+ * waiting card rather than dropped into an arena they cannot submit to; the
+ * Realtime UPDATE on `tree_sessions` promotes them when the teacher starts.
+ */
 function enterTreeWorkspace() {
   const studentCode = $('treeStudentSelect').value;
   const session = state.treeSession;
@@ -3404,19 +3579,38 @@ function enterTreeWorkspace() {
   // which leaderboard badge is highlighted as their own.
   state.studentTeam = clampTeamNumber(member.team_number);
   treeCheckinError('');
+
+  if (state.treeStatus === 'LOBBY') {
+    renderTreeLobby();
+    return;
+  }
+  finishTreeWorkspace();
+}
+
+/**
+ * Phase 9.1 — everything that happens ONCE a checked-in student enters the
+ * live arena; split out of `enterTreeWorkspace` so the Realtime lobby→ACTIVE
+ * promotion can reuse it verbatim (a waiting-room student has no way to
+ * re-submit the check-in form).
+ */
+function finishTreeWorkspace() {
+  const session = state.treeSession;
+  if (!session) return;
   setTreeView('workspace');
 
   // The canvas was hidden until now, so its CSS box had no size. Re-render AFTER
   // the workspace is visible so `resize()` reads a real clientHeight.
   renderTree(session, state.treeSubmissions, true);
+  applyTreeModePresentation();
 
   const reminder = $('treeQuestionReminder');
   if (reminder) reminder.textContent = session.questionText;
 
   // Mark the student's own fruit once it exists (they may be re-joining).
-  const mine = state.treeSubmissions.find(
-    (row) => row.student_code === member.student_code,
-  );
+  const identity = state.treeIdentity;
+  const mine = identity
+    ? state.treeSubmissions.find((row) => row.student_code === identity.student_code)
+    : null;
   if (mine) {
     state.treeSubmitted = true;
     $('treeAnswerInput').value = mine.answer_text || '';
@@ -3426,6 +3620,90 @@ function enterTreeWorkspace() {
 
   updateTreeWordCounter();
   $('treeAnswerInput').focus();
+}
+
+/**
+ * Phase 9.1 — paints the mode-specific chrome of the arena.
+ *
+ * BRAINSTORM keeps the free-text answer box and shows the discussion prompt as
+ * its label. SPEED_QUIZ promotes the prompt into a prominent `#treeQuizPrompt`
+ * card (the student's eyes should be on the question, not on the label above a
+ * textarea) and labels the input as the short answer field. The countdown badge
+ * is started for both, anchored on the RPC's `time_remaining_seconds`.
+ */
+function applyTreeModePresentation() {
+  const session = state.treeSession;
+  if (!session) return;
+
+  const isQuiz = session.gameMode === 'SPEED_QUIZ';
+  const prompt = $('treeQuizPrompt');
+  const reminder = $('treeQuestionReminder');
+
+  if (prompt) {
+    prompt.textContent = isQuiz ? session.questionText : '';
+    if (isQuiz && session.questionText) show(prompt);
+    else hide(prompt);
+  }
+  if (reminder) {
+    reminder.textContent = isQuiz
+      ? 'Trả lời ngắn gọn, nhanh và chính xác:'
+      : session.questionText;
+  }
+
+  const modeBadge = $('treeModeBadge');
+  if (modeBadge) modeBadge.textContent = isQuiz
+    ? `⚡ Đua tốc độ · Mục tiêu ${session.targetScore} điểm`
+    : '💡 Bão não từ khóa';
+
+  const input = $('treeAnswerInput');
+  if (input) {
+    input.placeholder = isQuiz
+      ? 'Nhập đáp án ngắn của bạn...'
+      : 'Nhập suy nghĩ hoặc câu trả lời của bạn...';
+  }
+
+  startTreeCountdown(session.timeRemainingSeconds);
+}
+
+/**
+ * Phase 9.1 — local countdown, anchored on the server's `time_remaining_seconds`.
+ *
+ * A client-side tick is only a DISPLAY; the authoritative cutoff is `ends_at` in
+ * `submit_tree_answer`, so a tampered clock cannot extend the bout. Interval is
+ * cleared on every re-entry so two sessions can never leave two timers running.
+ */
+function startTreeCountdown(seconds) {
+  stopTreeCountdown();
+  if (!(Number(seconds) > 0)) {
+    const badge = $('treeTimeBadge');
+    if (badge) badge.textContent = '';
+    return;
+  }
+
+  state.treeRemainingSeconds = Number(seconds);
+  paintTreeCountdown();
+  state.treeCountdownTimer = window.setInterval(() => {
+    state.treeRemainingSeconds = Math.max(0, state.treeRemainingSeconds - 1);
+    paintTreeCountdown();
+    if (state.treeRemainingSeconds === 0) stopTreeCountdown();
+  }, 1000);
+}
+
+function stopTreeCountdown() {
+  if (state.treeCountdownTimer) {
+    window.clearInterval(state.treeCountdownTimer);
+    state.treeCountdownTimer = null;
+  }
+}
+
+function paintTreeCountdown() {
+  const badge = $('treeTimeBadge');
+  if (!badge) return;
+  const total = Math.max(0, Number(state.treeRemainingSeconds) || 0);
+  const minutes = Math.floor(total / 60);
+  const secs = total % 60;
+  badge.textContent = `⏳ ${minutes}:${String(secs).padStart(2, '0')}`;
+  badge.classList.toggle('is-urgent', total <= 60);
 }
 
 /**
@@ -3485,6 +3763,19 @@ async function submitTreeAnswer() {
         `Câu trả lời cần tối thiểu ${session.minWords} từ (bạn mới nhập ${payload.current_words} từ).`,
         'warning',
       );
+    } else if (payload.code === 'NOT_STARTED') {
+      // Phase 9.1 — the teacher reverted to the lobby (or this student raced the
+      // start). Park them on the waiting card rather than leaving them on an
+      // arena that would refuse every further attempt.
+      state.treeStatus = 'LOBBY';
+      renderTreeLobby();
+      return;
+    } else if (payload.code === 'STUDENT_ABSENT') {
+      // Phase 9.1 — marked absent mid-session: switch to the spectator card, the
+      // terminal state for this student.
+      state.treeIsAbsent = true;
+      renderTreeSpectator();
+      return;
     } else {
       treeStatus(rpcMessage(payload.code, payload.message), 'error');
     }

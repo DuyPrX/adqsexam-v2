@@ -18,7 +18,7 @@ import type { RealtimeChannel, RealtimePostgresChangesPayload } from '@supabase/
 import { createClient } from '@/lib/supabase/client';
 import { resolveStudentAppBaseUrl } from '@/lib/env';
 import { PersistenceError } from '@/lib/exams';
-import { clampTeamNumber, endTreeSession, getTeamSeed } from '@/lib/tree';
+import { clampTeamNumber, endTreeSession, getTeamSeed, startTreeSession } from '@/lib/tree';
 import { computeTreeState, type LayoutFruitAnchor, type TreeState } from '@/lib/tree-engine';
 import {
   isAudioMuted,
@@ -29,6 +29,7 @@ import {
 } from '@/lib/tree-audio';
 import type { TeamCounts, TeamNumber, TreeSessionDetail, TreeSubmissionRow } from '@/lib/types';
 import { TreeCanvas, type TreeCanvasHandle } from './TreeCanvas';
+import { TreeLobby } from './TreeLobby';
 import { TreeQrCode } from './TreeQrCode';
 
 interface TreeProjectorProps {
@@ -43,19 +44,26 @@ const TEAMS: TeamNumber[] = [1, 2, 3, 4];
 /**
  * Builds the URL a student scans to join.
  *
+ * Phase 9.1 — the SHORT session code is preferred over the uuid: it is what the
+ * projector prints as the PIN, so the QR and the PIN resolve to the same room and
+ * a student who mistypes neither has to care which they used. The SPA's
+ * `loadTreeFromUrl()` reads `?session=`/`?tree=`/`?code=`, and
+ * `get_public_tree_session` accepts either form.
+ *
  * The student SPA is a static bundle served from a directory root (Cloudflare
  * Pages `assets.directory`), with no client-side router — so the join link must
  * target its INDEX (`/` or `/index.html`) and carry the session as a query
- * parameter, exactly what `loadTreeFromUrl()` reads. A path like `/tree/join`
- * would be a 404 because there is no such document.
+ * parameter. A path like `/tree/join` would be a 404 because there is no such
+ * document.
  *
  * The SPA is a separate origin from the teacher web, so its base comes from
  * `NEXT_PUBLIC_STUDENT_APP_URL` (see lib/env.ts); the current origin is the
  * documented local-development fallback.
  */
-function buildJoinUrl(sessionId: string): string {
+function buildJoinUrl(session: TreeSessionDetail): string {
   const base = resolveStudentAppBaseUrl();
-  return base ? `${base}/?session=${sessionId}` : `/?session=${sessionId}`;
+  const code = session.session_code || session.id;
+  return base ? `${base}/?tree=${code}` : `/?tree=${code}`;
 }
 
 /** Strips characters that are illegal in a filename on Windows/macOS. */
@@ -93,6 +101,15 @@ function formatRemaining(ms: number): string {
 export function TreeProjector({ session, initialSubmissions }: TreeProjectorProps) {
   const [submissions, setSubmissions] = useState<TreeSubmissionRow[]>(initialSubmissions);
   const [isActive, setIsActive] = useState(session.is_active);
+  // Phase 9.1 — the loopback status. Held in state (not read from the prop) so the
+  // lobby can flip to the arena without a server round-trip after start.
+  const [status, setStatus] = useState(session.status);
+  const [startedAt, setStartedAt] = useState<string | null>(session.started_at);
+  // Phase 9.1 — the server-stamped deadline, adopted from the start RPC so the
+  // countdown does not have to be recomputed locally (and cannot drift from the
+  // `time_remaining_seconds` every student received).
+  const [endsAt, setEndsAt] = useState<string | null>(session.ends_at);
+  const [isStarting, setIsStarting] = useState(false);
   const [connection, setConnection] = useState<'connecting' | 'live' | 'error'>('connecting');
   const [hovered, setHovered] = useState<{ team: TeamNumber; anchor: LayoutFruitAnchor } | null>(null);
   const [pinnedId, setPinnedId] = useState<string | null>(null);
@@ -121,13 +138,23 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
     return () => window.removeEventListener('pointerdown', unlock, true);
   }, []);
 
-  const joinUrl = useMemo(() => buildJoinUrl(session.id), [session.id]);
+  const joinUrl = useMemo(() => buildJoinUrl(session), [session]);
 
   // --- countdown -----------------------------------------------------------
-  const deadline = useMemo(
-    () => new Date(session.created_at).getTime() + session.time_limit_minutes * 60_000,
-    [session.created_at, session.time_limit_minutes],
-  );
+  /**
+   * Phase 9.1 — the deadline now anchors on `ends_at` once the bout has started.
+   *
+   * The pre-9.1 formula (`created_at + time_limit_minutes`) started the clock at
+   * CREATION, which is wrong for a lobby: a class that waited ten minutes for
+   * stragglers would have already burned ten minutes of the bout. `ends_at` is
+   * stamped by `start_tree_session`, so the full duration is honoured; the lobby
+   * falls back to the old anchor only for a session started before this phase.
+   */
+  const deadline = useMemo(() => {
+    if (endsAt) return new Date(endsAt).getTime();
+    const anchor = startedAt ?? session.created_at;
+    return new Date(anchor).getTime() + session.time_limit_minutes * 60_000;
+  }, [endsAt, session.created_at, session.time_limit_minutes, startedAt]);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const handle = setInterval(() => setNow(Date.now()), 1000);
@@ -311,10 +338,35 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
     try {
       await endTreeSession(createClient(), session.id);
       setIsActive(false);
+      setStatus('FINISHED');
     } catch (err) {
       setError(err instanceof PersistenceError ? err.message : 'Không kết thúc được hoạt động.');
     } finally {
       setIsEnding(false);
+    }
+  };
+
+  /**
+   * Phase 9.1 — the LOBBY -> ACTIVE transition.
+   *
+   * The post-start deadline is taken from the RPC's own `ends_at` rather than
+   * recomputed locally, so the projector's countdown and every student's timer
+   * agree to the millisecond (the students read `time_remaining_seconds` from the
+   * same server clock).
+   */
+  const handleStartSession = async () => {
+    setIsStarting(true);
+    setError(null);
+    try {
+      const { startedAt: started, endsAt: serverEndsAt } = await startTreeSession(createClient(), session.id);
+      setStartedAt(started || new Date().toISOString());
+      if (serverEndsAt) setEndsAt(serverEndsAt);
+      setStatus('ACTIVE');
+      setIsActive(true);
+    } catch (err) {
+      setError(err instanceof PersistenceError ? err.message : 'Không bắt đầu được trận đấu.');
+    } finally {
+      setIsStarting(false);
     }
   };
 
@@ -341,6 +393,29 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
   });
 
   const champion = firstFinishedTeam;
+
+  // Phase 9.1 — the waiting room. Rendered INSTEAD of the arena while the session
+  // is still in LOBBY, so the class sees the QR/PIN and the roster split rather
+  // than four empty trees. All the arena state above stays mounted (its hooks must
+  // run unconditionally), and the Realtime subscription is already live, so the
+  // first submissions after start paint immediately.
+  if (status === 'LOBBY') {
+    return (
+      <>
+        <TreeLobby
+          session={session}
+          joinUrl={joinUrl}
+          isStarting={isStarting}
+          onStart={() => void handleStartSession()}
+        />
+        {error && (
+          <div className="fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-lg border border-rose-800 bg-rose-950/95 px-4 py-2 text-sm text-rose-100 shadow-lg">
+            {error}
+          </div>
+        )}
+      </>
+    );
+  }
 
   return (
     <div className="flex min-h-screen flex-col bg-slate-950 text-slate-100 lg:h-screen lg:flex-row">

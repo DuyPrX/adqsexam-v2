@@ -305,6 +305,22 @@ create table if not exists public.tree_sessions (
     max_similarity     numeric(3,2) not null default 0.60,
     tree_seed          integer      not null default floor(random() * 1000000)::integer,
     is_active          boolean      not null default true,
+    -- Phase 9.1 — lobby lifecycle. Kept IN SYNC with is_active, which remains the
+    -- gate submit_tree_answer has always enforced: `start_tree_session` writes both,
+    -- and the teacher web's `endTreeSession` closes them together.
+    status             varchar(20)  not null default 'LOBBY'
+        constraint tree_sessions_status_check check (status in ('LOBBY', 'ACTIVE', 'FINISHED')),
+    -- Phase 9.1 — short human-readable join code for the projector PIN / QR.
+    session_code       varchar(12)  not null default upper(substr(md5(gen_random_uuid()::text), 1, 6)),
+    -- Phase 9.1 — BRAINSTORM (open keyword) or SPEED_QUIZ (timed MCQ).
+    game_mode          varchar(20)  not null default 'BRAINSTORM'
+        constraint tree_sessions_game_mode_check check (game_mode in ('BRAINSTORM', 'SPEED_QUIZ')),
+    exam_id            uuid         references public.exams (id) on delete set null,
+    target_score       integer      not null default 20
+        constraint tree_sessions_target_score_check check (target_score > 0),
+    participant_config jsonb        not null default '{"absent_ids": [], "assignments": {}}'::jsonb,
+    started_at         timestamptz,
+    ends_at            timestamptz,
     created_at         timestamptz  not null default now(),
     ended_at           timestamptz,
     constraint tree_sessions_max_similarity_range
@@ -313,9 +329,60 @@ create table if not exists public.tree_sessions (
     constraint tree_sessions_time_limit_positive check (time_limit_minutes > 0)
 );
 
+-- Idempotency for databases created before Phase 9.1. `status` is added with an
+-- explicit backfill rather than inside the CREATE, because `add column ... default
+-- 'LOBBY'` would strand every session that is already under way: the corrective
+-- UPDATE runs only on the first application, which is what keeps this re-runnable
+-- without a migration ledger.
+do $$
+begin
+    if not exists (
+        select 1 from information_schema.columns
+         where table_schema = 'public' and table_name = 'tree_sessions'
+           and column_name = 'status'
+    ) then
+        alter table public.tree_sessions add column status varchar(20) not null default 'LOBBY';
+        update public.tree_sessions
+           set status = case when is_active then 'ACTIVE' else 'FINISHED' end;
+    end if;
+end $$;
+
+alter table public.tree_sessions add column if not exists session_code varchar(12);
+update public.tree_sessions
+   set session_code = upper(substr(md5(id::text), 1, 6))
+ where session_code is null;
+alter table public.tree_sessions alter column session_code set default upper(substr(md5(gen_random_uuid()::text), 1, 6));
+alter table public.tree_sessions alter column session_code set not null;
+alter table public.tree_sessions add column if not exists game_mode varchar(20) not null default 'BRAINSTORM';
+alter table public.tree_sessions add column if not exists exam_id uuid references public.exams (id) on delete set null;
+alter table public.tree_sessions add column if not exists target_score integer not null default 20;
+alter table public.tree_sessions add column if not exists participant_config jsonb not null default '{"absent_ids": [], "assignments": {}}'::jsonb;
+alter table public.tree_sessions add column if not exists started_at timestamptz;
+alter table public.tree_sessions add column if not exists ends_at timestamptz;
+
+do $$
+begin
+    if not exists (select 1 from pg_constraint where conname = 'tree_sessions_game_mode_check') then
+        alter table public.tree_sessions add constraint tree_sessions_game_mode_check
+            check (game_mode in ('BRAINSTORM', 'SPEED_QUIZ'));
+    end if;
+    if not exists (select 1 from pg_constraint where conname = 'tree_sessions_target_score_check') then
+        alter table public.tree_sessions add constraint tree_sessions_target_score_check
+            check (target_score > 0);
+    end if;
+end $$;
+
+create unique index if not exists tree_sessions_session_code_uniq on public.tree_sessions (session_code);
+create index if not exists idx_tree_sessions_status on public.tree_sessions (status);
+
 comment on table public.tree_sessions is 'Teacher-owned "Cây tri thức" activity: one open question posed to a class (Phase 7.1).';
 comment on column public.tree_sessions.max_similarity is 'Trigram similarity ceiling. An answer at or below this is accepted; above it is rejected as duplicated.';
 comment on column public.tree_sessions.tree_seed is 'Deterministic seed so every client renders the same procedural tree.';
+comment on column public.tree_sessions.status is 'Lobby lifecycle: LOBBY (waiting room) -> ACTIVE -> FINISHED. Kept in sync with is_active (Phase 9.1).';
+comment on column public.tree_sessions.session_code is 'Short human-readable join code shown as the projector PIN / QR payload (Phase 9.1).';
+comment on column public.tree_sessions.participant_config is 'Pre-flight roster: {"absent_ids": [member uuid], "assignments": {member uuid: team 1..4}} (Phase 9.1).';
+comment on column public.tree_sessions.game_mode is 'BRAINSTORM (open keyword) or SPEED_QUIZ (timed MCQ) (Phase 9.1).';
+comment on column public.tree_sessions.target_score is 'Points a team must reach to win in SPEED_QUIZ (Phase 9.1).';
 
 -- ----------------------------------------------------------------------------
 -- A.10 tree_submissions — one answer per student per session ("fruit").
@@ -2297,6 +2364,8 @@ declare
     v_student_code      varchar(50);
     v_student_name      varchar(100);
     v_team_number       smallint;
+    v_config            jsonb;
+    v_member_id         uuid;
 begin
     v_student_code := trim(coalesce(p_student_code, ''));
     v_student_name := trim(coalesce(p_student_name, ''));
@@ -2313,21 +2382,47 @@ begin
         return jsonb_build_object('success', false, 'code', 'SESSION_NOT_FOUND', 'message', 'Phiên hoạt động không tồn tại.');
     end if;
 
-    if v_session.is_active is not true then
+    -- Phase 9.1 — the lobby gate. Checked BEFORE `is_active` so a not-yet-started
+    -- session reports the actionable "chờ giáo viên" rather than "đã kết thúc".
+    if v_session.status = 'LOBBY' then
+        return jsonb_build_object('success', false, 'code', 'NOT_STARTED', 'message', 'Trận đấu chưa bắt đầu. Vui lòng chờ giáo viên!');
+    end if;
+
+    if v_session.status = 'FINISHED' or v_session.is_active is not true then
         return jsonb_build_object('success', false, 'code', 'SESSION_INACTIVE', 'message', 'Phiên hoạt động đã kết thúc.');
     end if;
 
-    if now() > v_session.created_at + make_interval(mins => v_session.time_limit_minutes) then
+    -- Once started, the deadline is `ends_at` (stamped by start_tree_session).
+    -- Falls back to the legacy created_at anchor for any session that was made
+    -- ACTIVE without going through the lobby.
+    if v_session.ends_at is not null then
+        if now() > v_session.ends_at then
+            return jsonb_build_object('success', false, 'code', 'SESSION_EXPIRED', 'message', 'Đã hết thời gian làm bài.');
+        end if;
+    elsif now() > v_session.created_at + make_interval(mins => v_session.time_limit_minutes) then
         return jsonb_build_object('success', false, 'code', 'SESSION_EXPIRED', 'message', 'Đã hết thời gian làm bài.');
     end if;
 
+    v_config := coalesce(v_session.participant_config, '{"absent_ids": [], "assignments": {}}'::jsonb);
+
     -- Phase 8.4 — resolve the author's team from the class roster.
-    select cm.team_number
-      into v_team_number
+    select cm.id, cm.team_number
+      into v_member_id, v_team_number
       from public.class_members cm
      where cm.class_id = v_session.class_id
        and cm.student_code = v_student_code
      limit 1;
+
+    -- Phase 9.1 — a student the teacher marked absent may not submit.
+    if v_member_id is not null and (v_config->'absent_ids' ? v_member_id::text) then
+        return jsonb_build_object('success', false, 'code', 'STUDENT_ABSENT', 'message', 'Bạn đã được đánh dấu vắng mặt ở hoạt động này.');
+    end if;
+
+    -- Phase 9.1 — the pre-flight override wins over the roster's own team, so the
+    -- Tổ a student is placed in on the projector is the one they actually score for.
+    if v_member_id is not null and v_config->'assignments' ? v_member_id::text then
+        v_team_number := nullif(v_config->'assignments'->>v_member_id::text, '')::smallint;
+    end if;
 
     -- Not on the roster: a deterministic round-robin team from the number of
     -- answers already recorded, so a walk-in lands somewhere sensible rather
@@ -2405,21 +2500,105 @@ $$;
 
 
 -- ----------------------------------------------------------------------------
--- C.17  get_public_tree_session  (student — anon, Phase 7.4 / 8.4)
---       Powers the student SPA's tree check-in screen: opens a session from a
---       link (`?session=`/`?tree=`) and returns the question, the word minimum,
---       the renderer seed and the class roster to pick a name from.
+-- C.15b start_tree_session  (teacher — authenticated, Phase 9.1)
+--       The atomic LOBBY -> ACTIVE transition. Stamps `started_at`/`ends_at` from
+--       the session's own `time_limit_minutes` and sets `is_active = true`, so the
+--       richer `status` lifecycle can never disagree with the boolean gate
+--       `submit_tree_answer` has enforced since Phase 7.1.
+--
+--       SECURITY DEFINER (house pattern for teacher RPCs), so RLS is bypassed in
+--       the body and ownership is asserted EXPLICITLY against `tree_sessions.user_id`.
+--       Revoked from PUBLIC and `anon` (Supabase grants anon EXECUTE directly, so a
+--       PUBLIC-only revoke is not enough); granted to `authenticated` only.
+--       Codes: UNAUTHORIZED / NOT_FOUND / INVALID_STATE
+-- ----------------------------------------------------------------------------
+create or replace function public.start_tree_session(
+    p_session_id uuid
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+    v_teacher_id uuid;
+    v_session    public.tree_sessions%rowtype;
+    v_now        timestamptz := now();
+    v_ends_at    timestamptz;
+begin
+    v_teacher_id := auth.uid();
+    if v_teacher_id is null then
+        return jsonb_build_object('success', false, 'code', 'UNAUTHORIZED', 'message', 'Yêu cầu đăng nhập giáo viên.');
+    end if;
+
+    select * into v_session
+      from public.tree_sessions
+     where id = p_session_id
+       and user_id = v_teacher_id;
+
+    if not found then
+        return jsonb_build_object('success', false, 'code', 'NOT_FOUND', 'message', 'Không tìm thấy phiên Cây Tri Thức hoặc bạn không có quyền.');
+    end if;
+
+    if v_session.status <> 'LOBBY' then
+        return jsonb_build_object('success', false, 'code', 'INVALID_STATE', 'message', 'Phiên thi đấu đã bắt đầu hoặc đã kết thúc.');
+    end if;
+
+    -- `ends_at` is what the projector countdown and the SPA timer read; it is
+    -- derived from the SAME `time_limit_minutes` the pre-9.1 created_at-anchored
+    -- deadline used, so the clock does not jump when the teacher starts.
+    v_ends_at := v_now + make_interval(mins => v_session.time_limit_minutes);
+
+    update public.tree_sessions
+       set status     = 'ACTIVE',
+           is_active  = true,
+           started_at = v_now,
+           ends_at    = v_ends_at
+     where id = p_session_id;
+
+    return jsonb_build_object(
+        'success',    true,
+        'session_id', p_session_id,
+        'status',     'ACTIVE',
+        'started_at', v_now,
+        'ends_at',    v_ends_at
+    );
+end;
+$$;
+
+comment on function public.start_tree_session(uuid) is
+    'Teacher-only: LOBBY -> ACTIVE, stamping started_at/ends_at and is_active (Phase 9.1).';
+
+
+-- ----------------------------------------------------------------------------
+-- C.17  get_public_tree_session  (student — anon, Phase 7.4 / 8.4 / 9.1)
+--       Powers the student SPA's tree check-in screen and the LOBBY waiting room:
+--       resolves a session from its uuid OR its short `session_code`, and returns
+--       the question, the word minimum, the renderer seed, the class roster to pick
+--       a name from, the lobby state, and — when a `p_student_code` is supplied —
+--       that student's resolved team and absent flag.
 --
 --       Returns { success: true, class_name, total_students, team_counts,
 --                 session: { id, title, question_text, min_words,
---                            time_limit_minutes, tree_seed, created_at },
+--                            time_limit_minutes, tree_seed, created_at,
+--                            session_code, status, game_mode, exam_id,
+--                            target_score, time_remaining_seconds,
+--                            is_absent, team_number, student_name },
 --                 candidates: [ { student_code, full_name, team_number } ] }
 --            or { success: false, code, message }
 --       Codes: SESSION_NOT_FOUND / SESSION_INACTIVE / SESSION_EXPIRED
 --
+--       Phase 9.1 — a LOBBY session is READABLE (the waiting room must render);
+--       only a FINISHED / is_active = false session is refused. `is_absent` and the
+--       effective `team_number` come from `participant_config`, and an absent
+--       student is excluded from `team_counts` so a team's 100% stays reachable.
+--
 --       Phase 8.4 — `team_counts` is `{ "1": n1, ... "4": n4 }`, the per-team
 --       participation denominator the arena needs, and every candidate carries
 --       its `team_number`.
+--
+--       The SIGNATURE changed in Phase 9.1 (uuid -> varchar code, + p_student_code),
+--       so the old 1-arg function is dropped first: leaving it would make a call
+--       that names only `p_session_code` ambiguous.
 --
 --       `tree_seed` is NOT a credential — it is the shared input every client
 --       feeds the deterministic renderer so the whole class sees the same tree.
@@ -2437,7 +2616,8 @@ $$;
 drop function if exists public.get_public_tree_session(uuid);
 
 create or replace function public.get_public_tree_session(
-    p_session_id uuid
+    p_session_code varchar,
+    p_student_code varchar default null
 ) returns jsonb
 language plpgsql
 security definer
@@ -2449,27 +2629,56 @@ declare
     v_total_students integer;
     v_team_counts    jsonb;
     v_candidates     jsonb;
+    v_config         jsonb;
+    v_member_id      uuid;
+    v_member_name    varchar;
+    v_assigned_team  smallint;
+    v_is_absent      boolean := false;
+    v_time_remaining integer := 0;
 begin
-    if p_session_id is null then
+    if p_session_code is null or trim(p_session_code) = '' then
         return jsonb_build_object('success', false, 'code', 'SESSION_NOT_FOUND', 'message', 'Phiên hoạt động không tồn tại.');
     end if;
 
+    -- Accept EITHER the uuid (legacy `?session=` links) or the short code (the
+    -- new QR/PIN). A uuid can never equal a 6-char code, so the two predicates
+    -- cannot collide.
     select s.id, s.title, s.question_text, s.min_words, s.time_limit_minutes,
-           s.tree_seed, s.is_active, s.created_at, s.class_id
+           s.tree_seed, s.is_active, s.created_at, s.class_id,
+           s.status, s.game_mode, s.exam_id, s.participant_config, s.target_score,
+           s.session_code, s.started_at, s.ends_at
       into v_session
       from public.tree_sessions s
-     where s.id = p_session_id;
+     where s.id::text = lower(trim(p_session_code))
+        or s.session_code = upper(trim(p_session_code));
 
     if not found then
         return jsonb_build_object('success', false, 'code', 'SESSION_NOT_FOUND', 'message', 'Phiên hoạt động không tồn tại.');
     end if;
 
-    if v_session.is_active is not true then
+    -- A LOBBY session is legitimately readable: the waiting room must be able to
+    -- show its own state, and a LOBBY session is deliberately `is_active = false`
+    -- (the boolean is the pre-start gate). Only FINISHED / a closed ACTIVE
+    -- session is refused.
+    if v_session.status = 'FINISHED' then
+        return jsonb_build_object('success', false, 'code', 'SESSION_INACTIVE', 'message', 'Phiên hoạt động đã kết thúc.');
+    end if;
+    if v_session.status = 'ACTIVE' and v_session.is_active is not true then
         return jsonb_build_object('success', false, 'code', 'SESSION_INACTIVE', 'message', 'Phiên hoạt động đã kết thúc.');
     end if;
 
-    if now() > v_session.created_at + make_interval(mins => v_session.time_limit_minutes) then
+    -- Expiry is anchored on `ends_at` once the bout has started, and on the old
+    -- `created_at + time_limit_minutes` while still in the lobby (so a session
+    -- left open overnight does not become immortal).
+    if v_session.status = 'ACTIVE' and v_session.ends_at is not null then
+        if now() > v_session.ends_at then
+            return jsonb_build_object('success', false, 'code', 'SESSION_EXPIRED', 'message', 'Phiên hoạt động đã hết thời gian.');
+        end if;
+        v_time_remaining := greatest(0, extract(epoch from (v_session.ends_at - now()))::integer);
+    elsif now() > v_session.created_at + make_interval(mins => v_session.time_limit_minutes) then
         return jsonb_build_object('success', false, 'code', 'SESSION_EXPIRED', 'message', 'Phiên hoạt động đã hết thời gian.');
+    else
+        v_time_remaining := v_session.time_limit_minutes * 60;
     end if;
 
     select c.name, count(cm.id)::integer
@@ -2479,8 +2688,16 @@ begin
      where c.id = v_session.class_id
      group by c.id, c.name;
 
+    v_config := coalesce(v_session.participant_config, '{"absent_ids": [], "assignments": {}}'::jsonb);
+
     -- Per-team class size. generate_series guarantees all four keys exist, so the
     -- SPA never has to defend against a missing team.
+    --
+    -- Phase 9.1 — a student marked ABSENT is excluded from their team's
+    -- denominator: they are spectating, so counting them would make a team's
+    -- 100% unreachable. `participant_config.assignments` overrides a member's
+    -- team, so the tally honours it too, or the projector would show a different
+    -- split from the one the SPA resolves.
     select coalesce(
                jsonb_object_agg(t.team_num::text, coalesce(t.cnt, 0)),
                '{"1":0,"2":0,"3":0,"4":0}'::jsonb
@@ -2490,11 +2707,19 @@ begin
           select g.team_num, tc.cnt
             from generate_series(1, 4) as g(team_num)
             left join (
-                select cm.team_number, count(*)::integer as cnt
-                  from public.class_members cm
-                 where cm.class_id = v_session.class_id
-                 group by cm.team_number
-            ) tc on tc.team_number = g.team_num
+                select effective.team, count(*)::integer as cnt
+                  from (
+                      select coalesce(
+                                 nullif(v_config->'assignments'->>cm.id::text, '')::integer,
+                                 cm.team_number,
+                                 1
+                             ) as team
+                        from public.class_members cm
+                       where cm.class_id = v_session.class_id
+                         and not (v_config->'absent_ids' ? cm.id::text)
+                  ) effective
+                 group by effective.team
+            ) tc on tc.team = g.team_num
       ) t;
 
     -- `student_code` + `full_name` + `team_number` ONLY: `pin`/`dob` must never
@@ -2503,13 +2728,43 @@ begin
                jsonb_build_object(
                    'student_code', cm.student_code,
                    'full_name',    cm.full_name,
-                   'team_number',  coalesce(cm.team_number, 1)
+                   'team_number',  coalesce(
+                                       nullif(v_config->'assignments'->>cm.id::text, '')::integer,
+                                       cm.team_number,
+                                       1
+                                   )
                )
-               order by cm.team_number asc, cm.student_code asc
+               order by coalesce(
+                            nullif(v_config->'assignments'->>cm.id::text, '')::integer,
+                            cm.team_number, 1
+                        ) asc,
+                        cm.student_code asc
            )
       into v_candidates
       from public.class_members cm
      where cm.class_id = v_session.class_id;
+
+    -- Resolve the calling student's identity when a code is supplied: their
+    -- effective team and whether the teacher marked them absent.
+    if p_student_code is not null and trim(p_student_code) <> '' then
+        select cm.id, cm.full_name
+          into v_member_id, v_member_name
+          from public.class_members cm
+         where cm.class_id = v_session.class_id
+           and lower(trim(cm.student_code)) = lower(trim(p_student_code))
+         limit 1;
+
+        if found then
+            if v_config->'absent_ids' ? v_member_id::text then
+                v_is_absent := true;
+            end if;
+            v_assigned_team := coalesce(
+                nullif(v_config->'assignments'->>v_member_id::text, '')::smallint,
+                (select cm.team_number from public.class_members cm where cm.id = v_member_id),
+                1
+            );
+        end if;
+    end if;
 
     return jsonb_build_object(
         'success', true,
@@ -2520,7 +2775,21 @@ begin
             'min_words',          v_session.min_words,
             'time_limit_minutes', v_session.time_limit_minutes,
             'tree_seed',          v_session.tree_seed,
-            'created_at',         v_session.created_at
+            'created_at',         v_session.created_at,
+            -- Phase 9.1 — the bout's real anchor. Vitality must be measured from
+            -- the START, not from creation, or a session that waited in the lobby
+            -- would look artificially slow before the first answer arrived.
+            'started_at',         v_session.started_at,
+            'ends_at',            v_session.ends_at,
+            'session_code',       v_session.session_code,
+            'status',             v_session.status,
+            'game_mode',          v_session.game_mode,
+            'exam_id',            v_session.exam_id,
+            'target_score',       v_session.target_score,
+            'time_remaining_seconds', v_time_remaining,
+            'is_absent',          v_is_absent,
+            'team_number',        case when v_is_absent then null else v_assigned_team end,
+            'student_name',       v_member_name
         ),
         'class_name', v_class_name,
         'total_students', greatest(coalesce(v_total_students, 0), 1),
@@ -2732,8 +3001,16 @@ revoke all on function public.get_practice_exam_payload(varchar, varchar, varcha
 revoke all on function public.get_exam_roster(varchar, boolean)                                          from public;
 -- Phase 7.1 — student-facing write path for the tree activity.
 revoke all on function public.submit_tree_answer(uuid, varchar, varchar, text)                            from public;
--- Phase 7.4 — student-facing check-in read for the tree activity.
-revoke all on function public.get_public_tree_session(uuid)                                               from public;
+-- Phase 7.4 — student-facing check-in read for the tree activity. Phase 9.1 moved
+-- it from the uuid to a (code, student_code) signature, so it is dropped and
+-- re-created above.
+revoke all on function public.get_public_tree_session(varchar, varchar)                                   from public;
+-- Phase 9.1 — teacher-only lobby transition. The `from anon` revoke is REQUIRED:
+-- Supabase's database default privileges grant EXECUTE to `anon` directly, and an
+-- explicit grant survives a `revoke ... from public`, which would let a student
+-- start the bout.
+revoke all on function public.start_tree_session(uuid)                                                    from public;
+revoke all on function public.start_tree_session(uuid)                                                    from anon;
 -- Phase 7.1 — RLS predicate helper, needs EXECUTE from the policy's role.
 revoke all on function public.tree_session_is_public(uuid)                                                from public;
 -- Phase 8.11 — teacher-only group management. The `from anon` revoke is REQUIRED
@@ -2766,7 +3043,9 @@ grant execute on function public.submit_tree_answer(uuid, varchar, varchar, text
 -- Phase 7.4 — student-facing check-in read: the SPA must open a session link
 -- BEFORE it has any identity, so this is anon-executable by design. It returns
 -- no credentials (never pin/dob) and no answer content.
-grant execute on function public.get_public_tree_session(uuid)                                                to anon, authenticated;
+grant execute on function public.get_public_tree_session(varchar, varchar)                                    to anon, authenticated;
+-- Phase 9.1 — teacher-only lobby transition (ownership re-checked in the body).
+grant execute on function public.start_tree_session(uuid)                                                      to authenticated;
 -- Phase 7.1 — required for the tree_submissions RLS policy to evaluate as anon.
 -- It leaks only a boolean.
 grant execute on function public.tree_session_is_public(uuid)                                                 to anon, authenticated;

@@ -286,7 +286,7 @@ const { parseStudentRosterFile } = await import(
 
 // Phase 7.3 Step 30 — the teacher-web Tree of Knowledge data layer.
 const {
-  createTreeSession, getTreeSession, getTreeSubmissions, endTreeSession,
+  createTreeSession, getTreeSession, getTreeSubmissions, endTreeSession, startTreeSession,
   TREE_SESSION_COLUMNS, TREE_SUBMISSION_COLUMNS, TREE_SESSION_DEFAULTS,
 } = await import(new URL('../web/src/lib/tree.ts', import.meta.url).href);
 
@@ -3182,6 +3182,11 @@ async function main() {
       min_words: TREE_SESSION.minWords,
       time_limit_minutes: TREE_SESSION.timeLimitMinutes,
       max_similarity: TREE_SESSION.maxSimilarity,
+      // Phase 9.1 — a session is created in LOBBY and only accepts answers once
+      // started. These fixtures exercise the Phase 7 semantics, so they open the
+      // bout directly (the lobby gate itself is Step 44's subject).
+      status: 'ACTIVE',
+      is_active: true,
     })
     .select('id, min_words, max_similarity, tree_seed, is_active')
     .single();
@@ -3347,6 +3352,10 @@ async function main() {
     min_words: 1,
     time_limit_minutes: 1,
     created_at: new Date(Date.now() - 3_600_000).toISOString(),
+    // Phase 9.1 — opened directly; the expiry gate (not the lobby one) is what
+    // this fixture must trip.
+    status: 'ACTIVE',
+    is_active: true,
   }).select('id').single();
   const expiredRes = await treeAnon.rpc('submit_tree_answer', {
     p_session_id: expiredSession.data?.id,
@@ -3693,9 +3702,15 @@ async function main() {
       time_limit_minutes: createdSession?.time_limit_minutes,
       max_similarity: createdSession?.max_similarity,
     }));
-  check('30b: a new session is active with no ended_at',
-    createdSession?.is_active === true && createdSession?.ended_at === null,
-    JSON.stringify({ is_active: createdSession?.is_active, ended_at: createdSession?.ended_at }));
+  check('30b: a new session starts in the LOBBY and is not yet active',
+    createdSession?.is_active === false
+      && createdSession?.ended_at === null
+      && createdSession?.status === 'LOBBY',
+    JSON.stringify({
+      is_active: createdSession?.is_active,
+      ended_at: createdSession?.ended_at,
+      status: createdSession?.status,
+    }));
   // The seed MUST be minted server-side: two sessions created in the same
   // millisecond would collide on a client-generated seed and render identically.
   check('30b: tree_seed was minted server-side as a non-null integer',
@@ -3745,6 +3760,14 @@ async function main() {
     (await getTreeSession(teacher, '00000000-0000-0000-0000-000000000000')) === null);
 
   // --- 30d. submissions round-trip ---------------------------------------
+  // Phase 9.1 — `createTreeSession` leaves the session in LOBBY, so the bout has
+  // to be started before any answer is accepted (the lobby gate itself is Step
+  // 44's subject; here it is just the necessary precondition).
+  const webStarted = await startTreeSession(teacher, webTreeSessionId);
+  check('30d: startTreeSession stamps started_at and ends_at',
+    !!webStarted.startedAt && !!webStarted.endsAt,
+    JSON.stringify(webStarted));
+
   // Two distinct answers (16 words each, over the 15-word minimum) so the
   // similarity ceiling (65%) accepts both.
   const webAnswers = [
@@ -3926,15 +3949,23 @@ async function main() {
       min_words: 8,
       time_limit_minutes: 45,
       max_similarity: 0.50,
+      // Phase 9.1 — opened directly; Step 44 owns the lobby gate.
+      status: 'ACTIVE',
+      is_active: true,
     })
-    .select('id, tree_seed, min_words')
+    .select('id, tree_seed, min_words, session_code')
     .single();
   check('31a: join session created', !joinSession.error && !!joinSession.data,
     joinSession.error?.message);
   const joinSessionId = joinSession.data?.id;
+  const joinSessionCode = joinSession.data?.session_code;
 
   // --- 31b. get_public_tree_session contract -----------------------------
-  const publicTree = await treeAnon.rpc('get_public_tree_session', { p_session_id: joinSessionId });
+  // Phase 9.1 — the RPC now takes the session CODE (the uuid still resolves, so
+  // legacy `?session=` links keep working) plus an optional student code.
+  const publicTree = await treeAnon.rpc('get_public_tree_session', {
+    p_session_code: joinSessionCode,
+  });
   check('31b: anon can load the check-in payload',
     publicTree.data?.success === true, JSON.stringify(publicTree.data));
 
@@ -3993,18 +4024,20 @@ async function main() {
 
   // --- 31d. unknown / inactive / expired ---------------------------------
   const publicMissing = await treeAnon.rpc('get_public_tree_session', {
-    p_session_id: '00000000-0000-0000-0000-000000000000',
+    p_session_code: '00000000-0000-0000-0000-000000000000',
   });
   check('31d: an unknown session reports SESSION_NOT_FOUND',
     publicMissing.data?.success === false && publicMissing.data?.code === 'SESSION_NOT_FOUND',
     JSON.stringify(publicMissing.data));
 
-  await teacher.from('tree_sessions').update({ is_active: false }).eq('id', joinSessionId);
-  const publicClosed = await treeAnon.rpc('get_public_tree_session', { p_session_id: joinSessionId });
+  await teacher.from('tree_sessions').update({ is_active: false, status: 'FINISHED' }).eq('id', joinSessionId);
+  const publicClosed = await treeAnon.rpc('get_public_tree_session', {
+    p_session_code: joinSessionId,
+  });
   check('31d: a closed session reports SESSION_INACTIVE',
     publicClosed.data?.success === false && publicClosed.data?.code === 'SESSION_INACTIVE',
     JSON.stringify(publicClosed.data));
-  await teacher.from('tree_sessions').update({ is_active: true }).eq('id', joinSessionId);
+  await teacher.from('tree_sessions').update({ is_active: true, status: 'ACTIVE' }).eq('id', joinSessionId);
 
   // A session created an hour ago with a 1-minute limit is already past its
   // window — the SPA must refuse it rather than accept an answer the write path
@@ -4017,9 +4050,11 @@ async function main() {
     min_words: 1,
     time_limit_minutes: 1,
     created_at: new Date(Date.now() - 3_600_000).toISOString(),
+    status: 'ACTIVE',
+    is_active: true,
   }).select('id').single();
   const publicExpired = await treeAnon.rpc('get_public_tree_session', {
-    p_session_id: joinExpired.data?.id,
+    p_session_code: joinExpired.data?.id,
   });
   check('31d: a session past its time limit reports SESSION_EXPIRED',
     publicExpired.data?.success === false && publicExpired.data?.code === 'SESSION_EXPIRED',
@@ -4072,7 +4107,9 @@ async function main() {
   // --- 31f. end-to-end participation simulation --------------------------
   // Mirrors the SPA flow: load -> pick -> (similarity refusal) -> rewrite ->
   // fruit appears on the tree.
-  const loadAgain = await treeAnon.rpc('get_public_tree_session', { p_session_id: joinSessionId });
+  const loadAgain = await treeAnon.rpc('get_public_tree_session', {
+    p_session_code: joinSessionCode,
+  });
   const picked = (loadAgain.data?.candidates || [])
     .find((c) => c.student_code === TREE_JOIN_MEMBERS[1].code);
   check('31f: the student can pick their own row from the loaded roster',
@@ -4143,15 +4180,27 @@ async function main() {
       && joinSecondEdit.data?.fruit_index === 2,
     JSON.stringify(joinSecondEdit.data));
 
-  // --- 31g. the SPA must never trust a non-uuid session link -------------
-  // `loadTreeActivity` guards with `isUuid` before calling the RPC; assert the
-  // guard's rule here so a refactor cannot silently drop it.
-  const uuidShape = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  check('31g: a well-formed session id passes the SPA url guard',
-    uuidShape.test(joinSessionId), joinSessionId);
-  check('31g: a malformed session link is rejected by the SPA url guard',
-    !uuidShape.test('not-a-session-id') && !uuidShape.test('<script>'),
-    'guard must reject non-uuid input');
+  // --- 31g. the SPA's session-link handling ------------------------------
+  // Phase 9.1 — `loadTreeActivity` no longer requires a uuid: the projector QR
+  // now carries the short `session_code`, and the RPC resolves EITHER form. The
+  // guard therefore only has to reject an empty token; assert the short code the
+  // QR ships is a well-formed join token, and that the SPA still normalises the
+  // three URL parameter names to the same value.
+  check('31g: the projector session_code is a short uppercase join token',
+    typeof joinSessionCode === 'string' && /^[0-9A-F]{6}$/.test(joinSessionCode),
+    String(joinSessionCode));
+  const spaUrlSource = readFileSync(new URL('../student/app.js', import.meta.url), 'utf8');
+  check('31g: the SPA accepts ?code=, ?session= and ?tree= links',
+    spaUrlSource.includes("params.get('code')")
+      && spaUrlSource.includes("params.get('session')")
+      && spaUrlSource.includes("params.get('tree')"),
+    'URL parameter resolution missing');
+  check('31g: the SPA calls get_public_tree_session with the code + student code',
+    spaUrlSource.includes('p_session_code') && spaUrlSource.includes('p_student_code'),
+    'RPC argument names not updated for Phase 9.1');
+  check('31g: the SPA rejects an empty join token before calling the RPC',
+    spaUrlSource.includes("if (!ref)") && spaUrlSource.includes('Liên kết tham gia không hợp lệ'),
+    'empty-token guard missing');
 
   // --- 31h. cleanup -------------------------------------------------------
   await teacher.from('tree_sessions').delete().eq('id', joinSessionId);
@@ -5081,8 +5130,11 @@ async function main() {
       min_words: 5,
       time_limit_minutes: 45,
       max_similarity: 0.50,
+      // Phase 9.1 — opened directly; Step 44 owns the lobby gate.
+      status: 'ACTIVE',
+      is_active: true,
     })
-    .select('id, tree_seed')
+    .select('id, tree_seed, session_code')
     .single();
   check('35a: the arena session was created', !teamSession.error && !!teamSession.data,
     teamSession.error?.message);
@@ -5094,7 +5146,9 @@ async function main() {
   });
 
   // --- 35b. team_counts + per-candidate team_number ---------------------
-  const teamPublic = await teamAnon.rpc('get_public_tree_session', { p_session_id: teamSessionId });
+  const teamPublic = await teamAnon.rpc('get_public_tree_session', {
+    p_session_code: teamSession.data?.session_code,
+  });
   check('35b: anon can load the arena session', teamPublic.data?.success === true,
     JSON.stringify(teamPublic.data));
 
@@ -7148,6 +7202,364 @@ async function main() {
 
   await teacher.from('classes').delete().eq('id', groupClassId); // members cascade
 
+  /* --- 44. Tree arena lobby, pre-flight roster & game modes (9.1) ------- */
+  // The lobby vertical: a session opens in LOBBY and refuses every answer until
+  // `start_tree_session` moves it to ACTIVE; the teacher's pre-flight
+  // `participant_config` can mark a student absent (they are then excluded from
+  // their Tổ's denominator and cannot submit) or move them to another Tổ.
+  step(44, 'tree arena lobby, pre-flight roster config, and game modes');
+
+  // --- 44a. schema ------------------------------------------------------
+  const columnSpec = (table, column) => step32Sql(
+    `select is_nullable || '|' || coalesce(column_default, '') || '|' || data_type `
+    + `from information_schema.columns where table_schema = 'public' `
+    + `and table_name = '${table}' and column_name = '${column}'`,
+  );
+  check('44a: tree_sessions.status is NOT NULL varchar defaulting to LOBBY',
+    columnSpec('tree_sessions', 'status') === "NO|'LOBBY'::character varying|character varying",
+    columnSpec('tree_sessions', 'status'));
+  check('44a: tree_sessions.game_mode defaults to BRAINSTORM',
+    columnSpec('tree_sessions', 'game_mode') === "NO|'BRAINSTORM'::character varying|character varying",
+    columnSpec('tree_sessions', 'game_mode'));
+  check('44a: tree_sessions.target_score is NOT NULL integer defaulting to 20',
+    columnSpec('tree_sessions', 'target_score') === 'NO|20|integer',
+    columnSpec('tree_sessions', 'target_score'));
+  check('44a: tree_sessions.participant_config is NOT NULL jsonb with the empty default',
+    columnSpec('tree_sessions', 'participant_config').startsWith('NO|')
+      && columnSpec('tree_sessions', 'participant_config').includes('jsonb'),
+    columnSpec('tree_sessions', 'participant_config'));
+
+  const statusCheck = step32Sql(
+    `select pg_get_constraintdef(oid) from pg_constraint `
+    + `where conrelid = 'public.tree_sessions'::regclass `
+    + `and conname = 'tree_sessions_status_check'`,
+  );
+  check('44a: the status CHECK spans LOBBY/ACTIVE/FINISHED',
+    statusCheck.includes('LOBBY') && statusCheck.includes('ACTIVE')
+      && statusCheck.includes('FINISHED'),
+    statusCheck);
+  const modeCheck = step32Sql(
+    `select pg_get_constraintdef(oid) from pg_constraint `
+    + `where conrelid = 'public.tree_sessions'::regclass `
+    + `and conname = 'tree_sessions_game_mode_check'`,
+  );
+  check('44a: the game_mode CHECK spans BRAINSTORM/SPEED_QUIZ',
+    modeCheck.includes('BRAINSTORM') && modeCheck.includes('SPEED_QUIZ'), modeCheck);
+  check('44a: the session_code unique index exists',
+    step32Sql(`select count(*) from pg_indexes where schemaname = 'public' `
+      + `and indexname = 'tree_sessions_session_code_uniq'`) === '1');
+  check('44a: the status index exists',
+    step32Sql(`select count(*) from pg_indexes where schemaname = 'public' `
+      + `and indexname = 'idx_tree_sessions_status'`) === '1');
+
+  // start_tree_session is teacher-only: Supabase grants anon EXECUTE directly, so
+  // a PUBLIC-only revoke would leak it.
+  check('44a: anon may NOT execute start_tree_session',
+    aclFor('start_tree_session(uuid)') === 'f');
+  check('44a: authenticated MAY execute start_tree_session',
+    step32Sql(`select has_function_privilege('authenticated', `
+      + `'public.start_tree_session(uuid)'::regprocedure, 'execute')`) === 't');
+  check('44a: both tree RPCs have exactly one signature each',
+    procCount('start_tree_session') === 1 && procCount('get_public_tree_session') === 1,
+    `${procCount('start_tree_session')}/${procCount('get_public_tree_session')}`);
+
+  // --- 44b. fixtures ----------------------------------------------------
+  const LOBBY_CLASS = 'E2E-LOBBY-' + String(Math.floor(1000 + Math.random() * 9000));
+  const LOBBY_MEMBERS = [
+    { code: 'E2ELOBBY01', name: 'Ngô Văn Nhất', team: 1 },
+    { code: 'E2ELOBBY02', name: 'Lý Thị Nhị', team: 1 },
+    { code: 'E2ELOBBY03', name: 'Đinh Văn Tam', team: 2 },
+    { code: 'E2ELOBBY04', name: 'Cao Thị Tư', team: 2 },
+  ];
+
+  const lobbyClass = await teacher
+    .from('classes')
+    .insert({ user_id: teacherId, name: LOBBY_CLASS, academic_year: '2026-2027' })
+    .select('id')
+    .single();
+  check('44b: the lobby test class was created', !lobbyClass.error && !!lobbyClass.data,
+    lobbyClass.error?.message);
+  const lobbyClassId = lobbyClass.data?.id;
+
+  const lobbyRoster = await saveClassMembers(
+    teacher,
+    lobbyClassId,
+    LOBBY_MEMBERS.map((m) => ({
+      student_code: m.code, full_name: m.name, dob: null, pin: null, team_number: m.team,
+    })),
+  );
+  check('44b: the class has 4 members (2 per Tổ 1/2)', lobbyRoster.saved === 4,
+    String(lobbyRoster.saved));
+
+  // The teacher's pre-flight roster: member[3] is absent, and member[2] is moved
+  // from Tổ 2 to Tổ 4 by an explicit assignment override.
+  const lobbyMemberRows = await teacher
+    .from('class_members')
+    .select('id, student_code')
+    .eq('class_id', lobbyClassId);
+  const memberIdByCode = Object.fromEntries(
+    (lobbyMemberRows.data || []).map((row) => [row.student_code, row.id]),
+  );
+  const absentMemberId = memberIdByCode.E2ELOBBY04;
+  const movedMemberId = memberIdByCode.E2ELOBBY03;
+
+  const LOBBY_CONFIG = {
+    absent_ids: [absentMemberId],
+    assignments: { [movedMemberId]: 4 },
+  };
+
+  // A session created through the web helper lands in LOBBY with is_active false.
+  // SPEED_QUIZ draws its questions from a stored exam, so a minimal one is seeded
+  // here (the mode itself, not the question pool, is what this step exercises).
+  const LOBBY_EXAM_CODE = 'LOB' + String(Math.floor(100 + Math.random() * 900));
+  await teacher.from('exams').delete().eq('code', LOBBY_EXAM_CODE);
+  const lobbyExam = await teacher
+    .from('exams')
+    .insert({
+      user_id: teacherId,
+      code: LOBBY_EXAM_CODE,
+      title: 'E2E Đề đua tốc độ',
+      duration_minutes: 15,
+      is_active: true,
+    })
+    .select('id')
+    .single();
+  check('44b: the speed-quiz source exam was created', !lobbyExam.error && !!lobbyExam.data,
+    lobbyExam.error?.message);
+
+  const lobbySession = await createTreeSession(teacher, {
+    class_id: lobbyClassId,
+    title: 'E2E Phòng chờ Cây Tri Thức',
+    question_text: 'Theo em, làm thế nào để học tập hiệu quả hơn mỗi ngày?',
+    min_words: 5,
+    time_limit_minutes: 30,
+    max_similarity: 0.6,
+    game_mode: 'SPEED_QUIZ',
+    exam_id: lobbyExam.data?.id,
+    target_score: 25,
+    participant_config: LOBBY_CONFIG,
+  });
+  check('44b: createTreeSession honours the game mode and target score',
+    lobbySession?.game_mode === 'SPEED_QUIZ' && Number(lobbySession?.target_score) === 25,
+    JSON.stringify({ mode: lobbySession?.game_mode, target: lobbySession?.target_score }));
+  check('44b: the participant_config round-trips',
+    lobbySession?.participant_config?.absent_ids?.length === 1
+      && String(lobbySession.participant_config.assignments[movedMemberId]) === '4',
+    JSON.stringify(lobbySession?.participant_config));
+  check('44b: a fresh session is in the lobby, inactive, and carries a session_code',
+    lobbySession?.status === 'LOBBY' && lobbySession?.is_active === false
+      && /^[0-9A-F]{6}$/.test(String(lobbySession?.session_code)),
+    JSON.stringify({ status: lobbySession?.status, code: lobbySession?.session_code }));
+
+  const lobbySessionId = lobbySession.id;
+  const lobbySessionCode = lobbySession.session_code;
+
+  // --- 44c. the public read resolves the pre-flight config --------------
+  const anonLobby = createClient(SB_URL, SB_PUBLISHABLE, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const lobbyPayload = await anonLobby.rpc('get_public_tree_session', {
+    p_session_code: lobbySessionCode,
+    p_student_code: 'E2ELOBBY01',
+  });
+  check('44c: a LOBBY session is readable by anon (the waiting room must load)',
+    lobbyPayload.data?.success === true, JSON.stringify(lobbyPayload.data));
+  check('44c: the payload reports the lobby status, mode and target score',
+    lobbyPayload.data?.session?.status === 'LOBBY'
+      && lobbyPayload.data?.session?.game_mode === 'SPEED_QUIZ'
+      && Number(lobbyPayload.data?.session?.target_score) === 25,
+    JSON.stringify(lobbyPayload.data?.session));
+  check('44c: the payload reports the full time budget while still in the lobby',
+    Number(lobbyPayload.data?.session?.time_remaining_seconds) === 30 * 60,
+    String(lobbyPayload.data?.session?.time_remaining_seconds));
+  check('44c: a present student resolves to their Tổ with is_absent false',
+    lobbyPayload.data?.session?.is_absent === false
+      && Number(lobbyPayload.data?.session?.team_number) === 1,
+    JSON.stringify(lobbyPayload.data?.session));
+  // team_counts excludes the absentee (4 members - 1 absent = 3 counted), and the
+  // assignment override moves member[2] from Tổ 2 to Tổ 4.
+  check('44c: team_counts excludes the absentee and honours the assignment override',
+    Number(lobbyPayload.data?.team_counts?.[1]) === 2
+      && Number(lobbyPayload.data?.team_counts?.[2]) === 0
+      && Number(lobbyPayload.data?.team_counts?.[3]) === 0
+      && Number(lobbyPayload.data?.team_counts?.[4]) === 1,
+    JSON.stringify(lobbyPayload.data?.team_counts));
+  check('44c: the candidates list carries the OVERRIDDEN team for the moved member',
+    (lobbyPayload.data?.candidates || [])
+      .find((c) => c.student_code === 'E2ELOBBY03')?.team_number === 4,
+    JSON.stringify(lobbyPayload.data?.candidates));
+
+  const absentPayload = await anonLobby.rpc('get_public_tree_session', {
+    p_session_code: lobbySessionCode,
+    p_student_code: 'E2ELOBBY04',
+  });
+  check('44c: an absent student is flagged with is_absent true and no team',
+    absentPayload.data?.session?.is_absent === true
+      && absentPayload.data?.session?.team_number === null,
+    JSON.stringify(absentPayload.data?.session));
+  check('44c: the absent student is still named in the payload (Spectator card copy)',
+    absentPayload.data?.session?.student_name === 'Cao Thị Tư',
+    String(absentPayload.data?.session?.student_name));
+
+  // --- 44d. submission is refused while in the lobby --------------------
+  const lobbySubmit = await anonLobby.rpc('submit_tree_answer', {
+    p_session_id: lobbySessionId,
+    p_student_code: 'E2ELOBBY01',
+    p_student_name: 'Ngô Văn Nhất',
+    p_answer_text: 'Hoc tap hieu qua can co muc tieu ro rang va su kien tri moi ngay',
+  });
+  check('44d: a LOBBY session refuses a submission with NOT_STARTED',
+    lobbySubmit.data?.success === false && lobbySubmit.data?.code === 'NOT_STARTED',
+    JSON.stringify(lobbySubmit.data));
+
+  // --- 44e. start_tree_session: the atomic LOBBY -> ACTIVE transition ----
+  const started = await startTreeSession(teacher, lobbySessionId);
+  check('44e: startTreeSession reports the stamped window',
+    !!started.startedAt && !!started.endsAt, JSON.stringify(started));
+
+  const afterStart = await teacher
+    .from('tree_sessions')
+    .select('status, is_active, started_at, ends_at')
+    .eq('id', lobbySessionId)
+    .single();
+  check('44e: the session is now ACTIVE + is_active with started_at and ends_at stamped',
+    afterStart.data?.status === 'ACTIVE' && afterStart.data?.is_active === true
+      && !!afterStart.data?.started_at && !!afterStart.data?.ends_at,
+    JSON.stringify(afterStart.data));
+
+  let secondStart = '';
+  try {
+    await startTreeSession(teacher, lobbySessionId);
+  } catch (err) {
+    secondStart = String(err?.message ?? err);
+  }
+  check('44e: starting an already-started session is refused with INVALID_STATE',
+    secondStart.includes('đã bắt đầu'), secondStart);
+
+  // --- 44f. submissions now succeed, and the absentee is refused --------
+  const activePayload = await anonLobby.rpc('get_public_tree_session', {
+    p_session_code: lobbySessionCode,
+    p_student_code: 'E2ELOBBY01',
+  });
+  check('44f: the payload reports ACTIVE with a seconds-level countdown',
+    activePayload.data?.session?.status === 'ACTIVE'
+      && Number(activePayload.data?.session?.time_remaining_seconds) > 0
+      && Number(activePayload.data?.session?.time_remaining_seconds) <= 30 * 60,
+    JSON.stringify({
+      status: activePayload.data?.session?.status,
+      remaining: activePayload.data?.session?.time_remaining_seconds,
+    }));
+
+  const nowSubmit = await anonLobby.rpc('submit_tree_answer', {
+    p_session_id: lobbySessionId,
+    p_student_code: 'E2ELOBBY01',
+    p_student_name: 'Ngô Văn Nhất',
+    p_answer_text: 'Hoc tap hieu qua can co muc tieu ro rang va su kien tri moi ngay',
+  });
+  check('44f: a submission is accepted once the session is ACTIVE',
+    nowSubmit.data?.success === true, JSON.stringify(nowSubmit.data));
+
+  const absentSubmit = await anonLobby.rpc('submit_tree_answer', {
+    p_session_id: lobbySessionId,
+    p_student_code: 'E2ELOBBY04',
+    p_student_name: 'Cao Thị Tư',
+    p_answer_text: 'Em nghi rang can phai co gang that nhieu thi moi thanh cong trong hoc tap',
+  });
+  check('44f: an absent student is refused with STUDENT_ABSENT',
+    absentSubmit.data?.success === false && absentSubmit.data?.code === 'STUDENT_ABSENT',
+    JSON.stringify(absentSubmit.data));
+
+  // The assignment override routes the moved member's fruit to Tổ 4, not to the
+  // Tổ 2 their roster row still carries.
+  const movedSubmit = await anonLobby.rpc('submit_tree_answer', {
+    p_session_id: lobbySessionId,
+    p_student_code: 'E2ELOBBY03',
+    p_student_name: 'Đinh Văn Tam',
+    p_answer_text: 'De hoc tot thi can phai kien tri va luon luon tim toi kham pha',
+  });
+  check('44f: the assignment override routes the submission to the overridden Tổ',
+    movedSubmit.data?.success === true && movedSubmit.data?.team_number === 4,
+    JSON.stringify(movedSubmit.data));
+
+  // --- 44g. the waiting-room promotion path -----------------------------
+  // A separate LOBBY session, so the NOT_STARTED (44d) and the promotion checks
+  // cannot interfere with the one already started above.
+  const promoSession = await createTreeSession(teacher, {
+    class_id: lobbyClassId,
+    title: 'E2E Phòng chờ khuyến mãi',
+    question_text: 'Em hay ke mot viec tot em da lam trong tuan nay cho lop nghe?',
+    min_words: 3,
+    time_limit_minutes: 20,
+    max_similarity: 0.6,
+  });
+  check('44g: the second lobby session is created via the web default (BRAINSTORM)',
+    promoSession?.game_mode === 'BRAINSTORM' && promoSession?.status === 'LOBBY',
+    JSON.stringify({ mode: promoSession?.game_mode, status: promoSession?.status }));
+  const promoStarted = await startTreeSession(teacher, promoSession.id);
+  check('44g: the second session can also be started',
+    !!promoStarted.startedAt, JSON.stringify(promoStarted));
+  await teacher.from('tree_sessions').delete().eq('id', promoSession.id);
+
+  // --- 44h. teacher web + SPA are wired for the lobby -------------------
+  const treeLibSrc44 = readFileSync(new URL('../web/src/lib/tree.ts', import.meta.url), 'utf8');
+  const typesSrc44 = readFileSync(new URL('../web/src/lib/types.ts', import.meta.url), 'utf8');
+  const modalSrc44 = readFileSync(
+    new URL('../web/src/components/tree/CreateTreeSessionModal.tsx', import.meta.url), 'utf8');
+  const lobbySrc44 = readFileSync(
+    new URL('../web/src/components/tree/TreeLobby.tsx', import.meta.url), 'utf8');
+  const plannerSrc44 = readFileSync(
+    new URL('../web/src/components/tree/TreeRosterPlanner.tsx', import.meta.url), 'utf8');
+  const projectorSrc44 = readFileSync(
+    new URL('../web/src/components/tree/TreeProjector.tsx', import.meta.url), 'utf8');
+  const spaSrc44 = readFileSync(new URL('../student/app.js', import.meta.url), 'utf8');
+  const spaHtml44 = readFileSync(new URL('../student/index.html', import.meta.url), 'utf8');
+
+  check('44h: the web tree layer wraps start_tree_session',
+    treeLibSrc44.includes("rpc('start_tree_session'"), 'startTreeSession wrapper missing');
+  check('44h: TREE_SESSION_COLUMNS selects every Phase 9.1 column',
+    ['status', 'session_code', 'game_mode', 'exam_id', 'target_score', 'participant_config',
+     'started_at', 'ends_at'].every((c) => TREE_SESSION_COLUMNS.includes(c)),
+    TREE_SESSION_COLUMNS);
+  check('44h: types define the lobby status and game-mode unions',
+    typesSrc44.includes("'LOBBY' | 'ACTIVE' | 'FINISHED'")
+      && typesSrc44.includes("'BRAINSTORM' | 'SPEED_QUIZ'"),
+    'the Phase 9.1 unions are missing');
+  check('44h: the creation modal offers both game modes and the roster planner',
+    modalSrc44.includes('Bão não từ khóa') && modalSrc44.includes('Đua tốc độ trắc nghiệm')
+      && modalSrc44.includes('TreeRosterPlanner'), 'the pre-flight modal is incomplete');
+  check('44h: the roster planner offers balance + absent actions',
+    plannerSrc44.includes('Chia đều 4 cây') && plannerSrc44.includes('Vắng mặt'),
+    'the planner actions are missing');
+  check('44h: the lobby renders a QR, the PIN and the start button',
+    lobbySrc44.includes('TreeQrCode') && lobbySrc44.includes('session_code')
+      && lobbySrc44.includes('BẮT ĐẦU THI ĐẤU'),
+    'the lobby view is incomplete');
+  check('44h: the projector branches on the lobby status',
+    projectorSrc44.includes("status === 'LOBBY'") && projectorSrc44.includes('TreeLobby'),
+    'the projector lobby branch is missing');
+  check('44h: the SPA has spectator and lobby cards in its markup',
+    spaHtml44.includes('id="treeSpectatorCard"') && spaHtml44.includes('id="treeLobbyCard"'),
+    'the SPA cards are missing');
+  check('44h: the SPA subscribes to tree_sessions for the lobby promotion',
+    spaSrc44.includes("table: 'tree_sessions'") && spaSrc44.includes('subscribeTreeSessionChannel'),
+    'the session subscription is missing');
+  check('44h: the SPA renders a mode-specific prompt and a countdown',
+    spaSrc44.includes('applyTreeModePresentation')
+      && spaSrc44.includes("gameMode === 'SPEED_QUIZ'")
+      && spaSrc44.includes('startTreeCountdown'),
+    'the SPA game-mode branch is missing');
+  check('44h: the SPA maps the new refusal codes to the lobby/spectator states',
+    spaSrc44.includes("payload.code === 'NOT_STARTED'")
+      && spaSrc44.includes("payload.code === 'STUDENT_ABSENT'"),
+    'the SPA does not handle the new refusal codes');
+
+  // --- 44i. cleanup ------------------------------------------------------
+  await teacher.from('tree_sessions').delete().eq('id', lobbySessionId);
+  const lobbyClassDelete = await teacher.from('classes').delete().eq('id', lobbyClassId);
+  check('44i: the lobby test class deletes once its sessions are gone',
+    !lobbyClassDelete.error, lobbyClassDelete.error?.message);
+  await teacher.from('exams').delete().eq('code', LOBBY_EXAM_CODE);
+
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);
   await teacher.from('exams').delete().eq('code', EXAM.code); // cascades
@@ -7179,6 +7591,8 @@ async function main() {
   // Phase 8.11 — Step 43's scaffold is deleted in-step; this is the safety net
   // for an aborted run (the name carries a random suffix, so match the prefix).
   await teacher.from('classes').delete().like('name', 'E2E-GRP-%');
+  // Phase 9.1 — Step 44's scaffold, same safety net (tree_sessions cascade).
+  await teacher.from('classes').delete().like('name', 'E2E-LOBBY-%');
 
   console.log(`\n${'='.repeat(74)}`);
   console.log(`RESULT: ${passed} passed, ${failed} failed`);
