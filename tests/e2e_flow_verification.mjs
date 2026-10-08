@@ -7918,13 +7918,14 @@ async function main() {
   check('47d: ProceduralTree3D implements golden latch aura and runic base ring',
     tree3DSrc.includes('isGoldenLatch') && tree3DSrc.includes('ringGeometry'), 'missing golden latch aura');
 
-  check('47d: ArenaStage3D enables shadows and preserveDrawingBuffer for snapshots',
-    stage3DSrc.includes('shadows') && stage3DSrc.includes('preserveDrawingBuffer: true'), 'missing shadows/preserveDrawingBuffer');
+  check('47d: ArenaStage3D enables shadows with PCFShadowMap and in-scene background color for clean snapshots',
+    stage3DSrc.includes('PCFShadowMap') && stage3DSrc.includes('attach="background"') && stage3DSrc.includes('preserveDrawingBuffer: true'),
+    'missing PCFShadowMap/background/preserveDrawingBuffer');
   check('47d: ArenaStage3D renders floating island diorama with atmospheric fog and sparkles',
     stage3DSrc.includes('<fog') && stage3DSrc.includes('<Sparkles') && stage3DSrc.includes('cylinderGeometry'),
     'missing diorama/fog/sparkles');
   check('47d: ArenaStage3D configures 4 symmetric tree positions',
-    stage3DSrc.includes('[-6.5, 0, 0]') && stage3DSrc.includes('[6.5, 0, 0]'), 'missing 4 tree positions');
+    stage3DSrc.includes('[-6.3, 0, 0]') && stage3DSrc.includes('[6.3, 0, 0]'), 'missing 4 tree positions');
 
   check('47d: Simulator page uses dynamic import with ssr: false for Canvas safety',
     simPageSrc.includes('dynamic(') && simPageSrc.includes('ssr: false'), 'missing dynamic ssr:false');

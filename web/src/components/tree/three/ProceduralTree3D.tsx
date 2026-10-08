@@ -21,56 +21,42 @@ export default function ProceduralTree3D({
   position = [0, 0, 0]
 }: ProceduralTree3DProps) {
   const groupRef = useRef<THREE.Group>(null);
-  const foliageRef = useRef<THREE.Group>(null);
+  const crownRef = useRef<THREE.Group>(null);
+  const branchGroupRef = useRef<THREE.Group>(null);
   const currentGrowthRef = useRef(0.15);
   const colors = TEAM_3D_PALETTES[teamNumber] || TEAM_3D_PALETTES[1];
 
-  // Natural foliage cluster distribution (asymmetrical and organic)
-  const canopyClusters = useMemo(() => [
-    { pos: [0, 1.2, 0] as [number, number, number], scale: 1.45, isHighlight: false },
-    { pos: [-0.85, 0.6, 0.4] as [number, number, number], scale: 1.15, isHighlight: true },
-    { pos: [0.95, 0.7, -0.3] as [number, number, number], scale: 1.2, isHighlight: false },
-    { pos: [0.1, 1.9, -0.2] as [number, number, number], scale: 1.05, isHighlight: true },
-    { pos: [-0.4, 0.8, -0.8] as [number, number, number], scale: 0.95, isHighlight: false },
-    { pos: [0.5, 0.5, 0.7] as [number, number, number], scale: 0.9, isHighlight: true },
+  // 3 Primary boughs spread radially at 120° angles
+  const branchConfigs = useMemo(() => [
+    { angle: 0, tilt: 0.55, length: 1.2, scale: 1.0 },
+    { angle: (Math.PI * 2) / 3, tilt: 0.52, length: 1.15, scale: 0.95 },
+    { angle: (Math.PI * 4) / 3, tilt: 0.58, length: 1.25, scale: 1.05 }
   ], []);
-
-  // Compute dew positions directly anchored to canopy surfaces
-  const dewPositions = useMemo(() => {
-    const list: [number, number, number][] = [];
-    const count = 12;
-    for (let i = 0; i < count; i++) {
-      const cluster = canopyClusters[i % canopyClusters.length];
-      const angle = (i * 2.39996); // Golden ratio angle
-      const r = 0.95 * cluster.scale;
-      list.push([
-        cluster.pos[0] + Math.cos(angle) * r,
-        cluster.pos[1] + (Math.sin(i) * 0.4) * cluster.scale,
-        cluster.pos[2] + Math.sin(angle) * r
-      ]);
-    }
-    return list;
-  }, [canopyClusters]);
 
   useFrame((state, delta) => {
     if (!groupRef.current) return;
-    // Safe clock reading without deprecation
     const time = state.clock.elapsedTime;
 
-    // Smooth growth lerp
-    const target = Math.max(0.15, vitality);
-    currentGrowthRef.current += (target - currentGrowthRef.current) * Math.min(1, delta * 3.5);
+    // Smooth growth interpolation
+    const target = Math.max(0.12, vitality);
+    currentGrowthRef.current += (target - currentGrowthRef.current) * Math.min(1, delta * 3.0);
+    const g = currentGrowthRef.current;
 
-    // Natural harmonic wind swaying
-    const sway = Math.sin(time * 1.6 * windSpeed + teamNumber * 1.5) * 0.035 * windSpeed;
-    const twist = Math.cos(time * 1.1 * windSpeed + teamNumber) * 0.02 * windSpeed;
+    // Gentle wind physics
+    const sway = Math.sin(time * 1.5 * windSpeed + teamNumber * 1.3) * 0.03 * windSpeed;
     groupRef.current.rotation.z = sway;
-    groupRef.current.rotation.x = twist;
+    groupRef.current.rotation.x = Math.cos(time * 1.1 * windSpeed) * 0.015 * windSpeed;
 
-    if (foliageRef.current) {
-      // Breathing scale pulse
-      const breathe = 1 + Math.sin(time * 2.2 + teamNumber) * 0.015;
-      foliageRef.current.scale.setScalar(currentGrowthRef.current * breathe);
+    // Crown scale expands with growth
+    if (crownRef.current) {
+      const crownScale = 0.3 + g * 0.9;
+      crownRef.current.scale.setScalar(crownScale);
+    }
+
+    // Branch extensions: side branches emerge once vitality > 0.2
+    if (branchGroupRef.current) {
+      const branchProgress = Math.max(0.001, (g - 0.2) / 0.8);
+      branchGroupRef.current.scale.set(branchProgress, branchProgress, branchProgress);
     }
   });
 
@@ -78,87 +64,79 @@ export default function ProceduralTree3D({
 
   return (
     <group ref={groupRef} position={position}>
-      {/* 1. ROOT FLARE (Chân rễ bám đất vững chãi) */}
-      <mesh position={[0, 0.25, 0]} castShadow receiveShadow>
-        <cylinderGeometry args={[0.42, 0.85, 0.5, 8]} />
+      {/* 1. ROOT BASE */}
+      <mesh position={[0, 0.15, 0]} castShadow receiveShadow>
+        <cylinderGeometry args={[0.35, 0.65, 0.3, 8]} />
         <meshStandardMaterial color={colors.trunkDark} flatShading roughness={0.9} />
       </mesh>
 
-      {/* 2. LOWER TAPERED TRUNK (Thân dưới uốn lượn) */}
-      <mesh position={[0, 1.2, 0]} rotation={[0.03, 0, -0.02]} castShadow receiveShadow>
-        <cylinderGeometry args={[0.3, 0.45, 1.5, 8]} />
-        <meshStandardMaterial color={colors.trunk} flatShading roughness={0.9} />
+      {/* 2. MAIN TRUNK */}
+      <mesh position={[0, 1.1, 0]} castShadow receiveShadow>
+        <cylinderGeometry args={[0.26, 0.38, 1.6, 8]} />
+        <meshStandardMaterial color={colors.trunk} flatShading roughness={0.88} />
       </mesh>
 
-      {/* 3. UPPER TRUNK & BRANCH FORKS (Thân trên đâm cành) */}
-      <group position={[0, 2.0, 0]}>
-        <mesh position={[0, 0.4, 0]} castShadow>
-          <cylinderGeometry args={[0.22, 0.3, 0.9, 8]} />
-          <meshStandardMaterial color={colors.trunk} flatShading roughness={0.9} />
-        </mesh>
-        {/* Nhánh trái */}
-        <mesh position={[-0.45, 0.35, 0.1]} rotation={[0, 0, 0.65]} castShadow>
-          <cylinderGeometry args={[0.14, 0.22, 1.0, 7]} />
-          <meshStandardMaterial color={colors.trunk} flatShading roughness={0.9} />
-        </mesh>
-        {/* Nhánh phải */}
-        <mesh position={[0.5, 0.4, -0.1]} rotation={[0, 0, -0.6]} castShadow>
-          <cylinderGeometry args={[0.14, 0.22, 1.1, 7]} />
-          <meshStandardMaterial color={colors.trunk} flatShading roughness={0.9} />
+      {/* 3. CENTRAL CROWN (Crown foliage that exists even at low vitality) */}
+      <group ref={crownRef} position={[0, 2.1, 0]}>
+        <mesh position={[0, 0.6, 0]} castShadow receiveShadow>
+          <icosahedronGeometry args={[1.05, 1]} />
+          <meshStandardMaterial
+            color={isGoldenLatch ? colors.goldenAura : colors.foliageHighlight}
+            flatShading
+            roughness={0.7}
+            emissive={isGoldenLatch ? colors.goldenAura : '#000000'}
+            emissiveIntensity={isGoldenLatch ? 0.35 : 0}
+          />
         </mesh>
       </group>
 
-      {/* 4. FACETED LOW-POLY CANOPY (Tán lá đa diện giác cắt tinh thể) */}
-      <group ref={foliageRef} position={[0, 2.7, 0]}>
-        {canopyClusters.map((cluster, i) => (
-          <mesh
-            key={i}
-            position={cluster.pos}
-            scale={cluster.scale}
-            castShadow
-            receiveShadow
-          >
-            {/* Icosahedron detail=1 creates beautiful diamond-like facets */}
-            <icosahedronGeometry args={[1.0, 1]} />
-            <meshStandardMaterial
-              color={
-                isGoldenLatch
-                  ? colors.goldenAura
-                  : cluster.isHighlight
-                  ? colors.foliageHighlight
-                  : colors.foliageBase
-              }
-              flatShading
-              roughness={0.7}
-              emissive={isGoldenLatch ? colors.goldenAura : '#000000'}
-              emissiveIntensity={isGoldenLatch ? 0.4 : 0}
-            />
-          </mesh>
-        ))}
+      {/* 4. RADIAL SIDE BRANCHES (Parents of secondary canopy clusters) */}
+      <group ref={branchGroupRef} position={[0, 1.7, 0]}>
+        {branchConfigs.map((b, idx) => {
+          return (
+            <group key={idx} rotation={[0, b.angle, 0]}>
+              {/* Branch Cylinder */}
+              <mesh position={[0.45 * b.length, 0.35, 0]} rotation={[0, 0, -b.tilt]} castShadow>
+                <cylinderGeometry args={[0.11, 0.18, b.length, 7]} />
+                <meshStandardMaterial color={colors.trunk} flatShading roughness={0.9} />
+              </mesh>
 
-        {/* 5. ORGANIC DEW DROPS / GLOWING FRUITS */}
-        {dewCount > 0 &&
-          dewPositions.slice(0, Math.min(dewCount, 12)).map((pos, idx) => (
-            <mesh key={idx} position={pos} scale={0.22} castShadow>
-              <icosahedronGeometry args={[1, 1]} />
-              <meshStandardMaterial
-                color={colors.dew}
-                emissive={colors.dew}
-                emissiveIntensity={1.4}
-                flatShading
-                roughness={0.2}
-              />
-            </mesh>
-          ))}
+              {/* Foliage Cloud attached securely at the branch tip */}
+              <mesh position={[0.9 * b.length, 0.8, 0]} scale={0.95 * b.scale} castShadow receiveShadow>
+                <icosahedronGeometry args={[0.9, 1]} />
+                <meshStandardMaterial
+                  color={isGoldenLatch ? colors.goldenAura : (idx % 2 === 0 ? colors.foliageBase : colors.foliageHighlight)}
+                  flatShading
+                  roughness={0.7}
+                  emissive={isGoldenLatch ? colors.goldenAura : '#000000'}
+                  emissiveIntensity={isGoldenLatch ? 0.35 : 0}
+                />
+              </mesh>
+
+              {/* Dew drops nested on branch leaves */}
+              {dewCount > idx * 2 && (
+                <mesh position={[0.9 * b.length, 1.25, 0.3]} scale={0.2} castShadow>
+                  <icosahedronGeometry args={[1, 1]} />
+                  <meshStandardMaterial
+                    color={colors.dew}
+                    emissive={colors.dew}
+                    emissiveIntensity={1.2}
+                    flatShading
+                  />
+                </mesh>
+              )}
+            </group>
+          );
+        })}
       </group>
 
-      {/* 6. GLOWING TEAM RUNIC BASE RING */}
-      <mesh position={[0, 0.05, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-        <ringGeometry args={[1.15, 1.35, 32]} />
+      {/* 5. TEAM PEDESTAL RUNIC RING */}
+      <mesh position={[0, 0.04, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[1.1, 1.3, 32]} />
         <meshBasicMaterial
           color={isGoldenLatch ? colors.goldenAura : colors.pedestalGlow}
           transparent
-          opacity={isGoldenLatch ? 0.95 : 0.65}
+          opacity={isGoldenLatch ? 0.95 : 0.75}
           side={THREE.DoubleSide}
         />
       </mesh>

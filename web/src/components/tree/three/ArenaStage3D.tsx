@@ -4,6 +4,7 @@ import React, { useEffect, useRef } from 'react';
 import { Canvas, useThree } from '@react-three/fiber';
 import { OrbitControls, ContactShadows, Sparkles } from '@react-three/drei';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
+import * as THREE from 'three';
 import ProceduralTree3D from './ProceduralTree3D';
 
 export interface TreeStageData {
@@ -30,13 +31,13 @@ function CameraController({ preset, enableOrbit }: { preset?: CameraPreset; enab
     if (preset === 'front') {
       camera.position.set(0, 3.5, 14);
     } else if (preset === 'perspective') {
-      camera.position.set(0, 4.5, 13.5);
+      camera.position.set(0, 4.2, 13.5);
     } else if (preset === 'top') {
       camera.position.set(0, 16, 7);
     }
-    camera.lookAt(0, 2.2, 0);
+    camera.lookAt(0, 2.0, 0);
     if (controlsRef.current) {
-      controlsRef.current.target.set(0, 2.2, 0);
+      controlsRef.current.target.set(0, 2.0, 0);
       controlsRef.current.update();
     }
   }, [preset, camera]);
@@ -45,7 +46,7 @@ function CameraController({ preset, enableOrbit }: { preset?: CameraPreset; enab
     <OrbitControls
       ref={controlsRef}
       makeDefault
-      target={[0, 2.2, 0]}
+      target={[0, 2.0, 0]}
       maxPolarAngle={Math.PI / 2 - 0.05}
       minDistance={7}
       maxDistance={22}
@@ -60,65 +61,65 @@ export default function ArenaStage3D({
   cameraPreset = 'perspective'
 }: ArenaStage3DProps) {
   const treePositions: [number, number, number][] = [
-    [-6.5, 0, 0],
-    [-2.2, 0, 0],
-    [2.2, 0, 0],
-    [6.5, 0, 0]
+    [-6.3, 0, 0],
+    [-2.1, 0, 0],
+    [2.1, 0, 0],
+    [6.3, 0, 0]
   ];
 
   return (
-    <div className="w-full h-full relative bg-gradient-to-b from-slate-950 via-slate-900 to-indigo-950">
+    <div className="w-full h-full relative">
       <Canvas
-        shadows
+        shadows={{ type: THREE.PCFShadowMap }}
         gl={{ preserveDrawingBuffer: true, antialias: true }}
-        camera={{ position: [0, 4.5, 13.5], fov: 42 }}
+        camera={{ position: [0, 4.2, 13.5], fov: 42 }}
       >
-        {/* Atmospheric Fog */}
-        <fog attach="fog" args={['#090d16', 16, 36]} />
+        {/* IN-SCENE SKY BACKGROUND (Ensures PNG snapshot captures deep night sky) */}
+        <color attach="background" args={['#080e1a']} />
+        <fog attach="fog" args={['#080e1a', 15, 38]} />
 
-        {/* 1. STUDIO WARM LIGHTING SETUP */}
-        <ambientLight intensity={0.7} />
+        {/* LIGHTING SETUP */}
+        <ambientLight intensity={0.8} />
         <directionalLight
-          position={[12, 18, 10]}
-          intensity={1.8}
-          color="#fffbeb"
+          position={[10, 16, 12]}
+          intensity={1.7}
+          color="#fffaf0"
           castShadow
           shadow-mapSize-width={2048}
           shadow-mapSize-height={2048}
-          shadow-bias={-0.0001}
         />
-        {/* Soft cool backlight */}
-        <directionalLight position={[-10, 8, -10]} intensity={0.5} color="#818cf8" />
+        <directionalLight position={[-10, 6, -10]} intensity={0.4} color="#818cf8" />
 
-        {/* 2. FLOATING SPORES / MAGICAL FIREFLIES */}
-        <Sparkles count={50} scale={[24, 8, 12]} size={2.8} speed={0.5} opacity={0.5} color="#67e8f9" />
+        {/* MAGICAL SPORES / FIREFLIES */}
+        <Sparkles count={45} scale={[22, 7, 10]} size={2.5} speed={0.4} opacity={0.5} color="#93c5fd" />
 
-        {/* 3. DIORAMA FLOATING ISLAND (Hòn đảo lơ lửng) */}
+        {/* DIORAMA PLATFORM TERRACE */}
         <group position={[0, -0.05, 0]}>
-          {/* Grassy Top Plateau */}
-          <mesh position={[0, -0.2, 0]} receiveShadow>
-            <cylinderGeometry args={[12.5, 12.0, 0.4, 32]} />
-            <meshStandardMaterial color="#2d4a22" roughness={0.85} flatShading />
-          </mesh>
-          {/* Rocky Earth Cliff Base */}
-          <mesh position={[0, -1.8, 0]}>
-            <cylinderGeometry args={[12.0, 7.5, 2.8, 16]} />
-            <meshStandardMaterial color="#261c14" roughness={0.95} flatShading />
+          {/* Main Flat Floating Terrace */}
+          <mesh position={[0, -0.25, 0]} receiveShadow>
+            <cylinderGeometry args={[10.5, 10.0, 0.45, 48]} />
+            <meshStandardMaterial color="#1e293b" roughness={0.8} flatShading />
           </mesh>
 
-          {/* 4 Team Stone Pedestals */}
+          {/* Undercliff Foundation */}
+          <mesh position={[0, -1.8, 0]}>
+            <cylinderGeometry args={[9.8, 5.5, 2.7, 16]} />
+            <meshStandardMaterial color="#0f172a" roughness={0.95} flatShading />
+          </mesh>
+
+          {/* 4 Team Circular Stone Pedestals */}
           {treePositions.map((pos, idx) => (
             <mesh key={idx} position={[pos[0], 0.05, pos[2]]} receiveShadow>
-              <cylinderGeometry args={[1.5, 1.65, 0.15, 24]} />
-              <meshStandardMaterial color="#334155" roughness={0.75} />
+              <cylinderGeometry args={[1.45, 1.55, 0.12, 24]} />
+              <meshStandardMaterial color="#334155" roughness={0.7} />
             </mesh>
           ))}
         </group>
 
-        {/* Contact Shadows grounding the trees */}
-        <ContactShadows position={[0, 0.1, 0]} opacity={0.75} scale={26} blur={1.8} far={4} />
+        {/* CONTACT SHADOWS */}
+        <ContactShadows position={[0, 0.02, 0]} opacity={0.7} scale={22} blur={1.6} far={4} />
 
-        {/* 4. THE 4 LOW-POLY TREES */}
+        {/* THE 4 PROCEDURAL TREES */}
         {trees.map((t, idx) => (
           <ProceduralTree3D
             key={t.teamNumber}
@@ -130,7 +131,7 @@ export default function ArenaStage3D({
           />
         ))}
 
-        {/* 5. CONTROLS & CAMERA */}
+        {/* CONTROLS */}
         <CameraController preset={cameraPreset} enableOrbit={enableOrbit} />
       </Canvas>
     </div>
