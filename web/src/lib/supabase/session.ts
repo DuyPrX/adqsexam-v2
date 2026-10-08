@@ -42,9 +42,13 @@ export async function updateSession(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
-  // Gate the teacher area. /login and the auth callback stay public.
+  // Gate the teacher area. /login, /tree/simulator, and the auth callback stay public.
   const { pathname } = request.nextUrl;
-  const isProtected = pathname !== '/login' && !pathname.startsWith('/auth');
+  const isPublicRoute =
+    pathname === '/login' ||
+    pathname.startsWith('/auth') ||
+    pathname.startsWith('/tree/simulator');
+  const isProtected = !isPublicRoute;
 
   if (isProtected && !user) {
     const url = request.nextUrl.clone();
