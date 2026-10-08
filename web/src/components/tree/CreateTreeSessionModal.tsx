@@ -299,14 +299,20 @@ export function CreateTreeSessionModal({ klass, onClose }: CreateTreeSessionModa
               />
             </label>
 
-            {/* Phase 9.1 — how many points a team must reach to win. Phase 9.2 —
-                in BRAINSTORM it is DERIVED from the roster (the largest Tổ's
-                present headcount) and shown read-only, because a free-text bout
-                is won by everyone on a team answering exactly once. */}
-            <div className="block space-y-1">
-              <span className="text-sm font-semibold text-slate-700">Điểm mục tiêu hoàn thành (100%)</span>
-              {isSpeedQuiz ? (
+            {/* Phase 9.3 — the target score is a SPEED_QUIZ-only concept. In
+                BRAINSTORM a bout is won by every present member of a team
+                answering once, so the value is DERIVED (never typed) and the
+                field is hidden entirely rather than shown read-only: a disabled
+                input still invites the teacher to try to change it. The derived
+                value is still submitted (see the sync effect above) so the DB's
+                `target_score > 0` CHECK holds. */}
+            {isSpeedQuiz && (
+              <label className="block space-y-1">
+                <span className="text-sm font-semibold text-slate-700">
+                  Điểm mục tiêu hoàn thành (100%)
+                </span>
                 <input
+                  id="targetScoreInput"
                   type="number"
                   min={1}
                   max={200}
@@ -314,18 +320,13 @@ export function CreateTreeSessionModal({ klass, onClose }: CreateTreeSessionModa
                   onChange={(event) => setTargetScore(Math.max(1, parseInt(event.target.value, 10) || 20))}
                   className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-slate-400"
                   placeholder="Ví dụ: 20"
+                  required
                 />
-              ) : (
-                <div className="flex items-center justify-between rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
-                  <span>
-                    Tự động theo sĩ số tổ: <strong>{brainstormAutoTarget} điểm</strong>
-                  </span>
-                  <span className="rounded border border-blue-200 bg-white px-2 py-0.5 text-xs text-blue-600">
-                    🎯 1 câu/học sinh
-                  </span>
-                </div>
-              )}
-            </div>
+                <span className="block text-xs text-slate-500">
+                  Số câu trả lời đúng để cây vươn tới trạng thái nở hoa.
+                </span>
+              </label>
+            )}
           </div>
 
           <label className="block space-y-1">

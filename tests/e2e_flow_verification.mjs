@@ -7572,16 +7572,19 @@ async function main() {
   //     vitality/completion is normalised against its OWN present headcount.
   step(45, 'natural roster assignment + adaptive brainstorm target score');
 
-  // A roster whose natural teams are deliberately UNEVEN and NOT round-robin
+  // A roster whose natural split is deliberately UNEVEN and NOT round-robin
   // ordered, so any accidental modulo-4 redistribution is visible: Tổ 1 has 3
-  // members, Tổ 2 has 1, Tổ 3 has 2, Tổ 4 has 0.
+  // members, Tổ 2 has 1, Tổ 3 has 2, Tổ 4 has 0. `group_number` is the value the
+  // Phase 9.3 resolver reads FIRST, so it is set consistently with the intended
+  // Tổ (`((group - 1) % 4) + 1`), with `team_number` carried along to prove it is
+  // ignored when a group exists.
   const planMembers = [
-    { id: 'm1', team_number: 1, group_number: 1 },
-    { id: 'm2', team_number: 1, group_number: 5 },
-    { id: 'm3', team_number: 1, group_number: 3 },
-    { id: 'm4', team_number: 2, group_number: 2 },
-    { id: 'm5', team_number: 3, group_number: 4 },
-    { id: 'm6', team_number: 3, group_number: 7 },
+    { id: 'm1', team_number: 1, group_number: 1 }, // (1-1)%4+1 = 1
+    { id: 'm2', team_number: 1, group_number: 5 }, // (5-1)%4+1 = 1
+    { id: 'm3', team_number: 1, group_number: 1 }, // 1
+    { id: 'm4', team_number: 2, group_number: 2 }, // 2
+    { id: 'm5', team_number: 3, group_number: 3 }, // 3
+    { id: 'm6', team_number: 3, group_number: 7 }, // (7-1)%4+1 = 3
   ];
 
   // --- 45a. initial state preserves the natural teams -------------------
@@ -7600,17 +7603,25 @@ async function main() {
       && naturalCounts[3] === 2 && naturalCounts[4] === 0,
     JSON.stringify(naturalCounts));
 
-  // The fallback chain: no `team_number` -> group_number mapped modulo 4.
-  const fallbackAssignments = buildInitialAssignments([
-    { id: 'g1', team_number: null, group_number: 1 },
-    { id: 'g2', team_number: null, group_number: 5 }, // (5-1)%4+1 = 1
+  // Phase 9.3 — `group_number` is read FIRST. With both fields present (and in
+  // conflict) the group wins; `team_number` is consulted only when the group is
+  // missing/null.
+  const priorityAssignments = buildInitialAssignments([
+    { id: 'g1', team_number: 2, group_number: 1 }, // group wins -> 1 (not 2)
+    { id: 'g2', team_number: 4, group_number: 5 }, // group wins -> 1 (not 4)
     { id: 'g3', team_number: null, group_number: 4 }, // (4-1)%4+1 = 4
-    { id: 'g4', team_number: null, group_number: null }, // -> 1
   ]);
-  check('45a: a missing team_number falls back to ((group_number - 1) % 4) + 1, else 1',
-    fallbackAssignments.g1 === 1 && fallbackAssignments.g2 === 1
-      && fallbackAssignments.g3 === 4 && fallbackAssignments.g4 === 1,
-    JSON.stringify(fallbackAssignments));
+  check('45a: group_number is prioritized over a conflicting team_number',
+    priorityAssignments.g1 === 1 && priorityAssignments.g2 === 1 && priorityAssignments.g3 === 4,
+    JSON.stringify(priorityAssignments));
+  const teamFallback = buildInitialAssignments([
+    { id: 't1', team_number: 2, group_number: null }, // -> team_number
+    { id: 't2', team_number: 3, group_number: undefined }, // -> team_number
+    { id: 't3', team_number: null, group_number: null }, // -> 1
+  ]);
+  check('45a: a missing group_number falls back to team_number, else 1',
+    teamFallback.t1 === 2 && teamFallback.t2 === 3 && teamFallback.t3 === 1,
+    JSON.stringify(teamFallback));
 
   // --- 45b. explicit "Chia đều 4 cây" balances the present members -------
   const balancedByClick = balanceTeamAssignments(planMembers, [], initialAssignments);
@@ -7698,9 +7709,11 @@ async function main() {
     modalSrc45.includes('brainstormAutoTarget')
       && modalSrc45.includes("if (gameMode === 'BRAINSTORM') setTargetScore(brainstormAutoTarget)"),
     'the auto target sync is missing');
-  check('45e: the smart-quiz branch keeps the target_score input editable',
-    modalSrc45.includes('isSpeedQuiz ? (') && modalSrc45.includes('parseInt(event.target.value, 10) || 20'),
-    'the SPEED_QUIZ editable input is missing');
+  check('45e: the target score is a SPEED_QUIZ-only field (BRAINSTORM hides it)',
+    modalSrc45.includes("id=\"targetScoreInput\"")
+      && modalSrc45.includes('isSpeedQuiz && (')
+      && modalSrc45.includes('parseInt(event.target.value, 10) || 20'),
+    'the SPEED_QUIZ-only target input is missing');
   check('45e: the projector normalises vitality per team via computeTeamProgress',
     projectorSrc45.includes('computeTeamProgress({')
       && projectorSrc45.includes('activeMembersCount: activeMembersPerTeam[team] ?? 0'),
@@ -7708,6 +7721,117 @@ async function main() {
   check('45e: the projector derives activeMembersPerTeam from the participant config',
     projectorSrc45.includes('countActiveMembersPerTeam(session.roster, session.participant_config)'),
     'the projector must exclude absentees from the denominator');
+
+  /* --- 46. group_number priority & brainstorm target UI (9.3) ------------ */
+  // Two Phase 9.3 fixes: (1) `buildInitialAssignments` must read `group_number`
+  // BEFORE the legacy `team_number`, so a class partitioned 12/12/12/10 by the
+  // roster's groups is preserved exactly — reading `team_number` first would
+  // yield 12/12/11/11 whenever the legacy arena values disagree; (2) the target
+  // score is a SPEED_QUIZ-only field, hidden entirely in BRAINSTORM (the value is
+  // still derived and saved silently to satisfy the DB CHECK).
+  step(46, 'group_number priority in assignments + brainstorm target score UI');
+
+  // --- 46a. a 46-member class partitioned 12/12/12/10 by group_number -----
+  // `group_number` 1..4 maps onto Tổ 1..4; the `team_number` values deliberately
+  // CONFLICT (legacy: everyone still carries team 4, or a stale 1..3), so any
+  // implementation that reads `team_number` first collapses to 12/12/11/11 or
+  // worse.
+  const GROUP_PLAN = [
+    { group: 1, count: 12, legacyTeam: 4 },
+    { group: 2, count: 12, legacyTeam: 4 },
+    { group: 3, count: 12, legacyTeam: 3 },
+    { group: 4, count: 10, legacyTeam: 4 },
+  ];
+  const groupPlanMembers = [];
+  GROUP_PLAN.forEach(({ group, count, legacyTeam }) => {
+    for (let i = 0; i < count; i += 1) {
+      groupPlanMembers.push({
+        id: `g${group}m${i}`,
+        team_number: legacyTeam,
+        group_number: group,
+      });
+    }
+  });
+  check('46a: the fixture holds 46 members', groupPlanMembers.length === 46,
+    String(groupPlanMembers.length));
+
+  const groupAssignments = buildInitialAssignments(groupPlanMembers);
+  const groupCounts = countActiveMembersPerTeam(
+    groupPlanMembers, { absent_ids: [], assignments: groupAssignments });
+  check('46a: buildInitialAssignments yields 12/12/12/10 from group_number (NOT 12/12/11/11)',
+    groupCounts[1] === 12 && groupCounts[2] === 12
+      && groupCounts[3] === 12 && groupCounts[4] === 10,
+    JSON.stringify(groupCounts));
+  check('46a: the four Tổ sum to the class size (46)',
+    groupCounts[1] + groupCounts[2] + groupCounts[3] + groupCounts[4] === 46,
+    JSON.stringify(groupCounts));
+  // If `team_number` had won, Tổ 4 would have held 34 (everyone with legacy 4).
+  check('46a: the conflicting legacy team_number was ignored for every member',
+    groupAssignments.g1m0 === 1 && groupAssignments.g2m0 === 2
+      && groupAssignments.g3m0 === 3 && groupAssignments.g4m0 === 4,
+    JSON.stringify({
+      g1: groupAssignments.g1m0, g2: groupAssignments.g2m0,
+      g3: groupAssignments.g3m0, g4: groupAssignments.g4m0,
+    }));
+
+  // --- 46b. Tổ 4 (10 members) reaches 100% at exactly 10 answers ----------
+  const target46 = brainstormTargetScore(groupCounts);
+  check('46b: the auto brainstorm target is the largest Tổ (12)',
+    target46 === 12, String(target46));
+  const team4Progress = computeTeamProgress({
+    gameMode: 'BRAINSTORM',
+    acceptedCount: 10,
+    activeMembersCount: 10,
+    targetScore: target46,
+  });
+  check('46b: Tổ 4 with 10 present reaches 100% when 10 have answered',
+    team4Progress.progress === 1 && team4Progress.isFinished === true
+      && team4Progress.denominator === 10,
+    JSON.stringify(team4Progress));
+  check('46b: Tổ 4 at 9/10 is NOT finished',
+    computeTeamProgress({
+      gameMode: 'BRAINSTORM', acceptedCount: 9, activeMembersCount: 10, targetScore: target46,
+    }).isFinished === false,
+    'a Tổ one answer short must not finish');
+  // A larger Tổ completes on ITS OWN headcount, independent of Tổ 4's.
+  const team1Progress = computeTeamProgress({
+    gameMode: 'BRAINSTORM', acceptedCount: 12, activeMembersCount: 12, targetScore: target46,
+  });
+  check('46b: Tổ 1 with 12 present finishes at 12, not at the 10 of Tổ 4',
+    team1Progress.isFinished === true && team1Progress.denominator === 12,
+    JSON.stringify(team1Progress));
+
+  // --- 46c. the target-score field is SPEED_QUIZ-only ---------------------
+  const modalSrc46 = readFileSync(
+    new URL('../web/src/components/tree/CreateTreeSessionModal.tsx', import.meta.url), 'utf8');
+  const projectorSrc46 = readFileSync(
+    new URL('../web/src/components/tree/TreeProjector.tsx', import.meta.url), 'utf8');
+  const lobbySrc46 = readFileSync(
+    new URL('../web/src/components/tree/TreeLobby.tsx', import.meta.url), 'utf8');
+  const spaSrc46 = readFileSync(new URL('../student/app.js', import.meta.url), 'utf8');
+
+  check('46c: the modal renders the target input only inside `{isSpeedQuiz && (...)}`',
+    modalSrc46.includes('{isSpeedQuiz && (')
+      && modalSrc46.includes('id="targetScoreInput"'),
+    'the target input is not gated on SPEED_QUIZ');
+  check('46c: BRAINSTORM renders no target-score read-only badge',
+    !modalSrc46.includes('Tự động theo sĩ số tổ'),
+    'the BRAINSTORM target badge must be removed');
+  check('46c: BRAINSTORM still derives and saves target_score silently',
+    modalSrc46.includes("if (gameMode === 'BRAINSTORM') setTargetScore(brainstormAutoTarget)")
+      && modalSrc46.includes('target_score: targetScore'),
+    'the silent save path is missing');
+  check('46c: the projector labels progress as `đã nộp` in BRAINSTORM, `điểm` in SPEED_QUIZ',
+    projectorSrc46.includes('đã nộp') && projectorSrc46.includes('điểm')
+      && projectorSrc46.includes("const isBrainstorm = session.game_mode === 'BRAINSTORM'"),
+    'the mode-aware progress label is missing');
+  check('46c: the lobby renders no target-score badge',
+    !lobbySrc46.includes('target_score'),
+    'the lobby must not surface a target score');
+  check('46c: the SPA shows the target only for SPEED_QUIZ',
+    spaSrc46.includes("? `⚡ Đua tốc độ · Mục tiêu ${session.targetScore} điểm`")
+      && spaSrc46.includes(": '💡 Bão não từ khóa'"),
+    'the SPA mode badge must not show a target in BRAINSTORM');
 
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);

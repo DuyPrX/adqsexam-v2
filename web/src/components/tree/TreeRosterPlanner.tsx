@@ -60,18 +60,21 @@ export function TreeRosterPlanner({
   /**
    * A member's effective team: the override if set, else their natural team.
    *
-   * Phase 9.2 — the fallback mirrors `buildInitialAssignments` exactly
-   * (`team_number` → `((group_number - 1) % 4) + 1` → 1) so a member whose
-   * assignment is not in `config.assignments` still lands in the column the
+   * Phase 9.3 — the fallback mirrors `buildInitialAssignments` exactly
+   * (`group_number` 1..8 → `((group_number - 1) % 4) + 1` → `team_number` → 1),
+   * with `group_number` PRIORITIZED over the legacy `team_number`, so a member
+   * whose assignment is not in `config.assignments` still lands in the column the
    * seeded config would have put them in.
    */
   const teamOf = (member: ClassMemberRow): TeamNumber => {
     const assigned = Number(config.assignments[member.id]);
     if (assigned >= 1 && assigned <= 4) return assigned as TeamNumber;
+    const group = Number(member.group_number);
+    if (Number.isFinite(group) && group >= 1 && group <= 8) {
+      return (((Math.trunc(group) - 1) % 4) + 1) as TeamNumber;
+    }
     const roster = Number(member.team_number);
     if (Number.isFinite(roster) && roster >= 1 && roster <= 4) return Math.trunc(roster) as TeamNumber;
-    const group = Number(member.group_number);
-    if (Number.isFinite(group) && group >= 1) return (((Math.trunc(group) - 1) % 4) + 1) as TeamNumber;
     return 1;
   };
 

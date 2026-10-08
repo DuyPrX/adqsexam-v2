@@ -3650,6 +3650,9 @@ function applyTreeModePresentation() {
       : session.questionText;
   }
 
+  // Phase 9.3 — the target score is a SPEED_QUIZ-only concept; a BRAINSTORM bout
+  // is won by every present member answering once, so the badge states only the
+  // mode rather than surfacing a derived number the student cannot act on.
   const modeBadge = $('treeModeBadge');
   if (modeBadge) modeBadge.textContent = isQuiz
     ? `⚡ Đua tốc độ · Mục tiêu ${session.targetScore} điểm`

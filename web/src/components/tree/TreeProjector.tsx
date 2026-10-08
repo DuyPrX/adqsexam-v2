@@ -651,6 +651,13 @@ function TeamCard({
 }) {
   const { team, treeState, done, rawTotal, percent, teamSubmissions } = stat;
   const vitalityPercent = Math.round(treeState.vitality * 100);
+  // Phase 9.3 — the denominator's MEANING differs by mode: in BRAINSTORM it is
+  // the Tổ's own present headcount (so the label counts answers/students), while
+  // in SPEED_QUIZ it is the explicit target score (so it counts points).
+  const isBrainstorm = session.game_mode === 'BRAINSTORM';
+  const progressLabel = isBrainstorm
+    ? `${done}/${rawTotal} đã nộp`
+    : `${done}/${rawTotal} điểm`;
 
   return (
     <section
@@ -678,7 +685,7 @@ function TeamCard({
         </div>
         <div className="flex items-center gap-2 text-[11px] font-semibold">
           <span className="rounded-full bg-slate-800 px-2 py-0.5 text-slate-200">
-            {done}/{rawTotal} ({percent}%)
+            {progressLabel} ({percent}%)
           </span>
           <span className="rounded-full bg-slate-800 px-2 py-0.5 text-teal-300">
             Sức sống {vitalityPercent}%

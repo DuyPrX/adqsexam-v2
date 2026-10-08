@@ -219,29 +219,40 @@ function tallyTeamCounts(members: Array<{ team_number: number | null }>): TeamCo
    ===================================================================== */
 
 /**
- * Phase 9.2 — seeds a session's assignment map from the roster's NATURAL teams.
+ * Phase 9.2 / 9.3 — seeds a session's assignment map from the roster's NATURAL
+ * teams.
  *
- * Deliberately NOT a distribution: a class that already has a `team_number`
- * layout (set once, in the roster) must be honoured when the modal opens, not
- * silently re-shuffled into modulo-4 order. Auto-balancing is an explicit,
- * button-triggered action (`balanceTeamAssignments`) — if opening a modal
- * re-partitioned the class, a teacher who liked the standing split could never
- * run a bout without disturbing it.
+ * Deliberately NOT a distribution: a class that already has a split (set once,
+ * in the roster) must be honoured when the modal opens, not silently re-shuffled
+ * into modulo-4 order. Auto-balancing is an explicit, button-triggered action
+ * (`balanceTeamAssignments`) — if opening a modal re-partitioned the class, a
+ * teacher who liked the standing split could never run a bout without disturbing
+ * it.
  *
- * Fallback chain: `team_number` (1..4) → `((group_number - 1) % 4) + 1` (the
- * Phase 8.11 seat groups mapped onto four trees) → 1.
+ * Phase 9.3 — `group_number` (1..8) takes PRIORITY over `team_number` (1..4).
+ * `group_number` is the field the teacher maintains in the class roster, so it
+ * is the current source of truth; `team_number` is a legacy arena value kept
+ * only as a fallback. Because `group_number` maps 1..8 onto 1..4 via
+ * `((g - 1) % 4) + 1`, a class partitioned 12/12/12/10 by `group_number` is
+ * preserved EXACTLY as 12/12/12/10 — reading `team_number` first would instead
+ * produce 12/12/11/11 whenever the legacy values disagree.
+ *
+ * Fallback chain: `group_number` (1..8) → `team_number` (1..4) → 1.
  */
 export function buildInitialAssignments(members: ClassMemberRow[]): Record<string, number> {
   const assignments: Record<string, number> = {};
   for (const member of members) {
+    const group = Number(member.group_number);
+    if (Number.isFinite(group) && group >= 1 && group <= 8) {
+      assignments[member.id] = ((Math.trunc(group) - 1) % 4) + 1;
+      continue;
+    }
     const team = Number(member.team_number);
     if (Number.isFinite(team) && team >= 1 && team <= 4) {
       assignments[member.id] = Math.trunc(team);
       continue;
     }
-    const group = Number(member.group_number);
-    assignments[member.id] =
-      Number.isFinite(group) && group >= 1 ? ((Math.trunc(group) - 1) % 4) + 1 : 1;
+    assignments[member.id] = 1;
   }
   return assignments;
 }
