@@ -18,7 +18,14 @@ import type { RealtimeChannel, RealtimePostgresChangesPayload } from '@supabase/
 import { createClient } from '@/lib/supabase/client';
 import { resolveStudentAppBaseUrl } from '@/lib/env';
 import { PersistenceError } from '@/lib/exams';
-import { clampTeamNumber, endTreeSession, getTeamSeed, startTreeSession } from '@/lib/tree';
+import {
+  clampTeamNumber,
+  computeTeamProgress,
+  countActiveMembersPerTeam,
+  endTreeSession,
+  getTeamSeed,
+  startTreeSession,
+} from '@/lib/tree';
 import { computeTreeState, type LayoutFruitAnchor, type TreeState } from '@/lib/tree-engine';
 import {
   isAudioMuted,
@@ -27,7 +34,7 @@ import {
   resumeAudioContext,
   toggleAudioMute,
 } from '@/lib/tree-audio';
-import type { TeamCounts, TeamNumber, TreeSessionDetail, TreeSubmissionRow } from '@/lib/types';
+import type { TeamNumber, TreeSessionDetail, TreeSubmissionRow } from '@/lib/types';
 import { TreeCanvas, type TreeCanvasHandle } from './TreeCanvas';
 import { TreeLobby } from './TreeLobby';
 import { TreeQrCode } from './TreeQrCode';
@@ -216,39 +223,69 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
 
   // --- per-team projections -----------------------------------------------
   /**
-   * One entry per team: its roster size, its submissions, the derived tree state
-   * and whether it has finished. `useMemo` keyed on `submissions` keeps a tooltip
-   * re-render from recomputing four anchor relaxations.
+   * Phase 9.2 — the arena's per-team denominator, from the PRE-FLIGHT config.
+   *
+   * `session.team_counts` is the raw roster tally: it includes students the
+   * teacher marked ABSENT, so a Tổ with four present members and one absentee
+   * would cap at 80% and could never finish. This applies
+   * `participant_config` (absentees removed, team overrides honoured) exactly as
+   * `get_public_tree_session` does, so the projector, the lobby and every student
+   * agree on who is on which Cây and how many answers complete it.
+   */
+  const activeMembersPerTeam = useMemo(
+    () => countActiveMembersPerTeam(session.roster, session.participant_config),
+    [session.roster, session.participant_config],
+  );
+
+  /**
+   * One entry per team: its active headcount, its submissions, the derived tree
+   * state and whether it has finished. `useMemo` keyed on `submissions` keeps a
+   * tooltip re-render from recomputing four anchor relaxations.
    */
   const teamStats = useMemo(() => {
-    const counts: TeamCounts = session.team_counts ?? { 1: 0, 2: 0, 3: 0, 4: 0 };
     return TEAMS.map((team) => {
       const teamSubmissions = submissions.filter(
         (row) => clampTeamNumber(row.team_number) === team,
       );
-      // Floor the denominator at 1: `computeTreeState` divides by it, and an
-      // empty team would otherwise yield Infinity/NaN for the ratio. A team with
-      // no members can never finish, so guard `isFinished` on the raw count.
-      const rawTotal = counts[team] ?? 0;
+      const done = teamSubmissions.length;
+      // Phase 9.2 — BRAINSTORM completes on the team's own present headcount;
+      // SPEED_QUIZ on the session's explicit target score.
+      const { denominator, progress, isFinished } = computeTeamProgress({
+        gameMode: session.game_mode,
+        acceptedCount: done,
+        activeMembersCount: activeMembersPerTeam[team] ?? 0,
+        targetScore: session.target_score,
+      });
+      // The tree's growth ratio divides by the SAME denominator as the completion
+      // progress, so BLOOM (P = 1.0) coincides exactly with the Golden Latch
+      // instead of drifting when a team is uneven or has absentees.
       const treeState: TreeState = computeTreeState({
-        totalStudents: Math.max(rawTotal, 1),
+        totalStudents: denominator,
         submissions: teamSubmissions,
         timeLimitMinutes: session.time_limit_minutes,
-        createdAt: session.created_at,
+        createdAt: session.started_at ?? session.created_at,
         seed: getTeamSeed(session.tree_seed, team),
       });
-      const done = teamSubmissions.length;
       return {
         team,
-        rawTotal,
+        rawTotal: denominator,
         done,
-        percent: rawTotal > 0 ? Math.min(100, Math.round((done / rawTotal) * 100)) : 0,
+        percent: Math.round(progress * 100),
         treeState,
-        isFinished: rawTotal > 0 && done >= rawTotal,
+        isFinished,
         teamSubmissions,
       };
     });
-  }, [submissions, session.team_counts, session.time_limit_minutes, session.created_at, session.tree_seed]);
+  }, [
+    submissions,
+    activeMembersPerTeam,
+    session.game_mode,
+    session.target_score,
+    session.time_limit_minutes,
+    session.started_at,
+    session.created_at,
+    session.tree_seed,
+  ]);
 
   const k = submissions.length;
   const totalStudents = Math.max(session.total_students, 1);

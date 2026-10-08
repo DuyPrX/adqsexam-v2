@@ -3,6 +3,7 @@ import { PersistenceError } from './exams';
 import { clampTeamNumber } from './tree-engine.js';
 import { EMPTY_PARTICIPANT_CONFIG } from './types';
 import type {
+  ClassMemberRow,
   ParticipantConfig,
   TeamCounts,
   TeamNumber,
@@ -211,6 +212,152 @@ function tallyTeamCounts(members: Array<{ team_number: number | null }>): TeamCo
     counts[team] += 1;
   }
   return counts;
+}
+
+/* =====================================================================
+   Phase 9.2 — pre-flight roster planning (pure, so headless-testable)
+   ===================================================================== */
+
+/**
+ * Phase 9.2 — seeds a session's assignment map from the roster's NATURAL teams.
+ *
+ * Deliberately NOT a distribution: a class that already has a `team_number`
+ * layout (set once, in the roster) must be honoured when the modal opens, not
+ * silently re-shuffled into modulo-4 order. Auto-balancing is an explicit,
+ * button-triggered action (`balanceTeamAssignments`) — if opening a modal
+ * re-partitioned the class, a teacher who liked the standing split could never
+ * run a bout without disturbing it.
+ *
+ * Fallback chain: `team_number` (1..4) → `((group_number - 1) % 4) + 1` (the
+ * Phase 8.11 seat groups mapped onto four trees) → 1.
+ */
+export function buildInitialAssignments(members: ClassMemberRow[]): Record<string, number> {
+  const assignments: Record<string, number> = {};
+  for (const member of members) {
+    const team = Number(member.team_number);
+    if (Number.isFinite(team) && team >= 1 && team <= 4) {
+      assignments[member.id] = Math.trunc(team);
+      continue;
+    }
+    const group = Number(member.group_number);
+    assignments[member.id] =
+      Number.isFinite(group) && group >= 1 ? ((Math.trunc(group) - 1) % 4) + 1 : 1;
+  }
+  return assignments;
+}
+
+/**
+ * Phase 9.2 — the explicit "⚖️ Chia đều 4 cây" split.
+ *
+ * Round-robins the PRESENT members across the four trees so the columns end up
+ * within one of each other for any count (13 → 4/3/3/3). Absent members keep
+ * whatever they had (they never enter the arena, so their value is inert, but
+ * preserving it means toggling a student absent and back does not lose their
+ * natural team). Order is the roster's own, so the split is reproducible.
+ */
+export function balanceTeamAssignments(
+  members: ClassMemberRow[],
+  absentIds: string[],
+  current: Record<string, number> = {},
+): Record<string, number> {
+  const absent = new Set(absentIds);
+  const assignments: Record<string, number> = { ...current };
+  let index = 0;
+  for (const member of members) {
+    if (absent.has(member.id)) continue;
+    assignments[member.id] = (index % 4) + 1;
+    index += 1;
+  }
+  return assignments;
+}
+
+/**
+ * Phase 9.2 — how many PRESENT (non-absent) students sit on each tree.
+ *
+ * The arena's per-team denominator. `getTreeSession`'s `team_counts` is the raw
+ * roster tally (absentees included), which would make a team's 100% unreachable
+ * whenever someone is marked absent — so the pre-flight config has to be applied
+ * here, exactly as `get_public_tree_session` does server-side.
+ */
+export function countActiveMembersPerTeam(
+  roster: Array<{ id: string; team_number: number }>,
+  config: ParticipantConfig | null | undefined,
+): TeamCounts {
+  const counts: TeamCounts = { 1: 0, 2: 0, 3: 0, 4: 0 };
+  const absent = new Set(config?.absent_ids ?? []);
+  const overrides = config?.assignments ?? {};
+  for (const member of roster) {
+    if (absent.has(member.id)) continue;
+    const override = Number(overrides[member.id]);
+    const team = clampTeamNumber(
+      override >= 1 && override <= 4 ? override : member.team_number,
+    ) as TeamNumber;
+    counts[team] += 1;
+  }
+  return counts;
+}
+
+/**
+ * Phase 9.2 — the auto target score for BRAINSTORM.
+ *
+ * In a free-text bout "finishing" means every present student on the LARGEST
+ * team has answered, so the target is `max(activeTeamCounts)` floored at 1. The
+ * largest team (not the class size) is what makes 100% reachable by every team
+ * simultaneously. In SPEED_QUIZ the target is a teacher-chosen score and this is
+ * not used.
+ */
+export function brainstormTargetScore(activeCounts: TeamCounts): number {
+  return Math.max(1, maxTeamCount(activeCounts));
+}
+
+/** The largest per-team active headcount. */
+function maxTeamCount(activeCounts: TeamCounts): number {
+  return Math.max(
+    Number(activeCounts?.[1]) || 0,
+    Number(activeCounts?.[2]) || 0,
+    Number(activeCounts?.[3]) || 0,
+    Number(activeCounts?.[4]) || 0,
+  );
+}
+
+/**
+ * Phase 9.2 — a team's completion progress toward 100%.
+ *
+ * The DENOMINATOR differs by mode:
+ *   - BRAINSTORM: the team's own present headcount, so a Tổ whose fifth member
+ *     is absent still reaches 100% when its four present members have answered.
+ *   - SPEED_QUIZ: the session's explicit `target_score`.
+ *
+ * Returns the denominator (which the tree's growth ratio also divides by) plus
+ * the latched completion flag. A team with nobody present can never finish.
+ */
+export function computeTeamProgress({
+  gameMode,
+  acceptedCount,
+  activeMembersCount,
+  targetScore,
+}: {
+  gameMode: TreeGameMode;
+  acceptedCount: number;
+  activeMembersCount: number;
+  targetScore: number;
+}): { denominator: number; progress: number; isFinished: boolean } {
+  const accepted = Math.max(0, Math.trunc(Number(acceptedCount) || 0));
+  if (gameMode === 'BRAINSTORM') {
+    const active = Math.max(0, Math.trunc(Number(activeMembersCount) || 0));
+    const denominator = Math.max(1, active);
+    return {
+      denominator,
+      progress: Math.min(1, accepted / denominator),
+      isFinished: active > 0 && accepted >= active,
+    };
+  }
+  const denominator = Math.max(1, Math.trunc(Number(targetScore) || 20));
+  return {
+    denominator,
+    progress: Math.min(1, accepted / denominator),
+    isFinished: accepted >= denominator,
+  };
 }
 
 /**

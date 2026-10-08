@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { AlertTriangle, Loader2, X } from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
@@ -8,6 +8,9 @@ import { PersistenceError } from '@/lib/exams';
 import { listClassMembers } from '@/lib/classes';
 import { listExams } from '@/lib/exams';
 import {
+  brainstormTargetScore,
+  buildInitialAssignments,
+  countActiveMembersPerTeam,
   createTreeSession,
   TREE_SESSION_DEFAULTS,
   TREE_SIMILARITY_MAX,
@@ -68,7 +71,17 @@ export function CreateTreeSessionModal({ klass, onClose }: CreateTreeSessionModa
     void (async () => {
       try {
         const loaded = await listClassMembers(createClient(), klass.id);
-        if (!cancelled) setMembers(loaded);
+        if (cancelled) return;
+        setMembers(loaded);
+        // Phase 9.2 — seed the session's assignments from each member's NATURAL
+        // team, NOT a modulo-4 split. The modal must open showing the class's
+        // standing layout; re-partitioning here would silently override a split
+        // the teacher already arranged. Distribution is opt-in via the planner's
+        // "⚖️ Chia đều 4 cây" button.
+        setConfig((current) => ({
+          ...current,
+          assignments: buildInitialAssignments(loaded),
+        }));
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof PersistenceError ? err.message : 'Không tải được danh sách học sinh.');
@@ -101,6 +114,40 @@ export function CreateTreeSessionModal({ klass, onClose }: CreateTreeSessionModa
   }, [gameMode, exams.length]);
 
   const isSpeedQuiz = gameMode === 'SPEED_QUIZ';
+
+  /**
+   * Phase 9.2 — how many PRESENT students sit on each Cây, recomputed on every
+   * absentee toggle or reassignment. Unlike `getTreeSession`'s raw `team_counts`,
+   * this excludes absentees and honours the session's team overrides, which is
+   * what makes a team's 100% reachable in the arena.
+   */
+  const activeTeamCounts = useMemo(() => {
+    const roster = members.map((member) => ({
+      id: member.id,
+      team_number: member.team_number,
+    }));
+    const assignments = config.assignments;
+    return countActiveMembersPerTeam(roster, { absent_ids: config.absent_ids, assignments });
+  }, [members, config.absent_ids, config.assignments]);
+
+  /**
+   * Phase 9.2 — in BRAINSTORM a bout is won when the LARGEST team has had every
+   * present member answer, so the target tracks `max(activeTeamCounts)`. It is
+   * derived, never typed: a stale manual number would leave a team unable to
+   * reach 100% (or finishing too early).
+   */
+  const brainstormAutoTarget = useMemo(
+    () => brainstormTargetScore(activeTeamCounts),
+    [activeTeamCounts],
+  );
+
+  // Phase 9.2 — keep `target_score` bound to the derived value in BRAINSTORM. The
+  // effect (rather than a read-time fallback) means the value the teacher sees is
+  // the value submitted, and it re-runs on every absentee/reassignment change.
+  useEffect(() => {
+    if (gameMode === 'BRAINSTORM') setTargetScore(brainstormAutoTarget);
+  }, [gameMode, brainstormAutoTarget]);
+
   const canSubmit =
     !!title.trim()
     && !!question.trim()
@@ -252,17 +299,33 @@ export function CreateTreeSessionModal({ klass, onClose }: CreateTreeSessionModa
               />
             </label>
 
-            {/* Phase 9.1 — how many points a team must reach to win. */}
-            <label className="block space-y-1">
-              <span className="text-sm font-semibold text-slate-700">Điểm mục tiêu mỗi tổ</span>
-              <input
-                type="number"
-                min={1}
-                value={targetScore}
-                onChange={(event) => setTargetScore(Number(event.target.value))}
-                className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-slate-400"
-              />
-            </label>
+            {/* Phase 9.1 — how many points a team must reach to win. Phase 9.2 —
+                in BRAINSTORM it is DERIVED from the roster (the largest Tổ's
+                present headcount) and shown read-only, because a free-text bout
+                is won by everyone on a team answering exactly once. */}
+            <div className="block space-y-1">
+              <span className="text-sm font-semibold text-slate-700">Điểm mục tiêu hoàn thành (100%)</span>
+              {isSpeedQuiz ? (
+                <input
+                  type="number"
+                  min={1}
+                  max={200}
+                  value={targetScore}
+                  onChange={(event) => setTargetScore(Math.max(1, parseInt(event.target.value, 10) || 20))}
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-slate-400"
+                  placeholder="Ví dụ: 20"
+                />
+              ) : (
+                <div className="flex items-center justify-between rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
+                  <span>
+                    Tự động theo sĩ số tổ: <strong>{brainstormAutoTarget} điểm</strong>
+                  </span>
+                  <span className="rounded border border-blue-200 bg-white px-2 py-0.5 text-xs text-blue-600">
+                    🎯 1 câu/học sinh
+                  </span>
+                </div>
+              )}
+            </div>
           </div>
 
           <label className="block space-y-1">

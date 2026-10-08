@@ -288,6 +288,9 @@ const { parseStudentRosterFile } = await import(
 const {
   createTreeSession, getTreeSession, getTreeSubmissions, endTreeSession, startTreeSession,
   TREE_SESSION_COLUMNS, TREE_SUBMISSION_COLUMNS, TREE_SESSION_DEFAULTS,
+  // Phase 9.2 Step 45 — the pure pre-flight planning helpers.
+  buildInitialAssignments, balanceTeamAssignments, countActiveMembersPerTeam,
+  brainstormTargetScore, computeTeamProgress,
 } = await import(new URL('../web/src/lib/tree.ts', import.meta.url).href);
 
 // Phase 7.4 Step 31 — the student SPA's answer normalisation, imported from the
@@ -7559,6 +7562,152 @@ async function main() {
   check('44i: the lobby test class deletes once its sessions are gone',
     !lobbyClassDelete.error, lobbyClassDelete.error?.message);
   await teacher.from('exams').delete().eq('code', LOBBY_EXAM_CODE);
+
+  /* --- 45. Natural roster assignment & adaptive brainstorm target (9.2) -- */
+  // The arena's planning rules, exercised on their pure homes:
+  //   * opening the modal must preserve the class's own `team_number` layout
+  //     rather than re-shuffling it;
+  //   * "Chia đều 4 cây" is the ONLY balancing path;
+  //   * a BRAINSTORM target tracks the LARGEST present team, and a team's
+  //     vitality/completion is normalised against its OWN present headcount.
+  step(45, 'natural roster assignment + adaptive brainstorm target score');
+
+  // A roster whose natural teams are deliberately UNEVEN and NOT round-robin
+  // ordered, so any accidental modulo-4 redistribution is visible: Tổ 1 has 3
+  // members, Tổ 2 has 1, Tổ 3 has 2, Tổ 4 has 0.
+  const planMembers = [
+    { id: 'm1', team_number: 1, group_number: 1 },
+    { id: 'm2', team_number: 1, group_number: 5 },
+    { id: 'm3', team_number: 1, group_number: 3 },
+    { id: 'm4', team_number: 2, group_number: 2 },
+    { id: 'm5', team_number: 3, group_number: 4 },
+    { id: 'm6', team_number: 3, group_number: 7 },
+  ];
+
+  // --- 45a. initial state preserves the natural teams -------------------
+  const initialAssignments = buildInitialAssignments(planMembers);
+  check('45a: buildInitialAssignments preserves every member\'s natural team_number',
+    initialAssignments.m1 === 1 && initialAssignments.m2 === 1 && initialAssignments.m3 === 1
+      && initialAssignments.m4 === 2 && initialAssignments.m5 === 3 && initialAssignments.m6 === 3,
+    JSON.stringify(initialAssignments));
+  check('45a: it does NOT modulo-4 distribute (m5 keeps Tổ 3, not the index-derived 1)',
+    initialAssignments.m5 === 3 && initialAssignments.m5 !== (4 % 4) + 1,
+    JSON.stringify(initialAssignments));
+  // The natural split must survive into countActiveMembersPerTeam untouched.
+  const naturalCounts = countActiveMembersPerTeam(planMembers, { absent_ids: [], assignments: initialAssignments });
+  check('45a: the natural split is 3/1/2/0, not balanced',
+    naturalCounts[1] === 3 && naturalCounts[2] === 1
+      && naturalCounts[3] === 2 && naturalCounts[4] === 0,
+    JSON.stringify(naturalCounts));
+
+  // The fallback chain: no `team_number` -> group_number mapped modulo 4.
+  const fallbackAssignments = buildInitialAssignments([
+    { id: 'g1', team_number: null, group_number: 1 },
+    { id: 'g2', team_number: null, group_number: 5 }, // (5-1)%4+1 = 1
+    { id: 'g3', team_number: null, group_number: 4 }, // (4-1)%4+1 = 4
+    { id: 'g4', team_number: null, group_number: null }, // -> 1
+  ]);
+  check('45a: a missing team_number falls back to ((group_number - 1) % 4) + 1, else 1',
+    fallbackAssignments.g1 === 1 && fallbackAssignments.g2 === 1
+      && fallbackAssignments.g3 === 4 && fallbackAssignments.g4 === 1,
+    JSON.stringify(fallbackAssignments));
+
+  // --- 45b. explicit "Chia đều 4 cây" balances the present members -------
+  const balancedByClick = balanceTeamAssignments(planMembers, [], initialAssignments);
+  const balancedClickCounts = countActiveMembersPerTeam(
+    planMembers, { absent_ids: [], assignments: balancedByClick });
+  const balancedValues = Object.values(balancedClickCounts);
+  check('45b: an explicit balance spreads 6 members as 2/2/1/1 (max-min <= 1)',
+    Math.max(...balancedValues) - Math.min(...balancedValues) <= 1
+      && balancedValues.reduce((sum, n) => sum + n, 0) === 6,
+    JSON.stringify(balancedClickCounts));
+  check('45b: balance overrides the natural teams it re-partitions (m4 leaves Tổ 2)',
+    balancedByClick.m4 !== initialAssignments.m4 || balancedClickCounts[2] === 2,
+    JSON.stringify({ natural: initialAssignments.m4, balanced: balancedByClick.m4 }));
+
+  // Balancing only the PRESENT members: with m1 absent, the remaining 5 split
+  // 2/1/1/1 and the absent member keeps their prior value.
+  const balancedWithAbsent = balanceTeamAssignments(planMembers, ['m1'], initialAssignments);
+  const absentCounts = countActiveMembersPerTeam(
+    planMembers, { absent_ids: ['m1'], assignments: balancedWithAbsent });
+  check('45b: an absent member is excluded from the balance and keeps their old team',
+    absentCounts[1] + absentCounts[2] + absentCounts[3] + absentCounts[4] === 5
+      && Math.max(...Object.values(absentCounts)) - Math.min(...Object.values(absentCounts)) <= 1
+      && balancedWithAbsent.m1 === 1,
+    JSON.stringify({ counts: absentCounts, m1: balancedWithAbsent.m1 }));
+
+  // --- 45c. brainstorm target = max(activeTeamCounts) -------------------
+  check('45c: the brainstorm target tracks the LARGEST present team (3)',
+    brainstormTargetScore(naturalCounts) === 3, String(brainstormTargetScore(naturalCounts)));
+  check('45c: an empty arena floors the target at 1',
+    brainstormTargetScore({ 1: 0, 2: 0, 3: 0, 4: 0 }) === 1,
+    String(brainstormTargetScore({ 1: 0, 2: 0, 3: 0, 4: 0 })));
+  // Reassignment reacts: balancing to 2/2/1/1 drops the target from 3 to 2.
+  check('45c: re-partitioning to 2/2/1/1 lowers the auto target to 2',
+    brainstormTargetScore(balancedClickCounts) === 2, String(brainstormTargetScore(balancedClickCounts)));
+  // Marking a member of the largest Tổ absent recomputes it too.
+  const afterAbsent = countActiveMembersPerTeam(
+    planMembers, { absent_ids: ['m3'], assignments: initialAssignments });
+  check('45c: marking the 3-member Tổ down to 2 recomputes the target to 2',
+    brainstormTargetScore(afterAbsent) === 2, String(brainstormTargetScore(afterAbsent)));
+
+  // --- 45d. per-team vitality normalises against the team's OWN headcount --
+  // Tổ 1 has 3 present; answering all 3 reaches 100% / the Golden Latch.
+  const teamProgress = (accepted, active) => computeTeamProgress({
+    gameMode: 'BRAINSTORM', acceptedCount: accepted, activeMembersCount: active,
+    targetScore: brainstormTargetScore(naturalCounts),
+  });
+  check('45d: a Tổ with 3 present reaches 100% when all 3 have answered',
+    teamProgress(3, 3).progress === 1 && teamProgress(3, 3).isFinished === true,
+    JSON.stringify(teamProgress(3, 3)));
+  check('45d: the same Tổ at 2/3 is 66.7% and NOT finished',
+    Math.abs(teamProgress(2, 3).progress - 2 / 3) < 1e-9
+      && teamProgress(2, 3).isFinished === false,
+    JSON.stringify(teamProgress(2, 3)));
+  // A team whose fifth member is absent still finishes on its four present.
+  check('45d: a Tổ of 4 present + 1 absent finishes at 4 answers, not 5',
+    teamProgress(4, 4).isFinished === true && teamProgress(4, 4).progress === 1,
+    JSON.stringify(teamProgress(4, 4)));
+  check('45d: an entirely absent Tổ can never finish and divides by 1',
+    teamProgress(0, 0).isFinished === false && teamProgress(0, 0).denominator === 1,
+    JSON.stringify(teamProgress(0, 0)));
+  // SPEED_QUIZ keeps the explicit target score as the denominator.
+  const speedProgress = computeTeamProgress({
+    gameMode: 'SPEED_QUIZ', acceptedCount: 20, activeMembersCount: 1, targetScore: 20 });
+  check('45d: SPEED_QUIZ completes on the explicit target_score, ignoring headcount',
+    speedProgress.isFinished === true && speedProgress.progress === 1
+      && speedProgress.denominator === 20,
+    JSON.stringify(speedProgress));
+
+  // --- 45e. the components are wired to these rules ---------------------
+  const plannerSrc45 = readFileSync(
+    new URL('../web/src/components/tree/TreeRosterPlanner.tsx', import.meta.url), 'utf8');
+  const modalSrc45 = readFileSync(
+    new URL('../web/src/components/tree/CreateTreeSessionModal.tsx', import.meta.url), 'utf8');
+  const projectorSrc45 = readFileSync(
+    new URL('../web/src/components/tree/TreeProjector.tsx', import.meta.url), 'utf8');
+
+  check('45e: the modal seeds the config from buildInitialAssignments (not a balance)',
+    modalSrc45.includes('buildInitialAssignments(loaded)')
+      && !modalSrc45.includes('balanceTeamAssignments(loaded'),
+    'the modal must seed the natural teams on load');
+  check('45e: the planner\'s balance button is the only caller of balanceTeamAssignments',
+    plannerSrc45.includes('balanceTeamAssignments(members, config.absent_ids, config.assignments)'),
+    'the explicit balance handler is missing');
+  check('45e: the modal binds target_score to brainstormAutoTarget when in BRAINSTORM',
+    modalSrc45.includes('brainstormAutoTarget')
+      && modalSrc45.includes("if (gameMode === 'BRAINSTORM') setTargetScore(brainstormAutoTarget)"),
+    'the auto target sync is missing');
+  check('45e: the smart-quiz branch keeps the target_score input editable',
+    modalSrc45.includes('isSpeedQuiz ? (') && modalSrc45.includes('parseInt(event.target.value, 10) || 20'),
+    'the SPEED_QUIZ editable input is missing');
+  check('45e: the projector normalises vitality per team via computeTeamProgress',
+    projectorSrc45.includes('computeTeamProgress({')
+      && projectorSrc45.includes('activeMembersCount: activeMembersPerTeam[team] ?? 0'),
+    'the per-team denominator is missing from the projector');
+  check('45e: the projector derives activeMembersPerTeam from the participant config',
+    projectorSrc45.includes('countActiveMembersPerTeam(session.roster, session.participant_config)'),
+    'the projector must exclude absentees from the denominator');
 
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);

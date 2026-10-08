@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import { Loader2, Shuffle, UserMinus, UserCheck } from 'lucide-react';
+import { balanceTeamAssignments } from '@/lib/tree';
 import type { ClassMemberRow, ParticipantConfig, TeamNumber } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
@@ -15,6 +16,13 @@ const TEAM_ACCENT: Record<TeamNumber, string> = {
   3: 'border-amber-300 bg-amber-50 text-amber-800',
   4: 'border-purple-300 bg-purple-50 text-purple-800',
 };
+
+// Phase 9.2 — `buildInitialAssignments` (natural-team seeding) and
+// `balanceTeamAssignments` (the explicit round-robin) are pure and live in
+// `@/lib/tree` so the modal can seed the config before the planner mounts and
+// the e2e suite can exercise both headless (a `.tsx` cannot be imported under
+// plain Node). Re-exported here for discoverability alongside the planner UI.
+export { buildInitialAssignments } from '@/lib/tree';
 
 interface TreeRosterPlannerProps {
   members: ClassMemberRow[];
@@ -32,8 +40,12 @@ interface TreeRosterPlannerProps {
  * re-balance one bout without disturbing the class's standing team split (and
  * without touching the Phase 8.4 arena's own source of truth).
  *
- * "Cân bằng lại 4 Cây" distributes only the PRESENT members, round-robin, so the
- * four columns end up within one of each other regardless of absentee count.
+ * Phase 9.2 — the columns are seeded from each member's NATURAL team
+ * (`buildInitialAssignments`), not from a modulo-4 split, so opening the modal
+ * shows the class's own standing layout. Distribution happens only when the
+ * teacher presses "⚖️ Chia đều 4 cây" (`balanceTeamAssignments`), which
+ * round-robins the PRESENT members so the four columns end up within one of each
+ * other regardless of absentee count.
  */
 export function TreeRosterPlanner({
   members,
@@ -45,12 +57,22 @@ export function TreeRosterPlanner({
 
   const absentSet = useMemo(() => new Set(config.absent_ids), [config.absent_ids]);
 
-  /** A member's effective team: the override if set, else their roster team. */
+  /**
+   * A member's effective team: the override if set, else their natural team.
+   *
+   * Phase 9.2 — the fallback mirrors `buildInitialAssignments` exactly
+   * (`team_number` → `((group_number - 1) % 4) + 1` → 1) so a member whose
+   * assignment is not in `config.assignments` still lands in the column the
+   * seeded config would have put them in.
+   */
   const teamOf = (member: ClassMemberRow): TeamNumber => {
-    const assigned = config.assignments[member.id];
-    if (assigned && assigned >= 1 && assigned <= 4) return assigned as TeamNumber;
+    const assigned = Number(config.assignments[member.id]);
+    if (assigned >= 1 && assigned <= 4) return assigned as TeamNumber;
     const roster = Number(member.team_number);
-    return roster >= 1 && roster <= 4 ? (roster as TeamNumber) : 1;
+    if (Number.isFinite(roster) && roster >= 1 && roster <= 4) return Math.trunc(roster) as TeamNumber;
+    const group = Number(member.group_number);
+    if (Number.isFinite(group) && group >= 1) return (((Math.trunc(group) - 1) % 4) + 1) as TeamNumber;
+    return 1;
   };
 
   const present = members.filter((member) => !absentSet.has(member.id));
@@ -74,10 +96,9 @@ export function TreeRosterPlanner({
   /**
    * Evenly splits the PRESENT members across the four Cây.
    *
-   * `index % 4` keeps the columns within one student of each other for any count
-   * (a class of 13 becomes 4/3/3/3). The order is the roster's own (student_code
-   * ascending, as `listClassMembers` returns it) so the split is reproducible
-   * rather than re-randomising every click.
+   * Phase 9.2 — delegates to the pure `balanceTeamAssignments` so the exact same
+   * round-robin the e2e suite asserts against is the one the button runs. Only
+   * an explicit click reaches here; merely opening the modal never re-balances.
    */
   const balanceTeams = () => {
     setError(null);
@@ -85,11 +106,10 @@ export function TreeRosterPlanner({
       setError('Không còn học sinh nào để chia tổ (tất cả đang được đánh dấu vắng).');
       return;
     }
-    const assignments: Record<string, number> = {};
-    present.forEach((member, index) => {
-      assignments[member.id] = (index % 4) + 1;
+    onChange({
+      ...config,
+      assignments: balanceTeamAssignments(members, config.absent_ids, config.assignments),
     });
-    onChange({ ...config, assignments });
   };
 
   if (isLoading) {
