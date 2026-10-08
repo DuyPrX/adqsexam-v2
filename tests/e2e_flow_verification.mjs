@@ -7833,6 +7833,101 @@ async function main() {
       && spaSrc46.includes(": '💡 Bão não từ khóa'"),
     'the SPA mode badge must not show a target in BRAINSTORM');
 
+  /* --- 47. procedural 3D tree engine & simulator sandbox (Phase 10.0) ---- */
+  step(47, 'procedural 3D tree engine and interactive simulator sandbox');
+
+  const { TEAM_3D_PALETTES, captureCanvasSnapshot } = await import(
+    new URL('../web/src/lib/tree3d.ts', import.meta.url).href
+  );
+
+  // --- 47a. TEAM_3D_PALETTES has 4 distinct team palettes with valid hex colors ---
+  check('47a: TEAM_3D_PALETTES has 4 team palettes',
+    [1, 2, 3, 4].every((t) => !!TEAM_3D_PALETTES[t]),
+    JSON.stringify(Object.keys(TEAM_3D_PALETTES)));
+
+  const HEX_COLOR_REGEX = /^#[0-9a-fA-F]{6}$/;
+  for (const team of [1, 2, 3, 4]) {
+    const pal = TEAM_3D_PALETTES[team];
+    check(`47a: team ${team} trunk is valid hex`, HEX_COLOR_REGEX.test(pal.trunk), pal.trunk);
+    check(`47a: team ${team} foliageBase is valid hex`, HEX_COLOR_REGEX.test(pal.foliageBase), pal.foliageBase);
+    check(`47a: team ${team} foliageHighlight is valid hex`, HEX_COLOR_REGEX.test(pal.foliageHighlight), pal.foliageHighlight);
+    check(`47a: team ${team} dew is valid hex`, HEX_COLOR_REGEX.test(pal.dew), pal.dew);
+    check(`47a: team ${team} goldenAura is valid hex`, HEX_COLOR_REGEX.test(pal.goldenAura), pal.goldenAura);
+  }
+
+  // Ensure palettes are distinct across teams
+  const dewColors = [1, 2, 3, 4].map((t) => TEAM_3D_PALETTES[t].dew);
+  const uniqueDewColors = new Set(dewColors);
+  check('47a: all 4 teams have distinct dew drop colors', uniqueDewColors.size === 4, JSON.stringify(dewColors));
+
+  // --- 47b. captureCanvasSnapshot exists and creates valid download anchors ---
+  check('47b: captureCanvasSnapshot is a callable function', typeof captureCanvasSnapshot === 'function', typeof captureCanvasSnapshot);
+
+  let clicked = false;
+  let createdTag = '';
+  let anchorProps = {};
+  const prevDoc = globalThis.document;
+  globalThis.document = {
+    createElement: (tag) => {
+      createdTag = tag;
+      return {
+        set download(val) { anchorProps.download = val; },
+        get download() { return anchorProps.download; },
+        set href(val) { anchorProps.href = val; },
+        get href() { return anchorProps.href; },
+        click: () => { clicked = true; }
+      };
+    }
+  };
+
+  const mockCanvas = {
+    toDataURL: (mime) => `data:${mime};base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==`
+  };
+
+  captureCanvasSnapshot(mockCanvas, 'arena-3d-test.png');
+  check('47b: captureCanvasSnapshot created an anchor element', createdTag === 'a', createdTag);
+  check('47b: download filename is set correctly', anchorProps.download === 'arena-3d-test.png', anchorProps.download);
+  check('47b: download href contains image/png data url', anchorProps.href.startsWith('data:image/png;base64,'), anchorProps.href);
+  check('47b: download anchor click was triggered', clicked === true, String(clicked));
+  globalThis.document = prevDoc;
+
+  // --- 47c. Legacy 2D TreeCanvas.tsx is completely untouched ---
+  const legacy2DSrc = readFileSync(
+    new URL('../web/src/components/tree/TreeCanvas.tsx', import.meta.url), 'utf8');
+  check('47c: legacy TreeCanvas.tsx still uses TreeRenderer', legacy2DSrc.includes('TreeRenderer'), 'TreeRenderer missing');
+  check('47c: legacy TreeCanvas.tsx does not import @react-three/fiber', !legacy2DSrc.includes('@react-three/fiber'), 'contains R3F');
+  check('47c: legacy TreeCanvas.tsx does not import three', !legacy2DSrc.includes("from 'three'") && !legacy2DSrc.includes('from "three"'), 'contains three');
+  check('47c: legacy TreeCanvas.tsx preserves exportImage method', legacy2DSrc.includes('exportImage'), 'exportImage missing');
+
+  // --- 47d. Procedural 3D Tree and Arena Stage architecture checks ---
+  const tree3DSrc = readFileSync(
+    new URL('../web/src/components/tree/three/ProceduralTree3D.tsx', import.meta.url), 'utf8');
+  const stage3DSrc = readFileSync(
+    new URL('../web/src/components/tree/three/ArenaStage3D.tsx', import.meta.url), 'utf8');
+  const simPageSrc = readFileSync(
+    new URL('../web/src/app/tree/simulator/page.tsx', import.meta.url), 'utf8');
+
+  check('47d: ProceduralTree3D is marked use client', tree3DSrc.includes("'use client'"), 'missing use client');
+  check('47d: ProceduralTree3D uses useFrame and Math.sin for harmonic sway',
+    tree3DSrc.includes('useFrame') && tree3DSrc.includes('Math.sin'), 'missing useFrame/Math.sin');
+  check('47d: ProceduralTree3D renders volumetric cylinder and dodecahedron geometries',
+    tree3DSrc.includes('cylinderGeometry') && tree3DSrc.includes('dodecahedronGeometry'), 'missing geometries');
+  check('47d: ProceduralTree3D implements golden latch aura',
+    tree3DSrc.includes('isGoldenLatch') && tree3DSrc.includes('ringGeometry'), 'missing golden latch aura');
+
+  check('47d: ArenaStage3D enables shadows and preserveDrawingBuffer for snapshots',
+    stage3DSrc.includes('shadows') && stage3DSrc.includes('preserveDrawingBuffer: true'), 'missing shadows/preserveDrawingBuffer');
+  check('47d: ArenaStage3D configures 4 symmetric tree positions',
+    stage3DSrc.includes('[-6, 0, 0]') && stage3DSrc.includes('[6, 0, 0]'), 'missing 4 tree positions');
+
+  check('47d: Simulator page uses dynamic import with ssr: false for Canvas safety',
+    simPageSrc.includes('dynamic(') && simPageSrc.includes('ssr: false'), 'missing dynamic ssr:false');
+  check('47d: Simulator page includes 4 range sliders and action triggers',
+    simPageSrc.includes('type="range"') && simPageSrc.includes('handleSliderChange') && simPageSrc.includes('handleAddDew'),
+    'missing sliders/actions');
+  check('47d: Simulator page includes snapshot trigger with captureCanvasSnapshot',
+    simPageSrc.includes('captureCanvasSnapshot') && simPageSrc.includes('handleSnapshot'), 'missing snapshot handler');
+
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);
   await teacher.from('exams').delete().eq('code', EXAM.code); // cascades
