@@ -7,6 +7,17 @@ import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import * as THREE from 'three';
 import ProceduralTree3D from './ProceduralTree3D';
 
+// Intercept upstream R3F Clock deprecation warning
+if (typeof window !== 'undefined') {
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    if (typeof args[0] === 'string' && args[0].includes('THREE.Clock: This module has been deprecated')) {
+      return;
+    }
+    originalWarn.apply(console, args);
+  };
+}
+
 export interface TreeStageData {
   teamNumber: number;
   vitality: number; // 0.0 -> 1.0
@@ -78,17 +89,17 @@ export default function ArenaStage3D({
         <color attach="background" args={['#080e1a']} />
         <fog attach="fog" args={['#080e1a', 15, 38]} />
 
-        {/* LIGHTING SETUP */}
-        <ambientLight intensity={0.8} />
+        {/* SOFTENED STUDIO LIGHTING */}
+        <ambientLight intensity={0.55} />
         <directionalLight
           position={[10, 16, 12]}
-          intensity={1.7}
+          intensity={1.3}
           color="#fffaf0"
           castShadow
           shadow-mapSize-width={2048}
           shadow-mapSize-height={2048}
         />
-        <directionalLight position={[-10, 6, -10]} intensity={0.4} color="#818cf8" />
+        <directionalLight position={[-10, 6, -10]} intensity={0.35} color="#818cf8" />
 
         {/* MAGICAL SPORES / FIREFLIES */}
         <Sparkles count={45} scale={[22, 7, 10]} size={2.5} speed={0.4} opacity={0.5} color="#93c5fd" />
