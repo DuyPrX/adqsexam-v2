@@ -7935,6 +7935,17 @@ async function main() {
   check('47d: Simulator page includes snapshot trigger with captureCanvasSnapshot',
     simPageSrc.includes('captureCanvasSnapshot') && simPageSrc.includes('handleSnapshot'), 'missing snapshot handler');
 
+  // --- 47e. Botanical species archetypes & metamorphosis checks ---
+  check('47e: ProceduralTree3D implements distinct botanical species archetypes',
+    tree3DSrc.includes('TREE_SPECIES') && tree3DSrc.includes('oak') && tree3DSrc.includes('banyan') && tree3DSrc.includes('pine') && tree3DSrc.includes('sakura'),
+    'missing botanical species archetypes');
+  check('47e: ProceduralTree3D implements true seedling metamorphosis with cotyledon sprout leaves',
+    tree3DSrc.includes('isSprout') && tree3DSrc.includes('Cotyledon'),
+    'missing seedling metamorphosis');
+  check('47e: ProceduralTree3D implements celebratory Golden Latch god ray and orbiting pollen ring',
+    tree3DSrc.includes('godRayRef') && tree3DSrc.includes('pollenGroupRef'),
+    'missing golden latch celebration FX');
+
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);
   await teacher.from('exams').delete().eq('code', EXAM.code); // cascades

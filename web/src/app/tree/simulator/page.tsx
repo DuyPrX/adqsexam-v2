@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import dynamic from 'next/dynamic';
-import { captureCanvasSnapshot } from '@/lib/tree3d';
+import { captureCanvasSnapshot, TREE_SPECIES } from '@/lib/tree3d';
 import type { CameraPreset } from '@/components/tree/three/ArenaStage3D';
 
 // Dynamically import 3D Canvas to guarantee SSR-safety
@@ -148,7 +148,10 @@ export default function Tree3DSimulatorPage() {
         {[1, 2, 3, 4].map((team, idx) => (
           <div key={team} className="p-3 bg-slate-800/80 rounded-lg border border-slate-700/60 flex flex-col gap-2">
             <div className="flex justify-between items-center text-xs font-semibold">
-              <span className="text-indigo-400 font-medium">Cây {team} (Tổ {team})</span>
+              <div>
+                <span className="text-indigo-400 font-medium">Tổ {team}</span>
+                <span className="text-slate-300 ml-1.5 font-bold">({TREE_SPECIES[team]?.name})</span>
+              </div>
               <span className="font-mono text-emerald-400 font-bold">{(vitalities[idx] * 100).toFixed(0)}%</span>
             </div>
             <input
