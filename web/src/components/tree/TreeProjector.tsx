@@ -38,6 +38,8 @@ import type { TeamNumber, TreeSessionDetail, TreeSubmissionRow } from '@/lib/typ
 import { TreeCanvas, type TreeCanvasHandle } from './TreeCanvas';
 import { TreeLobby } from './TreeLobby';
 import { TreeQrCode } from './TreeQrCode';
+import { aggregateBrainstormContributions } from '@/lib/treeBrainstormSummary';
+import { TreeBrainstormSummaryModal } from './TreeBrainstormSummaryModal';
 
 interface TreeProjectorProps {
   session: TreeSessionDetail;
@@ -125,6 +127,7 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
   const [isEnding, setIsEnding] = useState(false);
   const [muted, setMuted] = useState(false);
   const [firstFinishedTeam, setFirstFinishedTeam] = useState<TeamNumber | null>(null);
+  const [isSummaryOpen, setIsSummaryOpen] = useState(false);
 
   // Phase 8.3 — sound is opt-out and its state lives in localStorage, but the
   // value can only be read on the client, so it is synced after mount rather
@@ -146,6 +149,11 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
   }, []);
 
   const joinUrl = useMemo(() => buildJoinUrl(session), [session]);
+
+  const brainstormSummaries = useMemo(() => {
+    if (session.game_mode !== 'BRAINSTORM') return [];
+    return aggregateBrainstormContributions(submissions);
+  }, [session.game_mode, submissions]);
 
   // --- countdown -----------------------------------------------------------
   /**
@@ -376,6 +384,9 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
       await endTreeSession(createClient(), session.id);
       setIsActive(false);
       setStatus('FINISHED');
+      if (session.game_mode === 'BRAINSTORM') {
+        setIsSummaryOpen(true);
+      }
     } catch (err) {
       setError(err instanceof PersistenceError ? err.message : 'Không kết thúc được hoạt động.');
     } finally {
@@ -575,6 +586,16 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
             📸 Lưu ảnh kỷ niệm
           </button>
 
+          {session.game_mode === 'BRAINSTORM' && (
+            <button
+              type="button"
+              onClick={() => setIsSummaryOpen(true)}
+              className="flex w-full items-center justify-center gap-2 rounded-lg border border-amber-500/50 bg-amber-500/10 px-4 py-2.5 text-sm font-semibold text-amber-200 transition hover:bg-amber-500/20"
+            >
+              💡 Xem tổng kết ý tưởng
+            </button>
+          )}
+
           <button
             type="button"
             onClick={() => void handleEndSession()}
@@ -619,6 +640,15 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
           />
         ))}
       </main>
+
+      {session.game_mode === 'BRAINSTORM' && (
+        <TreeBrainstormSummaryModal
+          isOpen={isSummaryOpen}
+          onClose={() => setIsSummaryOpen(false)}
+          teams={brainstormSummaries}
+          topicTitle={session.title}
+        />
+      )}
     </div>
   );
 }

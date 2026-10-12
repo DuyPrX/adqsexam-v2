@@ -7946,6 +7946,115 @@ async function main() {
     tree3DSrc.includes('godRayRef') && tree3DSrc.includes('pollenGroupRef'),
     'missing golden latch celebration FX');
 
+  /* --- 48. post-session brainstorm summary modal (Phase 10.6) ---------- */
+  step(48, 'post-session brainstorm summary modal (1-student-to-1-idea model)');
+
+  const { aggregateBrainstormContributions } = await import(
+    new URL('../web/src/lib/treeBrainstormSummary.ts', import.meta.url).href
+  );
+
+  // 48a: aggregateBrainstormContributions returns 4 team summaries
+  const sampleSubmissions = [
+    {
+      id: 'sub-1',
+      team_number: 1,
+      student_name: 'Nguyễn Văn B',
+      answer_text: 'Sử dụng năng lượng mặt trời',
+      submitted_at: '2026-10-12T10:00:00Z',
+    },
+    {
+      id: 'sub-2',
+      team_number: 1,
+      student_name: 'Trần Thị A',
+      answer_text: 'Trồng cây xanh trường học',
+      submitted_at: '2026-10-12T10:01:00Z',
+    },
+    {
+      id: 'sub-3',
+      team_number: 1,
+      student_name: 'Trần Thị A', // Re-submission: update idea
+      answer_text: 'Trồng thêm hoa và cây bản địa trường học',
+      submitted_at: '2026-10-12T10:02:00Z',
+    },
+    {
+      id: 'sub-4',
+      team_number: 2,
+      student_name: 'Lê Văn C',
+      content: 'Tái chế rác thải nhựa',
+      created_at: '2026-10-12T10:03:00Z',
+    },
+    {
+      id: 'sub-5',
+      team_number: 2,
+      student_name: 'Hoàng Thị D',
+      idea: 'Thu gom pin cũ',
+      created_at: '2026-10-12T10:04:00Z',
+    },
+    {
+      id: 'sub-6',
+      team_number: 2,
+      student_name: 'Phạm Văn E',
+      text: 'Tiết kiệm nước sinh hoạt',
+      created_at: '2026-10-12T10:05:00Z',
+    },
+  ];
+
+  const aggregated = aggregateBrainstormContributions(sampleSubmissions);
+  check('48a: aggregateBrainstormContributions returns exactly 4 teams',
+    aggregated.length === 4 && aggregated.every((t) => t.teamNumber >= 1 && t.teamNumber <= 4),
+    String(aggregated.length));
+
+  // 48b: 1 student = 1 idea deduplication
+  const team1 = aggregated.find((t) => t.teamNumber === 1);
+  check('48b: team 1 deduplicates student Trần Thị A to 1 idea',
+    team1?.entries.length === 2,
+    String(team1?.entries.length));
+  const studentAEntry = team1?.entries.find((e) => e.studentName === 'Trần Thị A');
+  check('48b: retains the latest idea for Trần Thị A',
+    studentAEntry?.ideaText === 'Trồng thêm hoa và cây bản địa trường học',
+    studentAEntry?.ideaText);
+
+  // 48c: alphabetical order of students
+  check('48c: entries are sorted alphabetically by student name',
+    team1?.entries[0].studentName === 'Nguyễn Văn B' && team1?.entries[1].studentName === 'Trần Thị A',
+    JSON.stringify(team1?.entries.map((e) => e.studentName)));
+
+  // 48d: ranks by total approved ideas (Team 2 has 3 ideas, Team 1 has 2, Teams 3 & 4 have 0)
+  const team2 = aggregated.find((t) => t.teamNumber === 2);
+  check('48d: Team 2 is ranked #1 with 3 ideas',
+    team2?.rank === 1 && team2?.totalApproved === 3,
+    `rank: ${team2?.rank}, approved: ${team2?.totalApproved}`);
+  check('48d: Team 1 is ranked #2 with 2 ideas',
+    team1?.rank === 2 && team1?.totalApproved === 2,
+    `rank: ${team1?.rank}, approved: ${team1?.totalApproved}`);
+
+  // 48e: component markup checks
+  const summaryModalSrc = readFileSync(
+    new URL('../web/src/components/tree/TreeBrainstormSummaryModal.tsx', import.meta.url), 'utf8');
+  check('48e: TreeBrainstormSummaryModal is marked use client',
+    summaryModalSrc.includes("'use client'"), 'missing use client');
+  check('48e: TreeBrainstormSummaryModal supports window.print',
+    summaryModalSrc.includes('window.print()'), 'missing window.print');
+  check('48e: TreeBrainstormSummaryModal defines 4 team themes and rank badges',
+    summaryModalSrc.includes('TEAM_THEMES') && summaryModalSrc.includes('RANK_BADGES'),
+    'missing themes or rank badges');
+  check('48e: TreeBrainstormSummaryModal handles 4-column responsive grid',
+    summaryModalSrc.includes('grid-cols-4') || summaryModalSrc.includes('lg:grid-cols-4'),
+    'missing 4-column grid');
+
+  // 48f: TreeProjector wiring checks
+  const projectorSrc = readFileSync(
+    new URL('../web/src/components/tree/TreeProjector.tsx', import.meta.url), 'utf8');
+  check('48f: TreeProjector imports TreeBrainstormSummaryModal and aggregate helper',
+    projectorSrc.includes('TreeBrainstormSummaryModal') && projectorSrc.includes('aggregateBrainstormContributions'),
+    'missing modal or helper import');
+  check('48f: TreeProjector triggers summary modal on session end in BRAINSTORM mode',
+    projectorSrc.includes("if (session.game_mode === 'BRAINSTORM')") && projectorSrc.includes('setIsSummaryOpen(true)'),
+    'missing brainstorm end trigger');
+  check('48f: TreeProjector offers brainstorm summary review action button',
+    projectorSrc.includes('Xem tổng kết ý tưởng'),
+    'missing review button');
+
   /* --- teardown --------------------------------------------------------- */
   await teacher.removeChannel(channel);
   await teacher.from('exams').delete().eq('code', EXAM.code); // cascades
