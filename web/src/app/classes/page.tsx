@@ -32,7 +32,7 @@ export default async function ClassesPage() {
         </div>
         <Link
           href="/"
-          className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+          className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50"
         >
           <ArrowLeft size={15} />
           Về đề thi

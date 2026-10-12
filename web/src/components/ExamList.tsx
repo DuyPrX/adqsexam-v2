@@ -58,14 +58,14 @@ export function ExamList({ exams, trashedExams, counts, teacherEmail }: ExamList
         <div className="flex items-center gap-2">
           <Link
             href="/classes"
-            className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+            className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50"
           >
             <BookOpen size={15} />
             Lớp học
           </Link>
           <Link
             href="/create"
-            className="flex items-center gap-1.5 rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800"
+            className="flex items-center gap-1.5 rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800"
           >
             <Plus size={15} />
             Tạo đề mới
@@ -74,7 +74,7 @@ export function ExamList({ exams, trashedExams, counts, teacherEmail }: ExamList
             type="button"
             onClick={handleSignOut}
             disabled={isSigningOut}
-            className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
+            className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:opacity-50"
           >
             <LogOut size={15} />
             Đăng xuất
