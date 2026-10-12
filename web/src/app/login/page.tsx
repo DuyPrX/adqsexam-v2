@@ -28,10 +28,10 @@ export default function LoginPage() {
   };
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-slate-50 p-4">
+    <main className="flex min-h-screen items-center justify-center p-4">
       <form
         onSubmit={handleSubmit}
-        className="w-full max-w-sm space-y-4 rounded-xl border border-slate-200 bg-white p-6 shadow-sm"
+        className="w-full max-w-sm space-y-4 rounded-xl border border-slate-200/90 bg-white/95 p-6 shadow-md backdrop-blur-sm"
       >
         <div className="space-y-1 text-center">
           <h1 className="text-lg font-bold text-slate-900">ADQS Exam</h1>
