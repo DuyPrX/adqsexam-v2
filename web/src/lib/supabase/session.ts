@@ -1,6 +1,6 @@
 import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
-import { getSupabasePublishableKey, getSupabaseUrl } from '../env';
+import { getSupabasePublishableKey, getSupabaseUrl, resolveStudentAppBaseUrl } from '../env';
 
 /**
  * Refreshes the Supabase auth session on every request and keeps the auth
@@ -42,15 +42,26 @@ export async function updateSession(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
-  // Gate the teacher area. /login, /tree/simulator, and the auth callback stay public.
+  // Gate the teacher area. /login, /tree/simulator, public exam take routes, and auth callback stay public.
   const { pathname } = request.nextUrl;
   const isPublicRoute =
     pathname === '/login' ||
     pathname.startsWith('/auth') ||
-    pathname.startsWith('/tree/simulator');
+    pathname.startsWith('/tree/simulator') ||
+    pathname.startsWith('/take/') ||
+    pathname.startsWith('/exam/') ||
+    /^\/exams\/[^/]+\/take\/?$/.test(pathname);
   const isProtected = !isPublicRoute;
 
   if (isProtected && !user) {
+    const code = request.nextUrl.searchParams.get('code');
+    if (pathname === '/' && code) {
+      const studentBase = resolveStudentAppBaseUrl();
+      if (studentBase && !studentBase.includes(request.nextUrl.host)) {
+        return NextResponse.redirect(`${studentBase}/?code=${encodeURIComponent(code)}`);
+      }
+    }
+
     const url = request.nextUrl.clone();
     url.pathname = '/login';
     return NextResponse.redirect(url);

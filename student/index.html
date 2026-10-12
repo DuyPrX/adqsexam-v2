@@ -65,18 +65,18 @@
         <div class="login__brand" aria-hidden="true">ADQS</div>
 
         <div class="mode-tabs" role="tablist" aria-label="Chọn chế độ">
-          <button id="tabOfficial" type="button" class="mode-tab is-active" role="tab"
-                  aria-selected="true" aria-controls="officialPanel">
-            Phòng thi chính thức
-          </button>
-          <button id="tabPractice" type="button" class="mode-tab" role="tab"
-                  aria-selected="false" aria-controls="practicePanel">
+          <button id="tabPractice" type="button" class="mode-tab is-active" role="tab"
+                  aria-selected="true" aria-controls="practicePanel">
             Tự ôn luyện
+          </button>
+          <button id="tabOfficial" type="button" class="mode-tab" role="tab"
+                  aria-selected="false" aria-controls="officialPanel">
+            Phòng thi chính thức
           </button>
         </div>
 
         <!-- ---------- Official exam panel ---------- -->
-        <div id="officialPanel" class="mode-panel" role="tabpanel" aria-labelledby="tabOfficial">
+        <div id="officialPanel" class="mode-panel hidden" role="tabpanel" aria-labelledby="tabOfficial">
           <h1 id="loginHeading" class="login__title">Vào phòng làm bài</h1>
           <p class="login__subtitle">
             Nhập chính xác thông tin đã được giáo viên ghi trong danh sách dự thi.
@@ -178,7 +178,7 @@
         </div>
 
         <!-- ---------- Self-practice panel ---------- -->
-        <div id="practicePanel" class="mode-panel hidden" role="tabpanel" aria-labelledby="tabPractice">
+        <div id="practicePanel" class="mode-panel" role="tabpanel" aria-labelledby="tabPractice">
           <h1 class="login__title">Tự ôn luyện</h1>
           <p class="login__subtitle">
             Dành cho học sinh đã có tên trong danh sách dự thi. Làm lại đề giáo viên

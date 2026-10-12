@@ -54,7 +54,7 @@ const TEAMS: TeamNumber[] = [1, 2, 3, 4];
  * Phase 9.1 — the SHORT session code is preferred over the uuid: it is what the
  * projector prints as the PIN, so the QR and the PIN resolve to the same room and
  * a student who mistypes neither has to care which they used. The SPA's
- * `loadTreeFromUrl()` reads `?session=`/`?tree=`/`?code=`, and
+ * `loadTreeFromUrl()` reads `?session=`/`?tree=`, and
  * `get_public_tree_session` accepts either form.
  *
  * The student SPA is a static bundle served from a directory root (Cloudflare

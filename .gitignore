@@ -39,3 +39,4 @@ desktop.ini
 .vscode/*
 !.vscode/extensions.json
 *.swp
+.agents/

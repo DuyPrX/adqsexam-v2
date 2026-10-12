@@ -2901,6 +2901,9 @@ function prefillFromUrl() {
   const codeParam = params.get('code') || params.get('c');
   if (!codeParam) return;
 
+  // Ensure official exam tab is selected when joining via exam code
+  selectModeTab('official');
+
   const input = $('exam-code');
   if (!input) return;
 
@@ -3250,9 +3253,9 @@ function treeCheckinError(message) {
  */
 function loadTreeFromUrl() {
   const params = new URLSearchParams(window.location.search);
-  // Phase 9.1 — `?code=` carries the short projector PIN; `?tree=` the uuid.
-  // Both are accepted by the RPC (and `?session=` remains for older links).
-  const sessionId = params.get('code') || params.get('session') || params.get('tree');
+  // Phase 7.4 / 9.1 — `?tree=` carries the uuid or projector PIN; `?session=` for older links.
+  // Note: `?code=` is reserved for exam taking (prefillFromUrl), so Tree sessions must NOT read `?code=`.
+  const sessionId = params.get('tree') || params.get('session') || params.get('tree_code');
   if (!sessionId) return false;
   loadTreeActivity(sessionId);
   return true;
@@ -3983,18 +3986,22 @@ async function boot() {
   document.addEventListener('keydown', onKeyDown);
 
   // Phase 7.4 — an explicit tree link wins over both the login form and a
-  // resumable exam: opening `?session=` IS the student's intent, and resuming
-  // would immediately hide the tree screen. The stored exam session is left
-  // untouched, so dropping the query string resumes it.
+  // resumable exam: opening `?tree=` / `?session=` IS the student's intent, and
+  // resuming would immediately hide the tree screen. The stored exam session is
+  // left untouched, so dropping the query string resumes it.
   if (loadTreeFromUrl()) return;
 
   const resumed = await tryResumeSession();
   if (!resumed) {
     show($('loginScreen'));
-    // Phase 6.3 — only prefill when we are actually showing the login form; a
-    // resumed session skips the landing screen entirely, so the roster fetch
-    // would be wasted work.
-    prefillFromUrl();
+    const params = new URLSearchParams(window.location.search);
+    const hasExamCode = Boolean(params.get('code') || params.get('c'));
+    if (hasExamCode) {
+      selectModeTab('official');
+      prefillFromUrl();
+    } else {
+      selectModeTab('practice');
+    }
   }
 }
 

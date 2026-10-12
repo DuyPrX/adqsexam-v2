@@ -1,0 +1,5 @@
+# Cloudflare Pages redirects for ADQS Exam test taking routes
+/exam/:code         /?code=:code        302
+/take/:code         /?code=:code        302
+/exams/:code/take   /?code=:code        302
+/exams/:code        /?code=:code        302
