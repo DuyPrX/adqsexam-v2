@@ -14,6 +14,7 @@ import {
   Maximize,
   Shield,
   ShieldAlert,
+  Shuffle,
 } from 'lucide-react';
 import type { ExamSecurityConfig } from '@/lib/types';
 import { cn } from '@/lib/utils';
@@ -40,6 +41,7 @@ export function SecurityPolicyControl({
     config.enforce_fullscreen,
     config.detect_split_screen,
     config.detect_motion,
+    config.shuffle_options,
     config.auto_submit_on_limit,
   ].filter(Boolean).length;
 
@@ -81,7 +83,7 @@ export function SecurityPolicyControl({
                 : 'bg-slate-200 text-slate-600',
             )}
           >
-            {activeCount}/8 đang bật
+            {activeCount}/9 đang bật
           </span>
         </div>
         <div className="text-slate-400 hover:text-slate-600">
@@ -287,7 +289,35 @@ export function SecurityPolicyControl({
             </div>
           </label>
 
-          {/* 8. Auto-submit on limit */}
+          {/* 8. Shuffle Options */}
+          <label
+            className={cn(
+              'flex cursor-pointer items-start gap-3 rounded-lg border p-2.5 transition',
+              config.shuffle_options
+                ? 'border-indigo-200 bg-white shadow-xs'
+                : 'border-slate-200 bg-slate-100/60 opacity-80',
+              disabled && 'cursor-not-allowed opacity-50',
+            )}
+          >
+            <input
+              type="checkbox"
+              checked={config.shuffle_options}
+              disabled={disabled}
+              onChange={() => handleToggle('shuffle_options')}
+              className="mt-0.5 h-4 w-4 rounded accent-indigo-600"
+            />
+            <div className="flex-1 text-xs">
+              <div className="flex items-center gap-1.5 font-semibold text-slate-800">
+                <Shuffle size={13} className="text-indigo-600" />
+                <span>Đảo thứ tự phương án A, B, C, D (shuffle_options)</span>
+              </div>
+              <p className="mt-0.5 text-slate-500">
+                Xáo trộn thứ tự các lựa chọn trắc nghiệm riêng biệt cho từng thí sinh (PRNG xác định), chống nhìn bài.
+              </p>
+            </div>
+          </label>
+
+          {/* 9. Auto-submit on limit */}
           <label
             className={cn(
               'flex cursor-pointer items-start gap-3 rounded-lg border p-2.5 transition',

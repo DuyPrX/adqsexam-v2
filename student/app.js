@@ -1179,12 +1179,58 @@ function buildQuestionHead(question, type) {
   return head;
 }
 
+function hashStringToSeed(str) {
+  let hash = 1779033703 ^ str.length;
+  for (let i = 0; i < str.length; i++) {
+    hash = Math.imul(hash ^ str.charCodeAt(i), 3432918353);
+    hash = (hash << 13) | (hash >>> 19);
+  }
+  return hash >>> 0;
+}
+
+function createMulberry32(seed) {
+  return function () {
+    let t = (seed += 0x6d2b79f5);
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function shuffleOptionsDeterministically(options, studentCode, questionId) {
+  if (!Array.isArray(options) || options.length <= 1) {
+    return (options || []).map((opt, idx) => ({ originalIndex: idx, value: opt }));
+  }
+  const seed = hashStringToSeed(`${studentCode}_${questionId}`);
+  const rng = createMulberry32(seed);
+
+  // Attach canonical original index before shuffling
+  const wrapped = options.map((opt, idx) => ({
+    originalIndex: idx,
+    value: opt,
+  }));
+
+  // Fisher-Yates with seeded rng
+  for (let i = wrapped.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [wrapped[i], wrapped[j]] = [wrapped[j], wrapped[i]];
+  }
+
+  return wrapped;
+}
+
 function buildMcqOptions(question, answer) {
   const list = el('div', { className: 'options', attrs: { role: 'radiogroup', 'aria-label': 'Phương án trả lời' } });
-  const options = Array.isArray(question.options) ? question.options : [];
+  const rawOptions = Array.isArray(question.options) ? question.options : [];
 
-  options.forEach((option, index) => {
-    const selected = answer.draft === index;
+  let optionsList = rawOptions.map((opt, idx) => ({ originalIndex: idx, value: opt }));
+  if (state.securityConfig?.shuffle_options !== false) {
+    const qId = question.id || `q_${state.currentIndex}`;
+    optionsList = shuffleOptionsDeterministically(rawOptions, state.studentCode || '', qId);
+  }
+
+  optionsList.forEach((item, displayIndex) => {
+    const selected = answer.draft === item.originalIndex;
     const btn = el('button', {
       className: 'option',
       attrs: {
@@ -1197,10 +1243,10 @@ function buildMcqOptions(question, answer) {
     // Phase 8.5 — the question just advanced to is the one to flash, so the
     // student's last tap is visibly acknowledged for the full 280ms beat.
     if (selected && state.flashIndex === state.currentIndex) btn.classList.add('is-flash');
-    btn.appendChild(el('span', { className: 'option__key', text: String.fromCharCode(65 + index) }));
-    btn.appendChild(el('span', { className: 'option__label', text: option }));
+    btn.appendChild(el('span', { className: 'option__key', text: String.fromCharCode(65 + displayIndex) }));
+    btn.appendChild(el('span', { className: 'option__label', text: item.value }));
     // A second tap on the SAME option toggles nothing but must not re-advance.
-    btn.addEventListener('click', () => selectMcq(index));
+    btn.addEventListener('click', () => selectMcq(item.originalIndex));
     list.appendChild(btn);
   });
   return list;
@@ -1796,6 +1842,7 @@ function bindAntiCheat(cfg) {
     enforce_fullscreen: true,
     detect_split_screen: true,
     detect_motion: false,
+    shuffle_options: true,
     max_violations: 3,
     auto_submit_on_limit: false,
   };
@@ -1957,6 +2004,9 @@ if (typeof window !== 'undefined') {
   window.setupForensicWatermark = setupForensicWatermark;
   window.handleViolationRecorded = handleViolationRecorded;
   window.updateViolationBadge = updateViolationBadge;
+  window.hashStringToSeed = hashStringToSeed;
+  window.createMulberry32 = createMulberry32;
+  window.shuffleOptionsDeterministically = shuffleOptionsDeterministically;
 }
 
 async function requestFullscreen() {

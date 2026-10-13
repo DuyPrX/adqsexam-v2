@@ -85,6 +85,7 @@ create table if not exists public.exams (
       "enforce_fullscreen": true,
       "detect_split_screen": true,
       "detect_motion": false,
+      "shuffle_options": true,
       "max_violations": 3,
       "auto_submit_on_limit": false
     }'::jsonb,
@@ -108,7 +109,7 @@ alter table public.exams add column if not exists global_pin varchar(50);
 -- pass (no NULL window) and preserves the shipped "always shuffled" behaviour;
 -- the client treats only an explicit false as "keep the authored order".
 alter table public.exams add column if not exists shuffle_questions boolean not null default true;
--- Phase 11.0 / 11.1 Anti-cheat security config policy.
+-- Phase 11.0 / 11.1 / 11.2 Anti-cheat security config policy.
 alter table public.exams add column if not exists security_config jsonb not null default '{
   "prevent_copy": true,
   "detect_multitouch": true,
@@ -117,6 +118,7 @@ alter table public.exams add column if not exists security_config jsonb not null
   "enforce_fullscreen": true,
   "detect_split_screen": true,
   "detect_motion": false,
+  "shuffle_options": true,
   "max_violations": 3,
   "auto_submit_on_limit": false
 }'::jsonb;
@@ -129,6 +131,7 @@ alter table public.exams alter column security_config set default '{
   "enforce_fullscreen": true,
   "detect_split_screen": true,
   "detect_motion": false,
+  "shuffle_options": true,
   "max_violations": 3,
   "auto_submit_on_limit": false
 }'::jsonb;
@@ -818,6 +821,7 @@ begin
       "enforce_fullscreen": true,
       "detect_split_screen": true,
       "detect_motion": false,
+      "shuffle_options": true,
       "max_violations": 3,
       "auto_submit_on_limit": false
     }'::jsonb);
@@ -2376,6 +2380,7 @@ begin
       "enforce_fullscreen": true,
       "detect_split_screen": true,
       "detect_motion": false,
+      "shuffle_options": true,
       "max_violations": 3,
       "auto_submit_on_limit": false
     }'::jsonb);
@@ -2445,6 +2450,69 @@ begin
     );
 
     return jsonb_build_object('success', true);
+end;
+$$;
+
+-- ----------------------------------------------------------------------------
+-- C.17  proctor_force_submit_exam  (teacher — authenticated, Phase 11.2)
+--       Allows teachers/proctors to forcibly end a candidate exam session and log
+--       the action to exam_audit_logs.
+-- ----------------------------------------------------------------------------
+create or replace function public.proctor_force_submit_exam(
+  p_exam_code varchar,
+  p_student_code varchar,
+  p_reason text default 'Giám thị thu bài trực tiếp'
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_teacher_id uuid;
+  v_exam record;
+begin
+  v_teacher_id := auth.uid();
+  if v_teacher_id is null then
+    return jsonb_build_object('success', false, 'code', 'UNAUTHORIZED', 'message', 'Yêu cầu đăng nhập giáo viên.');
+  end if;
+
+  select id, code, user_id
+  into v_exam
+  from public.exams
+  where code = upper(trim(p_exam_code)) and user_id = v_teacher_id;
+
+  if not found then
+    return jsonb_build_object('success', false, 'code', 'FORBIDDEN', 'message', 'Không tìm thấy đề thi hoặc bạn không có quyền.');
+  end if;
+
+  -- Insert audit record of forced submission
+  insert into public.exam_audit_logs (
+    exam_code, student_code, violation_type, violation_message, metadata, occurred_at
+  ) values (
+    v_exam.code,
+    trim(p_student_code),
+    'PROCTOR_FORCE_SUBMIT',
+    coalesce(p_reason, 'Giám thị thu bài cưỡng chế'),
+    jsonb_build_object('proctor_id', v_teacher_id, 'forced', true),
+    now()
+  );
+
+  -- Remove from active_sessions if exists
+  delete from public.active_sessions
+  where exam_code = v_exam.code 
+    and lower(trim(student_code)) = lower(trim(p_student_code));
+
+  -- Close session in exam_sessions if table exists
+  if exists (
+    select 1 from information_schema.tables 
+    where table_schema = 'public' and table_name = 'exam_sessions'
+  ) then
+    execute 'update public.exam_sessions set is_completed = true, submitted_at = now() where exam_id = $1 and lower(trim(student_code)) = lower(trim($2))'
+    using v_exam.id, p_student_code;
+  end if;
+
+  return jsonb_build_object('success', true, 'exam_code', v_exam.code, 'student_code', p_student_code);
 end;
 $$;
 
@@ -3193,6 +3261,10 @@ grant execute on function public.tree_session_is_public(uuid)                   
 grant execute on function public.update_exam_questions_safe(varchar, jsonb)                                    to authenticated;
 grant execute on function public.delete_exam(varchar)                                                          to authenticated;
 grant execute on function public.restore_exam(varchar)                                                         to authenticated;
+-- Phase 11.2 — teacher-only live proctoring force submit.
+revoke all on function public.proctor_force_submit_exam(varchar, varchar, text)                                from public;
+revoke all on function public.proctor_force_submit_exam(varchar, varchar, text)                                from anon;
+grant execute on function public.proctor_force_submit_exam(varchar, varchar, text)                             to authenticated;
 grant execute on function public.purge_expired_exams()                                                         to authenticated;
 grant execute on function public.recalculate_exam_scores(varchar)                                              to authenticated;
 -- Phase 8.11 — teacher-only group management (ownership re-checked in the body).
@@ -3259,6 +3331,14 @@ begin
     ) then
         alter publication supabase_realtime add table public.tree_submissions;
     end if;
+
+    -- Phase 11.2 — Live Proctoring: stream audit log events to proctors
+    if not exists (
+        select 1 from pg_publication_tables
+        where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'exam_audit_logs'
+    ) then
+        alter publication supabase_realtime add table public.exam_audit_logs;
+    end if;
 end
 $$;
 
@@ -3269,6 +3349,7 @@ $$;
 -- needs the full old row. `active_sessions` keeps exam_code inside its
 -- composite primary key and therefore needs no change.
 alter table public.exam_results replica identity full;
+alter table public.exam_audit_logs replica identity full;
 
 -- Phase 7.1 — clients filter tree events by `session_id`, a non-key column, and
 -- resubmissions arrive as UPDATEs. Without `full` those edits would be dropped.

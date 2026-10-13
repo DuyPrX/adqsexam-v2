@@ -4,8 +4,7 @@ import { ArrowLeft } from 'lucide-react';
 import { createClient } from '@/lib/supabase/server';
 import { EXAM_COLUMNS, PersistenceError } from '@/lib/exams';
 import type { ExamResultRow, ExamRow, QuestionBankRow, StudentRow } from '@/lib/types';
-import { ResultsDashboard } from '@/components/ResultsDashboard';
-import { LiveProctorPanel } from '@/components/LiveProctorPanel';
+import { ExamResultsContainer } from '@/components/exams/ExamResultsContainer';
 import { ExamActiveToggle } from '@/components/ExamActiveToggle';
 import { RegradeButton } from '@/components/RegradeButton';
 
@@ -13,6 +12,7 @@ export const dynamic = 'force-dynamic';
 
 interface PageProps {
   params: Promise<{ code: string }>;
+  searchParams?: Promise<{ view?: string }>;
 }
 
 /** Loads one exam by its public code (RLS restricts the row to its owner). */
@@ -28,8 +28,10 @@ async function loadExam(code: string): Promise<ExamRow | null> {
   return data;
 }
 
-export default async function ExamResultsPage({ params }: PageProps) {
+export default async function ExamResultsPage({ params, searchParams }: PageProps) {
   const { code } = await params;
+  const resolvedSearchParams = searchParams ? await searchParams : undefined;
+  const initialView = resolvedSearchParams?.view === 'proctor' ? 'proctor' : 'results';
 
   // Phase 5.3 §3: no waterfall. The three child queries key off `code` (not on
   // the exam row), so they can run concurrently with `loadExam` instead of
@@ -101,12 +103,12 @@ export default async function ExamResultsPage({ params }: PageProps) {
         </Link>
       </div>
 
-      <LiveProctorPanel examCode={exam.code} roster={(rosterResponse.data ?? []) as StudentRow[]} />
-
-      <ResultsDashboard
+      <ExamResultsContainer
         exam={exam}
         initialResults={(resultsResponse.data ?? []) as ExamResultRow[]}
         questions={questions}
+        roster={(rosterResponse.data ?? []) as StudentRow[]}
+        initialView={initialView}
       />
     </main>
   );

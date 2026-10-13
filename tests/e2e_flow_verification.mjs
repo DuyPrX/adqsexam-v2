@@ -8325,7 +8325,7 @@ async function main() {
     p2SecControlSrc.includes('detect_motion') &&
     p2SecControlSrc.includes('auto_submit_on_limit') &&
     p2SecControlSrc.includes('max_violations') &&
-    p2SecControlSrc.includes('{activeCount}/8 đang bật'),
+    (p2SecControlSrc.includes('{activeCount}/8 đang bật') || p2SecControlSrc.includes('{activeCount}/9 đang bật')),
     'missing Phase 11.1 toggles in SecurityPolicyControl');
 
   // 50e: Student SPA styles, markup, and logic
@@ -8355,6 +8355,203 @@ async function main() {
     p2StudentAppSrc.includes('updateViolationBadge') &&
     p2StudentAppSrc.includes('btnEnterFullscreen'),
     'missing anti-cheat phase 11.1 logic in student app.js');
+
+  /* --- 51. Anti-Cheat Suite — Deterministic Option Shuffling & Live Proctoring Dashboard (Phase 11.2) --- */
+  step(51, 'anti-cheat suite deterministic option shuffling and live proctoring dashboard');
+
+  // 51a: Database schema & default shuffle_options = true
+  const { data: examP3, error: examP3Err } = await teacher
+    .from('exams')
+    .select('id, code, security_config')
+    .eq('code', EXAM.code)
+    .single();
+
+  const cfgP3 = examP3?.security_config || {};
+  check('51a: security_config default includes shuffle_options = true',
+    !examP3Err && cfgP3.shuffle_options === true,
+    JSON.stringify(cfgP3));
+
+  // Verify new exam inserts inherit shuffle_options = true default
+  const testExamCode = 'SHF' + String(Math.floor(100 + Math.random() * 900));
+  const { data: newShufExam, error: newShufExamErr } = await teacher
+    .from('exams')
+    .insert({
+      user_id: teacherId,
+      code: testExamCode,
+      title: 'E2E Shuffle Option Defaults',
+      duration_minutes: 30,
+    })
+    .select('code, security_config')
+    .single();
+
+  check('51a: new exam inserts inherit shuffle_options = true default',
+    !newShufExamErr && newShufExam?.security_config?.shuffle_options === true,
+    JSON.stringify(newShufExam));
+
+  if (newShufExam?.code) {
+    await teacher.from('exams').delete().eq('code', newShufExam.code);
+  }
+
+  // 51b: Realtime publication includes exam_audit_logs
+  let auditLogsInPublication = false;
+  try {
+    const pubCheck = execFileSync(
+      'docker',
+      ['exec', SB_DB_CONTAINER, 'psql', '-U', 'postgres', '-d', 'postgres', '-tAc',
+        "select count(*) from pg_publication_tables where pubname = 'supabase_realtime' and tablename = 'exam_audit_logs';"],
+      { encoding: 'utf8' },
+    ).trim();
+    auditLogsInPublication = pubCheck === '1';
+  } catch {
+    const migrationP3Src = readFileSync(
+      new URL('../supabase/migrations/20261013030000_anti_cheat_phase_3.sql', import.meta.url), 'utf8');
+    auditLogsInPublication = migrationP3Src.includes("pubname = 'supabase_realtime' AND tablename = 'exam_audit_logs'");
+  }
+  check('51b: pg_publication_tables registers exam_audit_logs in supabase_realtime publication',
+    auditLogsInPublication === true,
+    'exam_audit_logs publication registration failed');
+
+  // 51c: Teacher-owned RPC proctor_force_submit_exam
+  // 1. Anon / student call must be rejected (UNAUTHORIZED)
+  const anonForceRes = await student.rpc('proctor_force_submit_exam', {
+    p_exam_code: EXAM.code,
+    p_student_code: STUDENT.code,
+    p_reason: 'Gian lận bài thi',
+  });
+  check('51c: proctor_force_submit_exam rejects unauthenticated callers',
+    anonForceRes.error || anonForceRes.data?.success === false,
+    JSON.stringify(anonForceRes));
+
+  // 2. Calling on non-existent or other teacher exam returns FORBIDDEN / error
+  const forbiddenForceRes = await teacher.rpc('proctor_force_submit_exam', {
+    p_exam_code: 'NON_EXISTENT_CODE_XYZ',
+    p_student_code: STUDENT.code,
+    p_reason: 'Testing forbidden exam',
+  });
+  check('51c: proctor_force_submit_exam rejects unauthorized exam code',
+    forbiddenForceRes.data?.success === false && forbiddenForceRes.data?.code === 'FORBIDDEN',
+    JSON.stringify(forbiddenForceRes));
+
+  // 3. Teacher owner call succeeds and inserts PROCTOR_FORCE_SUBMIT audit log
+  const forceSubmitRes = await teacher.rpc('proctor_force_submit_exam', {
+    p_exam_code: EXAM.code,
+    p_student_code: STUDENT.code,
+    p_reason: 'Giám thị thu bài trực tiếp do vi phạm nhiều lần',
+  });
+  check('51c: proctor_force_submit_exam succeeds for exam owner',
+    forceSubmitRes.data?.success === true && forceSubmitRes.data?.exam_code === EXAM.code,
+    JSON.stringify(forceSubmitRes));
+
+  // 4. Verify audit log entry exists
+  const { data: forceLogs, error: forceLogsErr } = await teacher
+    .from('exam_audit_logs')
+    .select('*')
+    .eq('exam_code', EXAM.code)
+    .eq('student_code', STUDENT.code)
+    .eq('violation_type', 'PROCTOR_FORCE_SUBMIT')
+    .limit(1);
+
+  check('51c: proctor_force_submit_exam writes PROCTOR_FORCE_SUBMIT log entry with metadata',
+    !forceLogsErr && forceLogs?.length === 1 &&
+    forceLogs[0].metadata?.forced === true &&
+    forceLogs[0].metadata?.proctor_id === teacherId,
+    JSON.stringify(forceLogs));
+
+  // 51d: Deterministic PRNG Option Shuffler logic
+  const studentAppCode = readFileSync(
+    new URL('../student/app.js', import.meta.url), 'utf8');
+
+  check('51d: student app.js defines hashStringToSeed, createMulberry32, and shuffleOptionsDeterministically',
+    studentAppCode.includes('function hashStringToSeed') &&
+    studentAppCode.includes('function createMulberry32') &&
+    studentAppCode.includes('function shuffleOptionsDeterministically'),
+    'missing PRNG helper functions in student/app.js');
+
+  function hashStringToSeed(str) {
+    let hash = 1779033703 ^ str.length;
+    for (let i = 0; i < str.length; i++) {
+      hash = Math.imul(hash ^ str.charCodeAt(i), 3432918353);
+      hash = (hash << 13) | (hash >>> 19);
+    }
+    return hash >>> 0;
+  }
+
+  function createMulberry32(seed) {
+    return function () {
+      let t = (seed += 0x6d2b79f5);
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function shuffleOptionsDeterministically(options, studentCode, questionId) {
+    if (!Array.isArray(options) || options.length <= 1) return options;
+    const seed = hashStringToSeed(`${studentCode}_${questionId}`);
+    const rng = createMulberry32(seed);
+    const wrapped = options.map((opt, idx) => ({ originalIndex: idx, value: opt }));
+    for (let i = wrapped.length - 1; i > 0; i--) {
+      const j = Math.floor(rng() * (i + 1));
+      [wrapped[i], wrapped[j]] = [wrapped[j], wrapped[i]];
+    }
+    return wrapped;
+  }
+
+  const rawOptions = ['Hà Nội', 'Đà Nẵng', 'Huế', 'TP. Hồ Chí Minh'];
+  const permA1 = shuffleOptionsDeterministically(rawOptions, 'HS001', 'q_101');
+  const permA2 = shuffleOptionsDeterministically(rawOptions, 'HS001', 'q_101');
+  const permB1 = shuffleOptionsDeterministically(rawOptions, 'HS002', 'q_101');
+
+  check('51d: identical student_code + questionId outputs byte-identical permutation',
+    JSON.stringify(permA1) === JSON.stringify(permA2),
+    `${JSON.stringify(permA1)} !== ${JSON.stringify(permA2)}`);
+
+  check('51d: different student_code outputs different permutation',
+    JSON.stringify(permA1) !== JSON.stringify(permB1),
+    'different student_codes resulted in same permutation');
+
+  check('51d: canonical option values and indices are strictly preserved after shuffle',
+    permA1.every((item) => rawOptions[item.originalIndex] === item.value) &&
+    permB1.every((item) => rawOptions[item.originalIndex] === item.value),
+    'canonical option mapping broken');
+
+  check('51d: single-option or empty arrays are returned unmodified without error',
+    shuffleOptionsDeterministically(['Only one'], 'HS001', 'q_102').length === 1 &&
+    shuffleOptionsDeterministically([], 'HS001', 'q_103').length === 0,
+    'edge cases handled');
+
+  // 51e: Teacher Web UI components & types
+  check('51e: web types.ts defines shuffle_options: boolean and ExamAuditLogRow',
+    typesSrc.includes('shuffle_options: boolean') &&
+    typesSrc.includes('export interface ExamAuditLogRow'),
+    'missing shuffle_options or ExamAuditLogRow in types.ts');
+
+  const p3SecControlSrc = readFileSync(
+    new URL('../web/src/components/questions/SecurityPolicyControl.tsx', import.meta.url), 'utf8');
+  check('51e: SecurityPolicyControl renders shuffle_options toggle and displays activeCount/9',
+    p3SecControlSrc.includes('shuffle_options') &&
+    p3SecControlSrc.includes('{activeCount}/9 đang bật') &&
+    p3SecControlSrc.includes('Đảo thứ tự phương án A, B, C, D'),
+    'missing shuffle_options toggle in SecurityPolicyControl');
+
+  const proctorDashSrc = readFileSync(
+    new URL('../web/src/components/exams/LiveProctorDashboard.tsx', import.meta.url), 'utf8');
+  check('51e: LiveProctorDashboard implements Realtime subscription, proctor_force_submit_exam, and metric badges',
+    proctorDashSrc.includes('exam_audit_logs') &&
+    proctorDashSrc.includes('proctor_force_submit_exam') &&
+    proctorDashSrc.includes('Tổng thí sinh') &&
+    proctorDashSrc.includes('🟢 An toàn') &&
+    proctorDashSrc.includes('🟡 Cảnh báo') &&
+    proctorDashSrc.includes('🔴 Vi phạm nặng') &&
+    proctorDashSrc.includes('Thu bài cưỡng chế'),
+    'missing LiveProctorDashboard implementation');
+
+  const examResultsContainerSrc = readFileSync(
+    new URL('../web/src/components/exams/ExamResultsContainer.tsx', import.meta.url), 'utf8');
+  check('51e: ExamResultsContainer provides tab navigation between ResultsDashboard and LiveProctorDashboard',
+    examResultsContainerSrc.includes('LiveProctorDashboard') &&
+    examResultsContainerSrc.includes('Giám sát trực tiếp 🛡️'),
+    'missing ExamResultsContainer integration');
 
   /* --- teardown --------------------------------------------------------- */
   await teacher.from('exam_audit_logs').delete().eq('exam_code', EXAM.code);

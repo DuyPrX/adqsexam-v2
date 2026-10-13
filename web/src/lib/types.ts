@@ -101,7 +101,7 @@ export interface ExamRow {
   created_at: string;
 }
 
-/** Anti-Cheat configuration flags for exam rooms (Phase 11.0 / 11.1). */
+/** Anti-Cheat configuration flags for exam rooms (Phase 11.0 / 11.1 / 11.2). */
 export interface ExamSecurityConfig {
   prevent_copy: boolean;
   detect_multitouch: boolean;
@@ -110,6 +110,7 @@ export interface ExamSecurityConfig {
   enforce_fullscreen: boolean;
   detect_split_screen: boolean;
   detect_motion: boolean;
+  shuffle_options: boolean;
   max_violations: number;
   auto_submit_on_limit: boolean;
 }
@@ -122,9 +123,21 @@ export const DEFAULT_SECURITY_CONFIG: ExamSecurityConfig = {
   enforce_fullscreen: true,
   detect_split_screen: true,
   detect_motion: false,
+  shuffle_options: true,
   max_violations: 3,
   auto_submit_on_limit: false,
 };
+
+/** Audit trail event for student proctoring violations (Phase 11.0 / 11.2). */
+export interface ExamAuditLogRow {
+  id: string;
+  exam_code: string;
+  student_code: string;
+  violation_type: string;
+  violation_message: string | null;
+  metadata: Record<string, unknown> | null;
+  occurred_at: string;
+}
 
 /** Per-exam admission policy (Phase 6.1). */
 export type PinMode = 'NONE' | 'GLOBAL' | 'INDIVIDUAL';

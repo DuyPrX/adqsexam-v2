@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
-import { BookOpen, FileText, LogOut, Pencil, Plus, Share2, Trash2, Users } from 'lucide-react';
+import { BookOpen, FileText, LogOut, Pencil, Plus, Share2, Shield, Trash2, Users } from 'lucide-react';
 import { signOut } from '@/lib/supabase/auth';
 import type { ExamRow } from '@/lib/types';
 import { cn } from '@/lib/utils';
@@ -182,6 +182,14 @@ export function ExamList({ exams, trashedExams, counts, teacherEmail }: ExamList
                           className="text-xs font-semibold text-slate-700 underline-offset-2 transition hover:text-slate-900 hover:underline"
                         >
                           Xem kết quả
+                        </Link>
+                        <Link
+                          href={`/exams/${exam.code}/results?view=proctor`}
+                          className="inline-flex items-center gap-1 text-xs font-semibold text-indigo-700 underline-offset-2 transition hover:text-indigo-900 hover:underline"
+                          title="Giám sát phòng thi trực tiếp"
+                        >
+                          <Shield size={12} />
+                          Giám sát 🛡️
                         </Link>
                         <button
                           type="button"
