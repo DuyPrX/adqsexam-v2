@@ -1,11 +1,13 @@
 import { cache } from 'react';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import type {
-  ExamRow,
-  ExtractedQuestion,
-  PinMode,
-  QuestionBankRow,
-  RosterEntry,
+import {
+  DEFAULT_SECURITY_CONFIG,
+  type ExamRow,
+  type ExamSecurityConfig,
+  type ExtractedQuestion,
+  type PinMode,
+  type QuestionBankRow,
+  type RosterEntry,
 } from './types';
 import { generateExamCode } from './utils';
 
@@ -26,7 +28,7 @@ const UNIQUE_VIOLATION = '23505';
  * it `undefined` at runtime while TypeScript still believes it is `string | null`.
  */
 export const EXAM_COLUMNS =
-  'id, user_id, code, title, duration_minutes, is_active, starts_at, ends_at, deleted_at, allow_practice, pin_mode, global_pin, shuffle_questions, created_at';
+  'id, user_id, code, title, duration_minutes, is_active, starts_at, ends_at, deleted_at, allow_practice, pin_mode, global_pin, shuffle_questions, security_config, created_at';
 
 export class PersistenceError extends Error {
   constructor(message: string) {
@@ -92,6 +94,7 @@ async function insertExamWithFreshCode(
   allowPractice: boolean,
   pinFields: { pin_mode: PinMode; global_pin: string | null },
   shuffleQuestions: boolean,
+  securityConfig?: ExamSecurityConfig,
 ): Promise<ExamRow> {
   for (let attempt = 0; attempt < 10; attempt++) {
     const code = generateExamCode();
@@ -104,6 +107,7 @@ async function insertExamWithFreshCode(
         duration_minutes: durationMinutes,
         allow_practice: allowPractice,
         shuffle_questions: shuffleQuestions,
+        security_config: securityConfig ?? DEFAULT_SECURITY_CONFIG,
         ...pinFields,
       })
       .select(EXAM_COLUMNS)
@@ -129,6 +133,8 @@ export interface SaveExamInput {
   globalPin?: string | null;
   /** Phase 8.7: let the student runtime reorder the paper (defaults to true). */
   shuffleQuestions?: boolean;
+  /** Phase 11.0: Anti-Cheat client defense security config. */
+  securityConfig?: ExamSecurityConfig;
 }
 
 export interface SaveExamResult {
@@ -156,6 +162,7 @@ export async function saveExam(
     pinMode,
     globalPin,
     shuffleQuestions = true,
+    securityConfig,
   } = input;
 
   if (!title.trim()) throw new PersistenceError('Vui lòng nhập tên đề thi.');
@@ -171,6 +178,7 @@ export async function saveExam(
     allowPractice,
     pinFields,
     shuffleQuestions,
+    securityConfig,
   );
 
   const rows = questions.map((question, index) => ({
@@ -212,6 +220,8 @@ export interface SaveExamVariantsInput {
   globalPin?: string | null;
   /** Phase 8.7: applies to every generated variant (defaults to true). */
   shuffleQuestions?: boolean;
+  /** Phase 11.0: Anti-Cheat security flags for generated variants. */
+  securityConfig?: ExamSecurityConfig;
 }
 
 export interface SaveExamVariantsResult {
@@ -239,6 +249,7 @@ export async function saveExamVariants(
     pinMode,
     globalPin,
     shuffleQuestions = true,
+    securityConfig,
   } = input;
 
   if (variants.length === 0) throw new PersistenceError('Chưa có mã đề nào để lưu.');
@@ -259,6 +270,7 @@ export async function saveExamVariants(
     duration_minutes: durationMinutes,
     allow_practice: allowPractice,
     shuffle_questions: shuffleQuestions,
+    security_config: securityConfig ?? DEFAULT_SECURITY_CONFIG,
     ...pinFields,
   }));
 
@@ -421,6 +433,8 @@ export interface ExamMetadataPatch {
   globalPin?: string | null;
   /** Phase 8.7 paper-ordering policy. */
   shuffleQuestions?: boolean;
+  /** Phase 11.0 Anti-cheat proctoring policy. */
+  securityConfig?: ExamSecurityConfig;
 }
 
 /** Updates exam metadata (Phase 5.4 edit route general-info form). */
@@ -445,6 +459,7 @@ export async function updateExamMetadata(
   if (patch.endsAt !== undefined) row.ends_at = patch.endsAt;
   if (patch.allowPractice !== undefined) row.allow_practice = patch.allowPractice;
   if (patch.shuffleQuestions !== undefined) row.shuffle_questions = patch.shuffleQuestions;
+  if (patch.securityConfig !== undefined) row.security_config = patch.securityConfig;
 
   // Phase 6.2 — partial patch semantics. Unlike `buildPinFields` (used by the
   // create paths), a caller may update ONLY `pin_mode` and leave `global_pin`

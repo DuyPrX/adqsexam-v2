@@ -96,8 +96,27 @@ export interface ExamRow {
    * derivation or a passage referenced by "the text above").
    */
   shuffle_questions: boolean;
+  /** Phase 11.0 — Anti-Cheat security flags and proctoring policy. */
+  security_config: ExamSecurityConfig;
   created_at: string;
 }
+
+/** Anti-Cheat configuration flags for exam rooms (Phase 11.0). */
+export interface ExamSecurityConfig {
+  prevent_copy: boolean;
+  detect_multitouch: boolean;
+  blur_on_leave: boolean;
+  watermark: boolean;
+  max_violations?: number;
+}
+
+export const DEFAULT_SECURITY_CONFIG: ExamSecurityConfig = {
+  prevent_copy: true,
+  detect_multitouch: true,
+  blur_on_leave: true,
+  watermark: true,
+  max_violations: 3,
+};
 
 /** Per-exam admission policy (Phase 6.1). */
 export type PinMode = 'NONE' | 'GLOBAL' | 'INDIVIDUAL';

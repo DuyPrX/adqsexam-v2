@@ -1100,3 +1100,54 @@ body {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
 }
+
+/* ==========================================================================
+   Anti-Cheat Suite — Client Defense Shield & Forensic Watermark (Phase 11.0)
+   ========================================================================== */
+.security-locked {
+  -webkit-touch-callout: none !important;
+  -webkit-user-select: none !important;
+  user-select: none !important;
+}
+
+.security-locked input, 
+.security-locked textarea {
+  -webkit-user-select: text !important;
+  user-select: text !important;
+}
+
+body.security-blur {
+  filter: blur(28px) grayscale(100%);
+  user-select: none !important;
+  pointer-events: none !important;
+}
+
+#securityBlurOverlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 999999;
+  background: rgba(15, 23, 42, 0.88);
+  backdrop-filter: blur(12px);
+  color: #ffffff;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 24px;
+}
+
+body.security-blur #securityBlurOverlay {
+  display: flex !important;
+  pointer-events: auto !important;
+}
+
+.watermark-overlay {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  opacity: 0.12;
+  background-repeat: repeat;
+}
+

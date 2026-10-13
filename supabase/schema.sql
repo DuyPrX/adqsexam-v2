@@ -76,6 +76,14 @@ create table if not exists public.exams (
     -- may reorder questions (with all TRUE_FALSE items grouped at the end);
     -- FALSE means the authored `position` order is preserved verbatim.
     shuffle_questions boolean     not null default true,
+    -- Phase 11.0 Anti-cheat policy
+    security_config  jsonb        not null default '{
+      "prevent_copy": true,
+      "detect_multitouch": true,
+      "blur_on_leave": true,
+      "watermark": true,
+      "max_violations": 3
+    }'::jsonb,
     created_at       timestamptz  not null default now()
 );
 
@@ -96,6 +104,14 @@ alter table public.exams add column if not exists global_pin varchar(50);
 -- pass (no NULL window) and preserves the shipped "always shuffled" behaviour;
 -- the client treats only an explicit false as "keep the authored order".
 alter table public.exams add column if not exists shuffle_questions boolean not null default true;
+-- Phase 11.0 Anti-cheat security config policy.
+alter table public.exams add column if not exists security_config jsonb not null default '{
+  "prevent_copy": true,
+  "detect_multitouch": true,
+  "blur_on_leave": true,
+  "watermark": true,
+  "max_violations": 3
+}'::jsonb;
 -- `add constraint` is not re-runnable, so drop before adding.
 alter table public.exams drop constraint if exists chk_pin_mode;
 alter table public.exams add constraint chk_pin_mode
@@ -442,6 +458,24 @@ create index if not exists idx_tree_submissions_session_team  on public.tree_sub
 create index if not exists idx_tree_submissions_trgm
     on public.tree_submissions using gin (answer_text extensions.gin_trgm_ops);
 
+-- ----------------------------------------------------------------------------
+-- A.10 exam_audit_logs — proctoring violations & anti-cheat audit trail (Phase 11.0)
+-- ----------------------------------------------------------------------------
+create table if not exists public.exam_audit_logs (
+    id                uuid         primary key default gen_random_uuid(),
+    exam_code         varchar(50)  not null,
+    student_code      varchar(50)  not null,
+    violation_type    varchar(50)  not null,
+    violation_message text,
+    metadata          jsonb        default '{}'::jsonb,
+    occurred_at       timestamptz  not null default now()
+);
+
+create index if not exists idx_exam_audit_logs_lookup
+    on public.exam_audit_logs (exam_code, student_code, occurred_at desc);
+
+comment on table public.exam_audit_logs is 'Audit trail for student proctoring violations (Phase 11.0).';
+
 
 -- ============================================================================
 -- SECTION B — ROW LEVEL SECURITY
@@ -464,6 +498,8 @@ alter table public.class_members       enable row level security;
 -- Phase 7.1 — tree activity.
 alter table public.tree_sessions       enable row level security;
 alter table public.tree_submissions    enable row level security;
+-- Phase 11.0 — anti-cheat violation logs.
+alter table public.exam_audit_logs     enable row level security;
 
 -- --- exams: full CRUD for the owning teacher ---------------------------------
 drop policy if exists exams_owner_all on public.exams;
@@ -611,6 +647,18 @@ create policy tree_submissions_teacher_read on public.tree_submissions
         )
     );
 
+-- --- exam_audit_logs: teacher reads violation logs for their exams (Phase 11.0) ---
+drop policy if exists exam_audit_logs_teacher_read on public.exam_audit_logs;
+create policy exam_audit_logs_teacher_read on public.exam_audit_logs
+    for select
+    to authenticated
+    using (
+        exists (
+            select 1 from public.exams e
+            where e.code = exam_audit_logs.exam_code and e.user_id = auth.uid()
+        )
+    );
+
 -- The predicate helper is defined HERE rather than in Section C because
 -- `create policy` validates its expression immediately, so a forward reference
 -- to a not-yet-created function aborts the script.
@@ -655,6 +703,8 @@ revoke all on public.class_members        from anon;
 revoke all on public.tree_sessions        from anon;
 revoke all on public.tree_submissions     from anon;
 grant select on public.tree_submissions   to anon;
+-- Phase 11.0 — student writes only via log_exam_violation RPC; teachers read via RLS.
+revoke all on public.exam_audit_logs      from anon;
 
 
 -- ============================================================================
@@ -712,6 +762,7 @@ declare
     v_code      varchar;
     v_name      varchar;
     v_class     varchar;
+    v_sec_cfg   jsonb;
 begin
     -- 1. Exam must exist and be open.
     select * into v_exam from public.exams where code = p_exam_code;
@@ -738,6 +789,14 @@ begin
     if v_exam.ends_at is not null and now() > v_exam.ends_at then
         return jsonb_build_object('success', false, 'message', 'EXAM_EXPIRED');
     end if;
+
+    v_sec_cfg := coalesce(v_exam.security_config, '{
+      "prevent_copy": true,
+      "detect_multitouch": true,
+      "blur_on_leave": true,
+      "watermark": true,
+      "max_violations": 3
+    }'::jsonb);
 
     -- 2. Resolve the whitelisted candidate (Phase 8.8).
     --
@@ -880,6 +939,7 @@ begin
                     'exam_title',   v_exam.title,
                     'duration_minutes', v_exam.duration_minutes,
                     'shuffle_questions', v_exam.shuffle_questions,
+                    'security_config', v_sec_cfg,
                     'message', 'SESSION_RESUMED'
                 );
             end if;
@@ -907,6 +967,7 @@ begin
             'exam_title',   v_exam.title,
             'duration_minutes', v_exam.duration_minutes,
             'shuffle_questions', v_exam.shuffle_questions,
+            'security_config', v_sec_cfg,
             'message', 'SESSION_ACQUIRED'
         );
     end if;
@@ -928,6 +989,7 @@ begin
         'exam_title',   v_exam.title,
         'duration_minutes', v_exam.duration_minutes,
         'shuffle_questions', v_exam.shuffle_questions,
+        'security_config', v_sec_cfg,
         'message', 'SESSION_ACQUIRED'
     );
 
@@ -2242,6 +2304,7 @@ as $$
 declare
     v_exam       public.exams%rowtype;
     v_candidates jsonb;
+    v_sec_cfg    jsonb;
 begin
     if p_exam_code is null or trim(p_exam_code) = '' then
         return jsonb_build_object('success', false, 'code', 'EXAM_NOT_FOUND', 'message', 'Đề thi không tồn tại.');
@@ -2281,6 +2344,14 @@ begin
         end if;
     end if;
 
+    v_sec_cfg := coalesce(v_exam.security_config, '{
+      "prevent_copy": true,
+      "detect_multitouch": true,
+      "blur_on_leave": true,
+      "watermark": true,
+      "max_violations": 3
+    }'::jsonb);
+
     -- Three display keys ONLY: `pin`/`dob` must never leave the server here.
     select jsonb_agg(
                jsonb_build_object(
@@ -2307,8 +2378,45 @@ begin
         'allow_practice', v_exam.allow_practice,
         -- Phase 8.7 — the paper-ordering policy, so the picker can show it.
         'shuffle_questions', v_exam.shuffle_questions,
+        'security_config', v_sec_cfg,
         'candidates',     coalesce(v_candidates, '[]'::jsonb)
     );
+end;
+$$;
+
+
+-- ----------------------------------------------------------------------------
+-- C.16  log_exam_violation  (student — anon, Phase 11.0)
+--       Records client-side proctoring violation event into exam_audit_logs.
+-- ----------------------------------------------------------------------------
+create or replace function public.log_exam_violation(
+    p_exam_code       varchar,
+    p_student_code    varchar,
+    p_violation_type  varchar,
+    p_message         text default null,
+    p_metadata        jsonb default '{}'::jsonb
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+    if p_exam_code is null or p_student_code is null or p_violation_type is null then
+        return jsonb_build_object('success', false, 'code', 'INVALID_ARGS');
+    end if;
+
+    insert into public.exam_audit_logs (
+        exam_code, student_code, violation_type, violation_message, metadata, occurred_at
+    ) values (
+        upper(trim(p_exam_code)),
+        trim(p_student_code),
+        trim(p_violation_type),
+        p_message,
+        coalesce(p_metadata, '{}'::jsonb),
+        now()
+    );
+
+    return jsonb_build_object('success', true);
 end;
 $$;
 
@@ -3021,6 +3129,8 @@ revoke all on function public.update_class_member_group(uuid, int)              
 revoke all on function public.update_class_member_group(uuid, int)                                        from anon;
 revoke all on function public.auto_balance_class_groups(uuid, int, boolean)                               from public;
 revoke all on function public.auto_balance_class_groups(uuid, int, boolean)                               from anon;
+-- Phase 11.0 — public RPC for client-side proctoring violation logs.
+revoke all on function public.log_exam_violation(varchar, varchar, varchar, text, jsonb)                   from public;
 
 grant execute on function public.verify_and_acquire_session(varchar, varchar, varchar, varchar, text, uuid, varchar)   to anon, authenticated;
 grant execute on function public.record_student_heartbeat(varchar, varchar, uuid, integer, integer, integer, integer) to anon, authenticated;
@@ -3037,6 +3147,8 @@ grant execute on function public.get_practice_exam_payload(varchar, varchar, var
 -- Phase 6.3 / 8.1 — student-facing: the roster picker must work BEFORE the student
 -- has an identity, so this is anon-executable by design.
 grant execute on function public.get_exam_roster(varchar, boolean)                                             to anon, authenticated;
+-- Phase 11.0 — anon-callable: students record anti-cheat violations during exam sitting.
+grant execute on function public.log_exam_violation(varchar, varchar, varchar, text, jsonb)                        to anon, authenticated;
 -- Phase 7.1 — student-facing. The similarity rules live inside the body, so a
 -- caller cannot bypass them by touching the table (anon holds no table rights).
 grant execute on function public.submit_tree_answer(uuid, varchar, varchar, text)                              to anon, authenticated;

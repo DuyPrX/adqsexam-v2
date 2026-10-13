@@ -24,17 +24,20 @@ import {
 } from '@/lib/exams';
 import { importClassToExam } from '@/lib/classes';
 import { generateExamVariants, shuffleExam } from '@/lib/shuffle';
-import type {
-  EngineUsed,
-  ExtractedQuestion,
-  ExtractionMode,
-  PinMode,
-  QuestionType,
+import {
+  DEFAULT_SECURITY_CONFIG,
+  type EngineUsed,
+  type ExamSecurityConfig,
+  type ExtractedQuestion,
+  type ExtractionMode,
+  type PinMode,
+  type QuestionType,
 } from '@/lib/types';
 import { QUESTION_TYPE_META, cn, hasResolvedAnswer } from '@/lib/utils';
 import { ClassPickerModal } from '@/components/ClassPickerModal';
 import { QuestionCard } from './QuestionCard';
 import { PinPolicyControl } from './PinPolicyControl';
+import { SecurityPolicyControl } from './SecurityPolicyControl';
 
 interface ExamPreviewEditorProps {
   questions: ExtractedQuestion[];
@@ -96,6 +99,9 @@ export function ExamPreviewEditor({
   // Phase 8.7 — paper-ordering policy. Defaults ON to preserve the behaviour
   // every exam had before this column existed.
   const [shuffleQuestions, setShuffleQuestions] = useState(true);
+  // Phase 11.0 — Anti-Cheat client defense security config.
+  const [securityConfig, setSecurityConfig] =
+    useState<ExamSecurityConfig>(DEFAULT_SECURITY_CONFIG);
   const [savedVariants, setSavedVariants] = useState<SaveExamVariantsResult | null>(null);
 
   // Admission policy (Phase 6.2). INDIVIDUAL is the server-side default, so the
@@ -154,6 +160,7 @@ export function ExamPreviewEditor({
           pinMode,
           globalPin,
           shuffleQuestions,
+          securityConfig,
           variants: variants.map((variant) => ({
             code: variant.code,
             title,
@@ -170,6 +177,7 @@ export function ExamPreviewEditor({
           pinMode,
           globalPin,
           shuffleQuestions,
+          securityConfig,
           questions,
         });
         await importSelectedClasses(supabase, [exam.code]);
@@ -509,6 +517,13 @@ export function ExamPreviewEditor({
             globalPin={globalPin}
             onModeChange={setPinMode}
             onGlobalPinChange={setGlobalPin}
+            disabled={isSaving}
+          />
+
+          {/* Phase 11.0 — anti-cheat proctoring policy */}
+          <SecurityPolicyControl
+            config={securityConfig}
+            onChange={setSecurityConfig}
             disabled={isSaving}
           />
 

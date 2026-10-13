@@ -8055,7 +8055,167 @@ async function main() {
     projectorSrc.includes('Xem tổng kết ý tưởng'),
     'missing review button');
 
+  /* --- 49. Anti-Cheat Suite — Client Defense Shield & Security Policy (Phase 11.0) --- */
+  step(49, 'anti-cheat suite client defense shield, forensic watermark, and audit logging');
+
+  // 49a: security_config default values on public.exams
+  const { data: examRow, error: examErr } = await teacher
+    .from('exams')
+    .select('id, code, security_config')
+    .eq('code', EXAM.code)
+    .single();
+
+  check('49a: exams table has security_config column with valid defaults',
+    !examErr && examRow?.security_config &&
+    examRow.security_config.prevent_copy === true &&
+    examRow.security_config.detect_multitouch === true &&
+    examRow.security_config.blur_on_leave === true &&
+    examRow.security_config.watermark === true &&
+    examRow.security_config.max_violations === 3,
+    JSON.stringify(examRow?.security_config));
+
+  // 49b: exam_audit_logs table exists and RLS allows teacher to read logs
+  const { data: auditLogs, error: auditErr } = await teacher
+    .from('exam_audit_logs')
+    .select('*')
+    .limit(1);
+
+  check('49b: exam_audit_logs table exists and is readable by teacher via RLS',
+    !auditErr && Array.isArray(auditLogs),
+    auditErr?.message ?? 'table not readable');
+
+  // 49c: log_exam_violation RPC records violations from anon student
+  const violationRes = await student.rpc('log_exam_violation', {
+    p_exam_code: EXAM.code,
+    p_student_code: STUDENT.code,
+    p_violation_type: 'COPY_ATTEMPT',
+    p_message: 'Học sinh thử bôi đen và sao chép văn bản đề thi',
+    p_metadata: { user_agent: 'e2e-test', test: true },
+  });
+
+  check('49c: log_exam_violation succeeds for anon student',
+    violationRes.data?.success === true,
+    JSON.stringify(violationRes));
+
+  // Verify the logged violation is present in exam_audit_logs for the teacher
+  const { data: recordedLogs, error: recordedLogsErr } = await teacher
+    .from('exam_audit_logs')
+    .select('*')
+    .eq('exam_code', EXAM.code)
+    .eq('student_code', STUDENT.code)
+    .eq('violation_type', 'COPY_ATTEMPT')
+    .order('occurred_at', { ascending: false })
+    .limit(1);
+
+  check('49c: teacher reads recorded audit log entry for their exam',
+    !recordedLogsErr && recordedLogs?.length === 1 &&
+    recordedLogs[0].violation_message === 'Học sinh thử bôi đen và sao chép văn bản đề thi' &&
+    recordedLogs[0].metadata?.test === true,
+    JSON.stringify(recordedLogs));
+
+  // Test invalid args error handling
+  const invalidViolationRes = await student.rpc('log_exam_violation', {
+    p_exam_code: null,
+    p_student_code: null,
+    p_violation_type: null,
+  });
+
+  check('49c: log_exam_violation rejects invalid args with INVALID_ARGS',
+    invalidViolationRes.data?.success === false && invalidViolationRes.data?.code === 'INVALID_ARGS',
+    JSON.stringify(invalidViolationRes));
+
+  // 49d: verify_and_acquire_session returns security_config
+  const secCandidate = {
+    exam_code: EXAM.code,
+    student_code: 'HS_SEC_TEST',
+    full_name: 'Nguyễn Văn Bảo Mật',
+    class_name: '12A_SEC',
+  };
+  await teacher.from('students').insert(secCandidate);
+
+  const sessionRes = await student.rpc('verify_and_acquire_session', {
+    p_exam_code: EXAM.code,
+    p_student_code: secCandidate.student_code,
+    p_full_name: secCandidate.full_name,
+    p_class_name: secCandidate.class_name,
+    p_device_info: 'e2e-test/anticheat',
+  });
+
+  check('49d: verify_and_acquire_session includes security_config in returned payload',
+    sessionRes.data?.security_config &&
+    sessionRes.data.security_config.prevent_copy === true &&
+    sessionRes.data.security_config.detect_multitouch === true &&
+    sessionRes.data.security_config.blur_on_leave === true &&
+    sessionRes.data.security_config.watermark === true,
+    JSON.stringify(sessionRes.data));
+
+  // 49e: get_exam_roster returns security_config
+  const rosterRes = await student.rpc('get_exam_roster', {
+    p_exam_code: EXAM.code,
+  });
+
+  check('49e: get_exam_roster includes security_config in returned payload',
+    rosterRes.data?.security_config &&
+    rosterRes.data.security_config.prevent_copy === true &&
+    rosterRes.data.security_config.watermark === true,
+    JSON.stringify(rosterRes.data?.security_config));
+
+  // 49f: student SPA styles & HTML defense shield markup
+  const studentStyles = readFileSync(
+    new URL('../student/styles.css', import.meta.url), 'utf8');
+  check('49f: student styles.css includes .security-locked and user-select: none',
+    studentStyles.includes('.security-locked') && studentStyles.includes('user-select: none !important'),
+    'missing security-locked');
+  check('49f: student styles.css includes body.security-blur with blur filter',
+    studentStyles.includes('body.security-blur') && studentStyles.includes('filter: blur('),
+    'missing body.security-blur');
+  check('49f: student styles.css includes #securityBlurOverlay and .watermark-overlay',
+    studentStyles.includes('#securityBlurOverlay') && studentStyles.includes('.watermark-overlay'),
+    'missing securityBlurOverlay/watermark-overlay');
+
+  const studentHtml = readFileSync(
+    new URL('../student/index.html', import.meta.url), 'utf8');
+  check('49f: student index.html defines #securityBlurOverlay element',
+    studentHtml.includes('id="securityBlurOverlay"'),
+    'missing securityBlurOverlay in html');
+  check('49f: student index.html contains resume button #btnResumeSecurityBlur',
+    studentHtml.includes('id="btnResumeSecurityBlur"'),
+    'missing btnResumeSecurityBlur in html');
+
+  // 49g: student SPA app.js anti-cheat client initialization
+  const studentAppSrc = readFileSync(
+    new URL('../student/app.js', import.meta.url), 'utf8');
+  check('49g: student app.js defines reportViolation calling log_exam_violation with 3s throttling',
+    studentAppSrc.includes('function reportViolation') && studentAppSrc.includes('log_exam_violation'),
+    'missing reportViolation');
+  check('49g: student app.js defines setupForensicWatermark with canvas and MutationObserver',
+    studentAppSrc.includes('function setupForensicWatermark') && studentAppSrc.includes('MutationObserver'),
+    'missing setupForensicWatermark');
+  check('49g: student app.js defines initAntiCheat and bindAntiCheat handling security config flags',
+    studentAppSrc.includes('function initAntiCheat') && studentAppSrc.includes('prevent_copy') && studentAppSrc.includes('detect_multitouch') && studentAppSrc.includes('blur_on_leave'),
+    'missing anti-cheat handlers in app.js');
+
+  // 49h: teacher web UI SecurityPolicyControl & persistence
+  const secControlSrc = readFileSync(
+    new URL('../web/src/components/questions/SecurityPolicyControl.tsx', import.meta.url), 'utf8');
+  check('49h: SecurityPolicyControl renders 4 anti-cheat toggles and collapsible header',
+    secControlSrc.includes('Bảo mật phòng thi (Anti-Cheat)') && secControlSrc.includes('prevent_copy') && secControlSrc.includes('detect_multitouch') && secControlSrc.includes('blur_on_leave') && secControlSrc.includes('watermark'),
+    'missing toggles in SecurityPolicyControl');
+
+  const typesSrc = readFileSync(
+    new URL('../web/src/lib/types.ts', import.meta.url), 'utf8');
+  check('49h: web types.ts defines ExamSecurityConfig and DEFAULT_SECURITY_CONFIG',
+    typesSrc.includes('export interface ExamSecurityConfig') && typesSrc.includes('export const DEFAULT_SECURITY_CONFIG'),
+    'missing types');
+
+  const examsLibSrc = readFileSync(
+    new URL('../web/src/lib/exams.ts', import.meta.url), 'utf8');
+  check('49h: web exams.ts selects security_config in EXAM_COLUMNS',
+    examsLibSrc.includes('security_config') && examsLibSrc.includes('EXAM_COLUMNS'),
+    'missing security_config in EXAM_COLUMNS');
+
   /* --- teardown --------------------------------------------------------- */
+  await teacher.from('exam_audit_logs').delete().eq('exam_code', EXAM.code);
   await teacher.removeChannel(channel);
   await teacher.from('exams').delete().eq('code', EXAM.code); // cascades
   await teacher.from('exams').delete().eq('code', SCHED_EXAM.code);

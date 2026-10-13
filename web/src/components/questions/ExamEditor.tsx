@@ -10,12 +10,14 @@ import {
   updateExamQuestionsSafe,
 } from '@/lib/exams';
 import { importClassToExam } from '@/lib/classes';
-import type {
-  ExamRow,
-  ExtractedQuestion,
-  PinMode,
-  QuestionBankRow,
-  QuestionType,
+import {
+  DEFAULT_SECURITY_CONFIG,
+  type ExamRow,
+  type ExamSecurityConfig,
+  type ExtractedQuestion,
+  type PinMode,
+  type QuestionBankRow,
+  type QuestionType,
 } from '@/lib/types';
 import { cn, hasResolvedAnswer } from '@/lib/utils';
 import { toLocalDatetimeString, toUtcIsoString } from '@/lib/date';
@@ -24,6 +26,7 @@ import { ClassPickerModal } from '@/components/ClassPickerModal';
 import { ExamShareModal } from '@/components/ExamShareModal';
 import { QuestionCard } from './QuestionCard';
 import { PinPolicyControl } from './PinPolicyControl';
+import { SecurityPolicyControl } from './SecurityPolicyControl';
 import { ExamCandidatesManager } from './ExamCandidatesManager';
 
 interface ExamEditorProps {
@@ -75,6 +78,10 @@ export function ExamEditor({ exam, initialQuestions, submissionCount }: ExamEdit
   const [allowPractice, setAllowPractice] = useState(exam.allow_practice);
   // Phase 8.7 — paper-ordering policy, seeded from the stored value.
   const [shuffleQuestions, setShuffleQuestions] = useState(exam.shuffle_questions);
+  // Phase 11.0 — anti-cheat policy, seeded from stored security_config.
+  const [securityConfig, setSecurityConfig] = useState<ExamSecurityConfig>(
+    () => exam.security_config ?? DEFAULT_SECURITY_CONFIG,
+  );
   const [pinMode, setPinMode] = useState<PinMode>(exam.pin_mode);
   const [globalPin, setGlobalPin] = useState(exam.global_pin ?? '');
   const [isClassPickerOpen, setIsClassPickerOpen] = useState(false);
@@ -165,6 +172,7 @@ export function ExamEditor({ exam, initialQuestions, submissionCount }: ExamEdit
         isActive,
         allowPractice,
         shuffleQuestions,
+        securityConfig,
         pinMode,
         // Only sent in GLOBAL mode: in the other modes the stored value is
         // deliberately left untouched so toggling back restores it.
@@ -303,6 +311,13 @@ export function ExamEditor({ exam, initialQuestions, submissionCount }: ExamEdit
           globalPin={globalPin}
           onModeChange={setPinMode}
           onGlobalPinChange={setGlobalPin}
+          disabled={isSaving}
+        />
+
+        {/* Phase 11.0 — anti-cheat policy for this exam. */}
+        <SecurityPolicyControl
+          config={securityConfig}
+          onChange={setSecurityConfig}
           disabled={isSaving}
         />
 

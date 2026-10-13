@@ -577,6 +577,23 @@
     </div>
   </div>
 
+  <!-- Anti-Cheat blur shield overlay (Phase 11.0) -->
+  <div id="securityBlurOverlay" role="alert" aria-live="assertive">
+    <div style="max-width: 440px; display: flex; flex-direction: column; align-items: center; gap: 14px; background: rgba(30, 41, 59, 0.95); padding: 32px 24px; border-radius: 16px; border: 1px solid rgba(255, 255, 255, 0.15); box-shadow: 0 20px 40px rgba(0,0,0,0.5);">
+      <div style="font-size: 52px; line-height: 1;">🛡️</div>
+      <h2 style="font-size: 20px; font-weight: 800; margin: 0; color: #f87171; letter-spacing: 0.5px;">CẢNH BÁO BẢO MẬT PHÒNG THI</h2>
+      <p style="font-size: 14px; margin: 0; color: #f1f5f9; line-height: 1.5; font-weight: 500;">
+        Hệ thống phát hiện bạn vừa rời khỏi màn hình làm bài hoặc thực hiện thao tác bị hạn chế (chuyển app, cử chỉ vuốt chụp màn hình).
+      </p>
+      <p style="font-size: 13px; margin: 0; color: #94a3b8; line-height: 1.4;">
+        Thao tác này đã được ghi nhận vào biên bản giám sát phòng thi của giáo viên.
+      </p>
+      <button type="button" id="btnResumeSecurityBlur" class="btn btn--primary" style="margin-top: 10px; padding: 10px 28px; font-weight: 700; font-size: 14px; border-radius: 8px;">
+        Chạm để quay lại bài thi
+      </button>
+    </div>
+  </div>
+
   <!-- Runtime application configuration (git-ignored; see config.example.js). -->
   <script src="./config.js"></script>
   <script type="module" src="./app.js"></script>
