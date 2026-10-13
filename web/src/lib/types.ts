@@ -101,13 +101,17 @@ export interface ExamRow {
   created_at: string;
 }
 
-/** Anti-Cheat configuration flags for exam rooms (Phase 11.0). */
+/** Anti-Cheat configuration flags for exam rooms (Phase 11.0 / 11.1). */
 export interface ExamSecurityConfig {
   prevent_copy: boolean;
   detect_multitouch: boolean;
   blur_on_leave: boolean;
   watermark: boolean;
-  max_violations?: number;
+  enforce_fullscreen: boolean;
+  detect_split_screen: boolean;
+  detect_motion: boolean;
+  max_violations: number;
+  auto_submit_on_limit: boolean;
 }
 
 export const DEFAULT_SECURITY_CONFIG: ExamSecurityConfig = {
@@ -115,7 +119,11 @@ export const DEFAULT_SECURITY_CONFIG: ExamSecurityConfig = {
   detect_multitouch: true,
   blur_on_leave: true,
   watermark: true,
+  enforce_fullscreen: true,
+  detect_split_screen: true,
+  detect_motion: false,
   max_violations: 3,
+  auto_submit_on_limit: false,
 };
 
 /** Per-exam admission policy (Phase 6.1). */

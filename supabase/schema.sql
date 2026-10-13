@@ -76,13 +76,17 @@ create table if not exists public.exams (
     -- may reorder questions (with all TRUE_FALSE items grouped at the end);
     -- FALSE means the authored `position` order is preserved verbatim.
     shuffle_questions boolean     not null default true,
-    -- Phase 11.0 Anti-cheat policy
+    -- Phase 11.0 / 11.1 Anti-cheat policy
     security_config  jsonb        not null default '{
       "prevent_copy": true,
       "detect_multitouch": true,
       "blur_on_leave": true,
       "watermark": true,
-      "max_violations": 3
+      "enforce_fullscreen": true,
+      "detect_split_screen": true,
+      "detect_motion": false,
+      "max_violations": 3,
+      "auto_submit_on_limit": false
     }'::jsonb,
     created_at       timestamptz  not null default now()
 );
@@ -104,13 +108,29 @@ alter table public.exams add column if not exists global_pin varchar(50);
 -- pass (no NULL window) and preserves the shipped "always shuffled" behaviour;
 -- the client treats only an explicit false as "keep the authored order".
 alter table public.exams add column if not exists shuffle_questions boolean not null default true;
--- Phase 11.0 Anti-cheat security config policy.
+-- Phase 11.0 / 11.1 Anti-cheat security config policy.
 alter table public.exams add column if not exists security_config jsonb not null default '{
   "prevent_copy": true,
   "detect_multitouch": true,
   "blur_on_leave": true,
   "watermark": true,
-  "max_violations": 3
+  "enforce_fullscreen": true,
+  "detect_split_screen": true,
+  "detect_motion": false,
+  "max_violations": 3,
+  "auto_submit_on_limit": false
+}'::jsonb;
+-- Ensure existing column default is updated
+alter table public.exams alter column security_config set default '{
+  "prevent_copy": true,
+  "detect_multitouch": true,
+  "blur_on_leave": true,
+  "watermark": true,
+  "enforce_fullscreen": true,
+  "detect_split_screen": true,
+  "detect_motion": false,
+  "max_violations": 3,
+  "auto_submit_on_limit": false
 }'::jsonb;
 -- `add constraint` is not re-runnable, so drop before adding.
 alter table public.exams drop constraint if exists chk_pin_mode;
@@ -795,7 +815,11 @@ begin
       "detect_multitouch": true,
       "blur_on_leave": true,
       "watermark": true,
-      "max_violations": 3
+      "enforce_fullscreen": true,
+      "detect_split_screen": true,
+      "detect_motion": false,
+      "max_violations": 3,
+      "auto_submit_on_limit": false
     }'::jsonb);
 
     -- 2. Resolve the whitelisted candidate (Phase 8.8).
@@ -2349,7 +2373,11 @@ begin
       "detect_multitouch": true,
       "blur_on_leave": true,
       "watermark": true,
-      "max_violations": 3
+      "enforce_fullscreen": true,
+      "detect_split_screen": true,
+      "detect_motion": false,
+      "max_violations": 3,
+      "auto_submit_on_limit": false
     }'::jsonb);
 
     -- Three display keys ONLY: `pin`/`dob` must never leave the server here.

@@ -1151,3 +1151,52 @@ body.security-blur #securityBlurOverlay {
   background-repeat: repeat;
 }
 
+/* Phase 11.1 — Fullscreen enforcement & Violation Badge */
+.security-violation-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  margin-left: 8px;
+}
+.security-violation-badge.is-clean {
+  display: none;
+}
+.security-violation-badge.is-warning {
+  background: rgba(245, 158, 11, 0.15);
+  color: #d97706;
+  border-color: rgba(245, 158, 11, 0.35);
+}
+.security-violation-badge.is-danger {
+  background: rgba(239, 68, 68, 0.2);
+  color: #dc2626;
+  border-color: rgba(239, 68, 68, 0.5);
+  animation: pulse-danger 1.5s infinite;
+}
+@keyframes pulse-danger {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.05); }
+}
+.security-btn-fullscreen {
+  margin-top: 16px;
+  padding: 10px 20px;
+  background: #2563eb;
+  color: #fff;
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  font-size: 14px;
+  transition: background 0.2s;
+}
+.security-btn-fullscreen:hover {
+  background: #1d4ed8;
+}
+
+

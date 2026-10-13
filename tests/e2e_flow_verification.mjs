@@ -8214,6 +8214,148 @@ async function main() {
     examsLibSrc.includes('security_config') && examsLibSrc.includes('EXAM_COLUMNS'),
     'missing security_config in EXAM_COLUMNS');
 
+  /* --- 50. Anti-Cheat Suite — Fullscreen, Split-Screen, Motion & Auto-Submit (Phase 11.1) --- */
+  step(50, 'anti-cheat suite fullscreen enforcement, split-screen, motion, and violation limits');
+
+  // 50a: Verify all 9 keys in exams.security_config defaults and backfills
+  const { data: examP2, error: examP2Err } = await teacher
+    .from('exams')
+    .select('id, code, security_config')
+    .eq('code', EXAM.code)
+    .single();
+
+  const cfg = examP2?.security_config || {};
+  check('50a: security_config carries all 9 properties',
+    !examP2Err &&
+    typeof cfg.prevent_copy === 'boolean' &&
+    typeof cfg.detect_multitouch === 'boolean' &&
+    typeof cfg.blur_on_leave === 'boolean' &&
+    typeof cfg.watermark === 'boolean' &&
+    typeof cfg.enforce_fullscreen === 'boolean' &&
+    typeof cfg.detect_split_screen === 'boolean' &&
+    typeof cfg.detect_motion === 'boolean' &&
+    typeof cfg.max_violations === 'number' &&
+    typeof cfg.auto_submit_on_limit === 'boolean',
+    JSON.stringify(cfg));
+
+  check('50a: default values match Phase 11.1 specification',
+    cfg.enforce_fullscreen === true &&
+    cfg.detect_split_screen === true &&
+    cfg.detect_motion === false &&
+    cfg.max_violations === 3 &&
+    cfg.auto_submit_on_limit === false,
+    JSON.stringify(cfg));
+
+  // 50b: verify_and_acquire_session delivers all 9 keys to student
+  const p2Candidate = {
+    exam_code: EXAM.code,
+    student_code: 'HS_SEC_P2',
+    full_name: 'Trần Thị Toàn Màn Hình',
+    class_name: '12A_P2',
+  };
+  await teacher.from('students').insert(p2Candidate);
+
+  const p2SessionRes = await student.rpc('verify_and_acquire_session', {
+    p_exam_code: EXAM.code,
+    p_student_code: p2Candidate.student_code,
+    p_full_name: p2Candidate.full_name,
+    p_class_name: p2Candidate.class_name,
+    p_device_info: 'e2e-test/p2-security',
+  });
+  const sessionCfg = p2SessionRes.data?.security_config || {};
+  check('50b: verify_and_acquire_session returns all 9 security_config keys',
+    p2SessionRes.data?.success === true &&
+    sessionCfg.enforce_fullscreen === true &&
+    sessionCfg.detect_split_screen === true &&
+    sessionCfg.detect_motion === false &&
+    sessionCfg.max_violations === 3 &&
+    sessionCfg.auto_submit_on_limit === false,
+    JSON.stringify(p2SessionRes.data));
+
+  // 50c: Logging new violation types via log_exam_violation RPC
+  const logFsExit = await student.rpc('log_exam_violation', {
+    p_exam_code: EXAM.code,
+    p_student_code: STUDENT.code,
+    p_violation_type: 'FULLSCREEN_EXIT',
+    p_message: 'Thí sinh đã thoát chế độ toàn màn hình',
+    p_metadata: { simulated: true },
+  });
+  check('50c: log_exam_violation logs FULLSCREEN_EXIT',
+    logFsExit.data?.success === true,
+    JSON.stringify(logFsExit));
+
+  const logSplit = await student.rpc('log_exam_violation', {
+    p_exam_code: EXAM.code,
+    p_student_code: STUDENT.code,
+    p_violation_type: 'SPLIT_SCREEN_DETECTED',
+    p_message: 'Phát hiện màn hình bị thu nhỏ (nghi vấn chia đôi màn hình)',
+    p_metadata: { ratio: 0.5 },
+  });
+  check('50c: log_exam_violation logs SPLIT_SCREEN_DETECTED',
+    logSplit.data?.success === true,
+    JSON.stringify(logSplit));
+
+  const logMotion = await student.rpc('log_exam_violation', {
+    p_exam_code: EXAM.code,
+    p_student_code: STUDENT.code,
+    p_violation_type: 'PHONE_MOVED',
+    p_message: 'Phát hiện thiết bị bị nhấc lên hoặc di chuyển mạnh',
+    p_metadata: { delta_g: 5.2 },
+  });
+  check('50c: log_exam_violation logs PHONE_MOVED',
+    logMotion.data?.success === true,
+    JSON.stringify(logMotion));
+
+  // 50d: Teacher Web TypeScript types & UI Component
+  check('50d: web ExamSecurityConfig and DEFAULT_SECURITY_CONFIG include 9 keys',
+    typesSrc.includes('enforce_fullscreen: boolean') &&
+    typesSrc.includes('detect_split_screen: boolean') &&
+    typesSrc.includes('detect_motion: boolean') &&
+    typesSrc.includes('max_violations: number') &&
+    typesSrc.includes('auto_submit_on_limit: boolean') &&
+    typesSrc.includes('enforce_fullscreen: true') &&
+    typesSrc.includes('detect_motion: false'),
+    'missing Phase 11.1 keys in web types.ts');
+
+  const p2SecControlSrc = readFileSync(
+    new URL('../web/src/components/questions/SecurityPolicyControl.tsx', import.meta.url), 'utf8');
+  check('50d: SecurityPolicyControl renders toggles for all 8 boolean switches and max_violations input',
+    p2SecControlSrc.includes('enforce_fullscreen') &&
+    p2SecControlSrc.includes('detect_split_screen') &&
+    p2SecControlSrc.includes('detect_motion') &&
+    p2SecControlSrc.includes('auto_submit_on_limit') &&
+    p2SecControlSrc.includes('max_violations') &&
+    p2SecControlSrc.includes('{activeCount}/8 đang bật'),
+    'missing Phase 11.1 toggles in SecurityPolicyControl');
+
+  // 50e: Student SPA styles, markup, and logic
+  const p2StudentStyles = readFileSync(
+    new URL('../student/styles.css', import.meta.url), 'utf8');
+  check('50e: student styles.css includes .security-violation-badge and .security-btn-fullscreen',
+    p2StudentStyles.includes('.security-violation-badge') &&
+    p2StudentStyles.includes('.security-violation-badge.is-clean') &&
+    p2StudentStyles.includes('.security-btn-fullscreen'),
+    'missing Phase 11.1 css classes in styles.css');
+
+  const p2StudentHtml = readFileSync(
+    new URL('../student/index.html', import.meta.url), 'utf8');
+  check('50e: student index.html defines #securityViolationBadge, #btnEnterFullscreen, and #btnRequestMotion',
+    p2StudentHtml.includes('id="securityViolationBadge"') &&
+    p2StudentHtml.includes('id="btnEnterFullscreen"') &&
+    p2StudentHtml.includes('id="btnRequestMotion"'),
+    'missing Phase 11.1 elements in index.html');
+
+  const p2StudentAppSrc = readFileSync(
+    new URL('../student/app.js', import.meta.url), 'utf8');
+  check('50e: student app.js implements FULLSCREEN_EXIT, SPLIT_SCREEN_DETECTED, PHONE_MOVED, and AUTO_VIOLATION_LIMIT',
+    p2StudentAppSrc.includes('FULLSCREEN_EXIT') &&
+    p2StudentAppSrc.includes('SPLIT_SCREEN_DETECTED') &&
+    p2StudentAppSrc.includes('PHONE_MOVED') &&
+    p2StudentAppSrc.includes('AUTO_VIOLATION_LIMIT') &&
+    p2StudentAppSrc.includes('updateViolationBadge') &&
+    p2StudentAppSrc.includes('btnEnterFullscreen'),
+    'missing anti-cheat phase 11.1 logic in student app.js');
+
   /* --- teardown --------------------------------------------------------- */
   await teacher.from('exam_audit_logs').delete().eq('exam_code', EXAM.code);
   await teacher.removeChannel(channel);

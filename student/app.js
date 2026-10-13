@@ -162,6 +162,9 @@ const state = {
   // telemetry
   blurCount: 0,
   fullscreenExitCount: 0,
+  violationCount: 0,
+  maxViolations: 3,
+  examStatus: 'IDLE',
   // controls
   heartbeatHandle: null,
   submitting: false,
@@ -720,6 +723,10 @@ async function loadExamRoster(examCode) {
   if (payload.security_config) {
     state.securityConfig = payload.security_config;
   }
+  if (state.securityConfig?.detect_motion && typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+    const btnMotion = $('btnRequestMotion');
+    if (btnMotion) btnMotion.classList.remove('hidden');
+  }
   applyPinVisibility(state.rosterPinMode);
   applyPinLabels(state.rosterPinMode);
 
@@ -1034,6 +1041,9 @@ async function enterExam() {
     state.flashIndex = null;
     state.flags = new Set();
     state.mode = 'quiz';
+    state.examStatus = 'IN_PROGRESS';
+    state.violationCount = 0;
+    updateViolationBadge();
 
     renderQuizShell();
     renderQuestion();
@@ -1595,14 +1605,46 @@ function onFullscreenChange() {
 }
 
 /* =====================================================================
-   Anti-Cheat Suite — Client Defense Shield & Security Policy (Phase 11.0)
+   Anti-Cheat Suite — Client Defense Shield & Security Policy (Phase 11.0 & 11.1)
    ===================================================================== */
 
 let lastViolationTimes = {};
+
+function updateViolationBadge() {
+  const badge = document.getElementById('securityViolationBadge');
+  if (!badge) return;
+  const count = state.violationCount || 0;
+  const max = state.maxViolations || 3;
+  if (count <= 0) {
+    badge.className = 'security-violation-badge is-clean';
+    badge.textContent = '';
+    return;
+  }
+  badge.textContent = `⚠️ Vi phạm: ${count}/${max} lần`;
+  if (count >= max) {
+    badge.className = 'security-violation-badge is-danger';
+  } else {
+    badge.className = 'security-violation-badge is-warning';
+  }
+}
+
+function handleViolationRecorded(type, msg) {
+  state.violationCount = (state.violationCount || 0) + 1;
+  updateViolationBadge();
+
+  const cfg = state.securityConfig || {};
+  if (cfg.auto_submit_on_limit && state.violationCount >= state.maxViolations) {
+    alert(`⚠️ Bạn đã vi phạm quy chế thi ${state.violationCount}/${state.maxViolations} lần. Hệ thống sẽ tự động nộp bài!`);
+    submitExam({ forcedReason: 'AUTO_VIOLATION_LIMIT' });
+  }
+}
+
 function reportViolation(type, message, metadata = {}) {
   const now = Date.now();
   if (lastViolationTimes[type] && now - lastViolationTimes[type] < 3000) return;
   lastViolationTimes[type] = now;
+
+  handleViolationRecorded(type, message);
 
   const client = state.supabase;
   if (!client || !state.examCode || !state.studentCode) return;
@@ -1699,6 +1741,9 @@ function onSecurityWindowBlur() {
 
 function onSecurityWindowFocus() {
   if (document.body.classList.contains('security-blur')) {
+    if (state.securityConfig?.enforce_fullscreen && !document.fullscreenElement) {
+      return;
+    }
     document.body.classList.remove('security-blur');
   }
 }
@@ -1710,6 +1755,9 @@ function onSecurityVisibilityChange() {
     state.blurCount += 1;
     reportViolation('TAB_HIDDEN', 'Rời tab hoặc chuyển sang ứng dụng khác');
   } else {
+    if (state.securityConfig?.enforce_fullscreen && !document.fullscreenElement) {
+      return;
+    }
     document.body.classList.remove('security-blur');
   }
 }
@@ -1721,8 +1769,15 @@ function onSelectStart(event) {
   event.preventDefault();
 }
 
+let onSplitScreenResize = null;
+let onDeviceMotion = null;
+let onEnforcedFullscreenChange = null;
+
 function initAntiCheat(cfg) {
   if (cfg) state.securityConfig = cfg;
+  state.violationCount = 0;
+  state.maxViolations = typeof (cfg && cfg.max_violations) === 'number' ? cfg.max_violations : 3;
+  updateViolationBadge();
   bindAntiCheat(state.securityConfig);
 }
 
@@ -1738,9 +1793,16 @@ function bindAntiCheat(cfg) {
     detect_multitouch: true,
     blur_on_leave: true,
     watermark: true,
+    enforce_fullscreen: true,
+    detect_split_screen: true,
+    detect_motion: false,
     max_violations: 3,
+    auto_submit_on_limit: false,
   };
   state.securityConfig = config;
+  state.violationCount = 0;
+  state.maxViolations = typeof config.max_violations === 'number' ? config.max_violations : 3;
+  updateViolationBadge();
 
   document.addEventListener('fullscreenchange', onFullscreenChange);
   document.addEventListener('webkitfullscreenchange', onFullscreenChange);
@@ -1774,6 +1836,72 @@ function bindAntiCheat(cfg) {
   if (config.watermark) {
     setupForensicWatermark(state.fullName, state.studentCode, state.examCode);
   }
+
+  // 5. Fullscreen Enforcement
+  if (config.enforce_fullscreen) {
+    const reqFs = () => {
+      if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
+        document.documentElement.requestFullscreen().catch(() => {});
+      }
+    };
+    reqFs();
+
+    onEnforcedFullscreenChange = () => {
+      if (!document.fullscreenElement && (state.examStatus === 'IN_PROGRESS' || state.mode === 'quiz')) {
+        document.body.classList.add('security-blur');
+        reportViolation('FULLSCREEN_EXIT', 'Thí sinh đã thoát chế độ toàn màn hình');
+      }
+    };
+    document.addEventListener('fullscreenchange', onEnforcedFullscreenChange);
+
+    const fsBtn = document.getElementById('btnEnterFullscreen');
+    if (fsBtn) {
+      fsBtn.onclick = (e) => {
+        if (e) e.stopPropagation();
+        reqFs();
+        if (document.hasFocus()) document.body.classList.remove('security-blur');
+      };
+    }
+  }
+
+  // 6. Split-Screen & Resizing
+  if (config.detect_split_screen) {
+    const baseH = window.innerHeight;
+    onSplitScreenResize = () => {
+      if (state.examStatus !== 'IN_PROGRESS' && state.mode !== 'quiz') return;
+      const active = document.activeElement;
+      const isInput = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA');
+      if (!isInput && window.innerHeight / baseH < 0.65) {
+        document.body.classList.add('security-blur');
+        reportViolation('SPLIT_SCREEN_DETECTED', 'Phát hiện màn hình bị thu nhỏ (nghi vấn chia đôi màn hình)');
+      }
+    };
+    window.addEventListener('resize', onSplitScreenResize);
+  }
+
+  // 7. Device Motion Guard
+  if (config.detect_motion) {
+    let lastAccTime = 0;
+    onDeviceMotion = (e) => {
+      if (state.examStatus !== 'IN_PROGRESS' && state.mode !== 'quiz') return;
+      const acc = e.accelerationIncludingGravity;
+      if (!acc) return;
+      const mag = Math.sqrt((acc.x || 0)**2 + (acc.y || 0)**2 + (acc.z || 0)**2);
+      if (Math.abs(mag - 9.81) > 4.5 && Date.now() - lastAccTime > 3000) {
+        lastAccTime = Date.now();
+        reportViolation('PHONE_MOVED', 'Phát hiện thiết bị bị nhấc lên hoặc di chuyển mạnh');
+      }
+    };
+    if (typeof DeviceMotionEvent !== 'undefined') {
+      if (typeof DeviceMotionEvent.requestPermission === 'function') {
+        DeviceMotionEvent.requestPermission().then(res => {
+          if (res === 'granted') window.addEventListener('devicemotion', onDeviceMotion);
+        }).catch(() => {});
+      } else {
+        window.addEventListener('devicemotion', onDeviceMotion);
+      }
+    }
+  }
 }
 
 function unbindAntiCheat() {
@@ -1782,6 +1910,18 @@ function unbindAntiCheat() {
 
   document.removeEventListener('fullscreenchange', onFullscreenChange);
   document.removeEventListener('webkitfullscreenchange', onFullscreenChange);
+  if (onEnforcedFullscreenChange) {
+    document.removeEventListener('fullscreenchange', onEnforcedFullscreenChange);
+    onEnforcedFullscreenChange = null;
+  }
+  if (onSplitScreenResize) {
+    window.removeEventListener('resize', onSplitScreenResize);
+    onSplitScreenResize = null;
+  }
+  if (onDeviceMotion) {
+    window.removeEventListener('devicemotion', onDeviceMotion);
+    onDeviceMotion = null;
+  }
 
   document.body.classList.remove('security-locked', 'security-blur');
 
@@ -1806,12 +1946,17 @@ function unbindAntiCheat() {
   }
   const wmEl = document.getElementById('forensicWatermark');
   if (wmEl) wmEl.remove();
+
+  state.violationCount = 0;
+  updateViolationBadge();
 }
 
 if (typeof window !== 'undefined') {
   window.reportViolation = reportViolation;
   window.initAntiCheat = initAntiCheat;
   window.setupForensicWatermark = setupForensicWatermark;
+  window.handleViolationRecorded = handleViolationRecorded;
+  window.updateViolationBadge = updateViolationBadge;
 }
 
 async function requestFullscreen() {
@@ -1974,10 +2119,13 @@ async function submitExam(auto) {
   busy(true, 'Đang nộp bài…');
 
   const answers = buildAnswersPayload();
+  const isForced = typeof auto === 'object' && Boolean(auto?.forcedReason);
   const metrics = {
     blurCount: state.blurCount,
     fullscreenExitCount: state.fullscreenExitCount,
+    violationCount: state.violationCount || 0,
     elapsedSeconds: elapsedSeconds(),
+    forcedReason: isForced ? auto.forcedReason : null,
   };
 
   let result = null;
@@ -2046,6 +2194,7 @@ function recoverFromFailure(auto, message) {
 
 function finishExam() {
   state.mode = 'result';
+  state.examStatus = 'FINISHED';
   stopTimer();
   stopHeartbeat();
   unbindAntiCheat();
@@ -4145,16 +4294,49 @@ async function boot() {
 
   $('fsResumeBtn').addEventListener('click', () => { requestFullscreen(); hide($('fullscreenOverlay')); });
   $('evictedBtn').addEventListener('click', () => window.location.reload());
+  const btnMotion = $('btnRequestMotion');
+  if (btnMotion) {
+    if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+      btnMotion.classList.remove('hidden');
+    }
+    btnMotion.addEventListener('click', async () => {
+      try {
+        if (typeof DeviceMotionEvent?.requestPermission === 'function') {
+          const res = await DeviceMotionEvent.requestPermission();
+          if (res === 'granted') {
+            btnMotion.classList.add('hidden');
+            toast('Đã cấp quyền cảm biến di chuyển');
+          }
+        }
+      } catch (e) {
+        console.warn('Motion permission request failed', e);
+      }
+    });
+  }
   const btnResumeBlur = $('btnResumeSecurityBlur');
   if (btnResumeBlur) {
     btnResumeBlur.addEventListener('click', () => {
+      if (state.securityConfig?.enforce_fullscreen && !document.fullscreenElement) {
+        requestFullscreen();
+      }
       document.body.classList.remove('security-blur');
+    });
+  }
+  const btnFullscreen = $('btnEnterFullscreen');
+  if (btnFullscreen) {
+    btnFullscreen.addEventListener('click', (e) => {
+      if (e) e.stopPropagation();
+      requestFullscreen();
+      if (document.hasFocus()) document.body.classList.remove('security-blur');
     });
   }
   const blurOverlay = $('securityBlurOverlay');
   if (blurOverlay) {
     blurOverlay.addEventListener('click', () => {
       if (!document.hidden && document.hasFocus()) {
+        if (state.securityConfig?.enforce_fullscreen && !document.fullscreenElement) {
+          requestFullscreen();
+        }
         document.body.classList.remove('security-blur');
       }
     });

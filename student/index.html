@@ -29,6 +29,7 @@
       🌓 <span class="theme-label">Giao diện</span>
     </button>
   </div>
+  <div id="examContainer" class="exam-container">
   <!-- Reading progress -->
   <div id="progressWrap" class="progress-wrap hidden" aria-hidden="true">
     <div id="progressBar" class="progress-bar"></div>
@@ -45,6 +46,7 @@
          `--surface-btn` buttons with a real border and label text. -->
     <div class="exam-header__right exam-top-bar__controls">
       <span id="metricFlags" class="metric-flag hidden" title="Câu đã đánh dấu"></span>
+      <span id="securityViolationBadge" class="security-violation-badge is-clean" role="status" aria-live="polite"></span>
       <div id="exam-timer-badge" class="timer-badge" role="timer" aria-label="Thời gian còn lại">
         <span aria-hidden="true">⏱️</span><span id="timerDisplay">00:00</span>
       </div>
@@ -170,6 +172,9 @@
 
             <button id="startBtn" type="submit" class="btn btn--primary btn--block">
               Vào làm bài
+            </button>
+            <button type="button" id="btnRequestMotion" class="btn btn--ghost btn--block hidden" style="margin-top: 8px;">
+              Cấp quyền cảm biến chuyển động 📱
             </button>
             <p class="login__note">
               Bài thi yêu cầu chế độ toàn màn hình và ghi nhận việc rời màn hình.
@@ -334,6 +339,8 @@
       <button id="restartBtn" type="button" class="btn btn--primary btn--block">Làm bài khác</button>
     </section>
   </main>
+  </div>
+  <!-- /#examContainer -->
   </div>
   <!-- /#view-exam -->
 
@@ -590,6 +597,9 @@
       </p>
       <button type="button" id="btnResumeSecurityBlur" class="btn btn--primary" style="margin-top: 10px; padding: 10px 28px; font-weight: 700; font-size: 14px; border-radius: 8px;">
         Chạm để quay lại bài thi
+      </button>
+      <button type="button" id="btnEnterFullscreen" class="security-btn-fullscreen">
+        Quay lại toàn màn hình 🔲
       </button>
     </div>
   </div>
