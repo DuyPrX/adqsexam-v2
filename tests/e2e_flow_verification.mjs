@@ -7946,6 +7946,25 @@ async function main() {
     tree3DSrc.includes('godRayRef') && tree3DSrc.includes('pollenGroupRef'),
     'missing golden latch celebration FX');
 
+  // --- 47f. 2.5D FourTeamGardenEngine architecture checks ---
+  const gardenEngineSrc = readFileSync(
+    new URL('../web/src/lib/FourTeamGardenEngine.ts', import.meta.url), 'utf8');
+  const gardenCanvasSrc = readFileSync(
+    new URL('../web/src/components/tree/FourTeamGardenCanvas.tsx', import.meta.url), 'utf8');
+
+  check('47f: FourTeamGardenEngine implements 4 team species and 2.5D rendering',
+    gardenEngineSrc.includes('FourTeamGardenEngine') &&
+    gardenEngineSrc.includes('TEAM_SPECIES') &&
+    gardenEngineSrc.includes('updateOpinionMode') &&
+    gardenEngineSrc.includes('updateQuizMode'),
+    'missing FourTeamGardenEngine methods');
+
+  check('47f: FourTeamGardenCanvas mounts 2.5D canvas and binds engine lifecycle',
+    gardenCanvasSrc.includes("'use client'") &&
+    gardenCanvasSrc.includes('FourTeamGardenEngine') &&
+    gardenCanvasSrc.includes('garden-canvas'),
+    'missing FourTeamGardenCanvas wrapper');
+
   /* --- 48. post-session brainstorm summary modal (Phase 10.6) ---------- */
   step(48, 'post-session brainstorm summary modal (1-student-to-1-idea model)');
 
