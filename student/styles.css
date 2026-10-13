@@ -1199,4 +1199,81 @@ body.security-blur #securityBlurOverlay {
   background: #1d4ed8;
 }
 
+/* Question image styling (Phase 11.3) */
+.question-img {
+  max-width: 100%;
+  max-height: 420px;
+  height: auto;
+  border-radius: 8px;
+  cursor: zoom-in;
+  margin: 12px 0;
+  display: block;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.question-img:hover {
+  transform: scale(1.01);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.14);
+}
+
+/* Image Lightbox Modal */
+.image-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 99999;
+  background: rgba(15, 23, 42, 0.94);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  box-sizing: border-box;
+}
+
+.lightbox-close-btn {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  font-size: 28px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s, transform 0.2s;
+  z-index: 2;
+}
+
+.lightbox-close-btn:hover {
+  background: rgba(255, 255, 255, 0.32);
+  transform: scale(1.08);
+}
+
+.lightbox-content {
+  max-width: 95vw;
+  max-height: 90vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  touch-action: pan-x pan-y pinch-zoom;
+}
+
+.lightbox-content img {
+  max-width: 100%;
+  max-height: 86vh;
+  object-fit: contain;
+  border-radius: 8px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+}
+
+
 

@@ -12,9 +12,11 @@ import {
   Filter,
   Radio,
   RefreshCw,
+  RotateCcw,
   Search,
   Shield,
   ShieldAlert,
+  Unlock,
   Users,
   X,
 } from 'lucide-react';
@@ -65,6 +67,8 @@ const VIOLATION_LABELS: Record<string, { label: string; critical: boolean }> = {
   AUTO_VIOLATION_LIMIT: { label: 'Hết ngưỡng vi phạm', critical: true },
   WATERMARK_TAMPER: { label: 'Xóa hình mờ', critical: true },
   PROCTOR_FORCE_SUBMIT: { label: 'Giám thị thu bài', critical: true },
+  TEACHER_RESET_ATTEMPT: { label: 'Cấp lại lượt thi', critical: false },
+  TEACHER_REOPEN_SESSION: { label: 'Mở lại bài thi (+5p)', critical: false },
 };
 
 export function LiveProctorDashboard({
@@ -84,6 +88,10 @@ export function LiveProctorDashboard({
   const [forceSubmitTarget, setForceSubmitTarget] = useState<CandidateProctorState | null>(null);
   const [isForceSubmitting, setIsForceSubmitting] = useState(false);
   const [forceReason, setForceReason] = useState('Giám thị phát hiện vi phạm quy chế');
+  const [resetTarget, setResetTarget] = useState<CandidateProctorState | null>(null);
+  const [isResetting, setIsResetting] = useState(false);
+  const [reopenTarget, setReopenTarget] = useState<CandidateProctorState | null>(null);
+  const [isReopening, setIsReopening] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isConnected, setIsConnected] = useState(false);
   const [notification, setNotification] = useState<{ text: string; type: 'info' | 'warn' | 'error' } | null>(null);
@@ -304,6 +312,92 @@ export function LiveProctorDashboard({
       showToast(msg, 'error');
     } finally {
       setIsForceSubmitting(false);
+    }
+  };
+
+  // Handle Reset Attempt
+  const handleConfirmResetAttempt = async () => {
+    if (!resetTarget) return;
+    setIsResetting(true);
+    try {
+      const supabase = createClient();
+      const { data, error } = await supabase.rpc('reset_student_exam_attempt', {
+        p_exam_code: examCode,
+        p_student_code: resetTarget.student_code,
+        p_reason: 'Giáo viên cấp lại lượt thi mới',
+      });
+
+      if (error || !data?.success) {
+        throw new Error(data?.message || error?.message || 'Không thể cấp lại lượt thi.');
+      }
+
+      showToast(`Đã cấp lại lượt thi mới cho thí sinh ${resetTarget.full_name}`, 'info');
+
+      // Update state locally
+      setCandidates((prev) => {
+        const target = prev[resetTarget.student_code];
+        if (!target) return prev;
+        return {
+          ...prev,
+          [resetTarget.student_code]: {
+            ...target,
+            status: 'offline',
+            is_submitted: false,
+            is_active: false,
+            violation_count: 0,
+            logs: [],
+          },
+        };
+      });
+
+      setResetTarget(null);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Lỗi khi cấp lại lượt thi';
+      showToast(msg, 'error');
+    } finally {
+      setIsResetting(false);
+    }
+  };
+
+  // Handle Reopen Session
+  const handleConfirmReopenSession = async () => {
+    if (!reopenTarget) return;
+    setIsReopening(true);
+    try {
+      const supabase = createClient();
+      const { data, error } = await supabase.rpc('reopen_student_exam_session', {
+        p_exam_code: examCode,
+        p_student_code: reopenTarget.student_code,
+        p_extra_minutes: 5,
+      });
+
+      if (error || !data?.success) {
+        throw new Error(data?.message || error?.message || 'Không thể mở lại bài thi.');
+      }
+
+      showToast(`Đã mở lại bài thi và cộng thêm 5 phút cho thí sinh ${reopenTarget.full_name}`, 'info');
+
+      // Update state locally
+      setCandidates((prev) => {
+        const target = prev[reopenTarget.student_code];
+        if (!target) return prev;
+        return {
+          ...prev,
+          [reopenTarget.student_code]: {
+            ...target,
+            status: 'normal',
+            is_submitted: false,
+            is_active: true,
+          },
+        };
+      });
+
+      setReopenTarget(null);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Lỗi khi mở lại bài thi';
+      showToast(msg, 'error');
+    } finally {
+      setIsReopening(false);
     }
   };
 
@@ -595,7 +689,7 @@ export function LiveProctorDashboard({
                   </div>
 
                   {/* Actions */}
-                  <div className="mt-4 flex items-center justify-between gap-2 border-t border-slate-100 pt-3">
+                  <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-3">
                     <button
                       type="button"
                       onClick={() => setSelectedCandidate(candidate)}
@@ -605,20 +699,44 @@ export function LiveProctorDashboard({
                       Xem nhật ký ({candidate.logs.length})
                     </button>
 
-                    {!candidate.is_submitted && (
+                    <div className="flex flex-wrap items-center gap-1.5 justify-end">
+                      {!candidate.is_submitted && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setForceReason('Giám thị thu bài trực tiếp do vi phạm quy chế');
+                            setForceSubmitTarget(candidate);
+                          }}
+                          className="inline-flex items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 px-2 py-1 text-xs font-bold text-rose-700 transition hover:bg-rose-100"
+                          title="Buộc thí sinh kết thúc và nộp bài ngay"
+                        >
+                          <Ban size={12} />
+                          Thu bài cưỡng chế
+                        </button>
+                      )}
+
+                      {candidate.is_submitted && (
+                        <button
+                          type="button"
+                          onClick={() => setReopenTarget(candidate)}
+                          className="inline-flex items-center gap-1 rounded-lg border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-bold text-emerald-700 transition hover:bg-emerald-100"
+                          title="Mở lại bài thi và gia hạn thêm 5 phút"
+                        >
+                          <Unlock size={12} />
+                          Mở khóa (+5p)
+                        </button>
+                      )}
+
                       <button
                         type="button"
-                        onClick={() => {
-                          setForceReason('Giám thị thu bài trực tiếp do vi phạm quy chế');
-                          setForceSubmitTarget(candidate);
-                        }}
-                        className="inline-flex items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 px-2 py-1 text-xs font-bold text-rose-700 transition hover:bg-rose-100"
-                        title="Buộc thí sinh kết thúc và nộp bài ngay"
+                        onClick={() => setResetTarget(candidate)}
+                        className="inline-flex items-center gap-1 rounded-lg border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-bold text-amber-700 transition hover:bg-amber-100"
+                        title="Xóa bài thi cũ và cấp lại lượt thi mới"
                       >
-                        <Ban size={12} />
-                        Thu bài cưỡng chế
+                        <RotateCcw size={12} />
+                        Cấp lại lượt
                       </button>
-                    )}
+                    </div>
                   </div>
                 </div>
               );
@@ -778,6 +896,104 @@ export function LiveProctorDashboard({
               >
                 {isForceSubmitting ? <RefreshCw size={13} className="animate-spin" /> : <Ban size={13} />}
                 Xác nhận thu bài
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reset Attempt Modal */}
+      {resetTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs animate-in fade-in">
+          <div className="w-full max-w-md rounded-2xl border border-amber-200 bg-white p-6 shadow-2xl">
+            <div className="flex items-center gap-3">
+              <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-amber-100 text-amber-600">
+                <RotateCcw size={24} />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Xác nhận cấp lại lượt thi</h3>
+                <p className="text-xs text-slate-500">Cấp phiên làm bài mới tinh cho thí sinh.</p>
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-xl bg-amber-50/60 border border-amber-200/50 p-3 text-xs text-amber-900">
+              <p>
+                Thí sinh: <strong>{resetTarget.full_name}</strong>
+              </p>
+              <p>
+                Mã: <span className="font-mono font-bold">{resetTarget.student_code}</span> — Lớp: {resetTarget.class_name}
+              </p>
+              <p className="mt-2 font-medium text-amber-800">
+                ⚠️ Bạn có chắc chắn muốn XÓA bài thi cũ và cấp lại lượt thi mới cho học sinh này? Tất cả dữ liệu bài làm và kết quả cũ sẽ bị xóa hoàn toàn.
+              </p>
+            </div>
+
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setResetTarget(null)}
+                disabled={isResetting}
+                className="rounded-lg border border-slate-200 px-3.5 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-100"
+              >
+                Hủy bỏ
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleConfirmResetAttempt()}
+                disabled={isResetting}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-4 py-2 text-xs font-bold text-white shadow-xs transition hover:bg-amber-700 disabled:opacity-50"
+              >
+                {isResetting ? <RefreshCw size={13} className="animate-spin" /> : <RotateCcw size={13} />}
+                Cấp lại lượt thi
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reopen Session Modal */}
+      {reopenTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs animate-in fade-in">
+          <div className="w-full max-w-md rounded-2xl border border-emerald-200 bg-white p-6 shadow-2xl">
+            <div className="flex items-center gap-3">
+              <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-emerald-100 text-emerald-600">
+                <Unlock size={24} />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Mở lại bài thi (+5 phút)</h3>
+                <p className="text-xs text-slate-500">Cho phép thí sinh tiếp tục làm bài thêm 5 phút.</p>
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-xl bg-emerald-50/60 border border-emerald-200/50 p-3 text-xs text-emerald-900">
+              <p>
+                Thí sinh: <strong>{reopenTarget.full_name}</strong>
+              </p>
+              <p>
+                Mã: <span className="font-mono font-bold">{reopenTarget.student_code}</span> — Lớp: {reopenTarget.class_name}
+              </p>
+              <p className="mt-2 font-medium text-emerald-800">
+                Mở lại bài thi và gia hạn thêm 5 phút cho học sinh? Thí sinh có thể vào lại phòng thi để hoàn thiện bài làm.
+              </p>
+            </div>
+
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setReopenTarget(null)}
+                disabled={isReopening}
+                className="rounded-lg border border-slate-200 px-3.5 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-100"
+              >
+                Hủy bỏ
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleConfirmReopenSession()}
+                disabled={isReopening}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-xs font-bold text-white shadow-xs transition hover:bg-emerald-700 disabled:opacity-50"
+              >
+                {isReopening ? <RefreshCw size={13} className="animate-spin" /> : <Unlock size={13} />}
+                Mở khóa (+5p)
               </button>
             </div>
           </div>

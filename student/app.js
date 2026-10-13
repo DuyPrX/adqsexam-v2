@@ -66,6 +66,8 @@ const RPC_MESSAGES = {
   // Phase 6.3 — the PIN gate (Phase 6.1) refuses an absent/wrong credential.
   INVALID_PIN: 'Mã PIN hoặc ngày sinh không đúng. Vui lòng thử lại!',
   ALREADY_SUBMITTED: 'Bạn đã nộp bài cho đề thi này rồi.',
+  EXAM_ALREADY_SUBMITTED: 'Bạn đã hoàn thành bài thi này rồi.',
+  EXAM_TIME_EXPIRED: 'Thời gian làm bài thi của bạn đã kết thúc.',
   SESSION_ACTIVE_ELSEWHERE: 'Tài khoản của bạn đang được đăng nhập trên một thiết bị khác.',
   INVALID_SESSION: 'Phiên làm bài không còn hợp lệ.',
   SESSION_EXPIRED: 'Phiên làm bài đã hết hạn do không hoạt động.',
@@ -158,7 +160,9 @@ const state = {
   // timing
   durationSeconds: 0,
   startedAt: null,
+  endsAt: null,
   timerHandle: null,
+  isViewingImage: false,
   // telemetry
   blurCount: 0,
   fullscreenExitCount: 0,
@@ -324,6 +328,7 @@ function writeSession() {
       class_name: state.className,
       session_token: state.sessionToken,
       started_at: state.startedAt,
+      ends_at: state.endsAt,
       saved_at: Date.now(),
       security_config: state.securityConfig,
       // Phase 6.3 — the PIN is persisted so a same-device reload can resume.
@@ -945,6 +950,10 @@ async function handleLoginSubmit(event) {
     if (payload.student_name) state.fullName = String(payload.student_name);
     if (payload.class_name) state.className = String(payload.class_name);
     if (payload.security_config) state.securityConfig = payload.security_config;
+    if (typeof payload.time_remaining_seconds === 'number') {
+      state.durationSeconds = payload.time_remaining_seconds;
+      state.endsAt = Date.now() + (payload.time_remaining_seconds * 1000);
+    }
     if (!state.startedAt) state.startedAt = Date.now();
     writeSession();
 
@@ -1035,7 +1044,10 @@ async function enterExam() {
     // answer slots are created so state.answers stays parallel to the display.
     applyDisplayShuffle();
     state.isPractice = false;
-    state.durationSeconds = Math.max(1, Number(state.exam.duration_minutes) || 45) * 60;
+    if (!state.endsAt) {
+      state.durationSeconds = Math.max(1, Number(state.exam.duration_minutes) || 45) * 60;
+      state.endsAt = Date.now() + (state.durationSeconds * 1000);
+    }
     state.answers = state.questions.map(makeEmptyAnswer);
     state.currentIndex = 0;
     state.flashIndex = null;
@@ -1122,6 +1134,34 @@ function updateHeader() {
    Question rendering
    ===================================================================== */
 
+function formatQuestionContent(rawText) {
+  if (!rawText) return '';
+  let html = String(rawText).replace(
+    /!\[(.*?)\]\((.*?)\)/g,
+    '<img src="$2" alt="$1" class="question-img" />'
+  );
+  html = html.replace(/<img(?![^>]*class=["'][^"']*question-img)/gi, '<img class="question-img"');
+  return html;
+}
+
+function openImageLightbox(src, alt) {
+  const modal = $('imageLightboxModal');
+  const target = $('lightboxTargetImg');
+  if (!modal || !target) return;
+  target.src = src;
+  target.alt = alt || 'Hình ảnh câu hỏi';
+  state.isViewingImage = true;
+  modal.style.display = 'flex';
+}
+
+function closeImageLightbox() {
+  const modal = $('imageLightboxModal');
+  const target = $('lightboxTargetImg');
+  if (modal) modal.style.display = 'none';
+  if (target) target.src = '';
+  state.isViewingImage = false;
+}
+
 function renderQuestion() {
   const host = $('questionHost');
   clear(host);
@@ -1135,7 +1175,8 @@ function renderQuestion() {
 
   host.appendChild(buildQuestionHead(question, type));
 
-  const text = el('p', { className: 'q-text', text: question.content || '' });
+  const text = el('div', { className: 'q-text' });
+  text.innerHTML = formatQuestionContent(question.content || '');
   host.appendChild(text);
 
   if (type === 'MCQ') host.appendChild(buildMcqOptions(question, answer));
@@ -1563,7 +1604,9 @@ function elapsedSeconds() {
 }
 
 function tickTimer() {
-  const remaining = Math.max(0, state.durationSeconds - elapsedSeconds());
+  const remaining = state.endsAt
+    ? Math.max(0, Math.round((state.endsAt - Date.now()) / 1000))
+    : Math.max(0, state.durationSeconds - elapsedSeconds());
   const minutes = Math.floor(remaining / 60);
   const seconds = remaining % 60;
   const node = $('timerDisplay');
@@ -1760,6 +1803,7 @@ function onSecuritySelectionChange() {
 }
 
 function onSecurityTouch(e) {
+  if (state.isViewingImage) return;
   if (e.touches && e.touches.length >= 3) {
     e.preventDefault();
     document.body.classList.add('security-blur');
@@ -1768,6 +1812,7 @@ function onSecurityTouch(e) {
 }
 
 function onSecurityTouchEnd(e) {
+  if (state.isViewingImage) return;
   if (!e.touches || e.touches.length === 0) {
     setTimeout(() => {
       if (!document.hidden && document.hasFocus()) {
@@ -2042,8 +2087,19 @@ function onKeyDown(event) {
   const lower = key.toLowerCase();
   const typing = isTypingTarget(event);
 
-  // Escape closes the palette drawer, the one transient overlay in the quiz.
-  if (key === 'Escape' && isPaletteOpen()) { event.preventDefault(); closePalette(); return; }
+  // Escape closes the image lightbox or the palette drawer.
+  if (key === 'Escape') {
+    if (state.isViewingImage) {
+      event.preventDefault();
+      closeImageLightbox();
+      return;
+    }
+    if (isPaletteOpen()) {
+      event.preventDefault();
+      closePalette();
+      return;
+    }
+  }
 
   // F toggles a review flag, anywhere.
   if (lower === 'f' && !typing) {
@@ -3223,6 +3279,9 @@ async function tryResumeSession() {
   state.className = stored.class_name || '';
   state.sessionToken = stored.session_token;
   state.startedAt = stored.started_at || Date.now();
+  if (stored.ends_at) {
+    state.endsAt = Number(stored.ends_at);
+  }
   // Phase 6.3 — must be resendable: the PIN gate precedes the session lock, so
   // omitting it would turn an F5 into a 60s lockout (see writeSession).
   state.pin = stored.pin || null;
@@ -3248,6 +3307,16 @@ async function tryResumeSession() {
     // a stale session was legitimately taken over.
     state.sessionToken = result.data.session_token || state.sessionToken;
     if (result.data.security_config) state.securityConfig = result.data.security_config;
+    if (typeof result.data.time_remaining_seconds === 'number') {
+      state.durationSeconds = result.data.time_remaining_seconds;
+      state.endsAt = Date.now() + (result.data.time_remaining_seconds * 1000);
+    } else if (result.data.ends_at) {
+      const parsedEndsAt = new Date(result.data.ends_at).getTime();
+      if (!Number.isNaN(parsedEndsAt)) {
+        state.endsAt = parsedEndsAt;
+        state.durationSeconds = Math.max(0, Math.round((parsedEndsAt - Date.now()) / 1000));
+      }
+    }
     writeSession();
     await requestFullscreen();
     await enterExam();
@@ -4403,6 +4472,34 @@ async function boot() {
   $('certPrintBtn').addEventListener('click', () => window.print());
   document.addEventListener('keydown', onKeyDown);
 
+  // Question image lightbox controls
+  const btnCloseLightbox = $('btnCloseLightbox');
+  if (btnCloseLightbox) {
+    btnCloseLightbox.addEventListener('click', closeImageLightbox);
+  }
+  const imageLightboxModal = $('imageLightboxModal');
+  if (imageLightboxModal) {
+    imageLightboxModal.addEventListener('click', (e) => {
+      if (e.target === imageLightboxModal) {
+        closeImageLightbox();
+      }
+    });
+  }
+  const questionHost = $('questionHost');
+  if (questionHost) {
+    questionHost.addEventListener('click', (e) => {
+      const img = e.target.closest('img.question-img');
+      if (img) {
+        openImageLightbox(img.getAttribute('src'), img.getAttribute('alt') || '');
+      }
+    });
+  }
+
+  // PWA standalone pass-through Service Worker
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
+
   // Phase 7.4 — an explicit tree link wins over both the login form and a
   // resumable exam: opening `?tree=` / `?session=` IS the student's intent, and
   // resuming would immediately hide the tree screen. The stored exam session is
@@ -4424,3 +4521,18 @@ async function boot() {
 }
 
 boot();
+
+if (typeof window !== 'undefined') {
+  window.formatQuestionContent = formatQuestionContent;
+  window.openImageLightbox = openImageLightbox;
+  window.closeImageLightbox = closeImageLightbox;
+  window.shuffleOptionsDeterministically = shuffleOptionsDeterministically;
+}
+
+export {
+  formatQuestionContent,
+  openImageLightbox,
+  closeImageLightbox,
+  shuffleOptionsDeterministically,
+};
+

@@ -224,6 +224,48 @@ create table if not exists public.active_sessions (
 comment on table public.active_sessions is 'One live session per candidate/exam (20s heartbeat, 60s expiry). Reload extends via token match.';
 
 -- ----------------------------------------------------------------------------
+-- A.4.1 exam_sessions — durable per-student timing and session completion state.
+-- ----------------------------------------------------------------------------
+create table if not exists public.exam_sessions (
+    id           uuid        primary key default gen_random_uuid(),
+    exam_id      uuid        not null references public.exams(id) on delete cascade,
+    exam_code    varchar(10) not null,
+    student_code varchar(50) not null,
+    started_at   timestamptz not null default now(),
+    ends_at      timestamptz not null,
+    is_completed boolean     not null default false,
+    submitted_at timestamptz,
+    created_at   timestamptz not null default now(),
+    constraint exam_sessions_exam_student_key unique (exam_id, student_code)
+);
+
+create index if not exists idx_exam_sessions_exam_student on public.exam_sessions(exam_id, student_code);
+create index if not exists idx_exam_sessions_exam_code on public.exam_sessions(exam_code, student_code);
+
+alter table public.exam_sessions enable row level security;
+
+drop policy if exists "Teachers can read their exam sessions" on public.exam_sessions;
+drop policy if exists "Teachers can manage their exam sessions" on public.exam_sessions;
+create policy "Teachers can manage their exam sessions"
+on public.exam_sessions for all
+to authenticated
+using (
+    exists (
+        select 1 from public.exams e
+        where e.id = exam_sessions.exam_id and e.user_id = auth.uid()
+    )
+)
+with check (
+    exists (
+        select 1 from public.exams e
+        where e.id = exam_sessions.exam_id and e.user_id = auth.uid()
+    )
+);
+
+comment on table public.exam_sessions is 'Durable anchored session record storing started_at, ends_at, and is_completed.';
+
+
+-- ----------------------------------------------------------------------------
 -- A.5  exam_results — server-scored submissions (client score is never trusted).
 -- ----------------------------------------------------------------------------
 create table if not exists public.exam_results (
@@ -764,9 +806,9 @@ drop function if exists public.verify_and_acquire_session(varchar, varchar, varc
 
 create or replace function public.verify_and_acquire_session(
     p_exam_code      varchar,
-    p_student_code   varchar,
-    p_full_name      varchar,
-    p_class_name     varchar,
+    p_student_code   varchar default null,
+    p_full_name      varchar default null,
+    p_class_name     varchar default null,
     p_device_info    text    default null,
     p_existing_token uuid    default null,
     p_pin            varchar default null
@@ -776,16 +818,17 @@ security definer
 set search_path = public, pg_temp
 as $$
 declare
-    v_exam      public.exams%rowtype;
-    v_student   public.students%rowtype;
-    v_session   public.active_sessions%rowtype;
-    v_new_token uuid := gen_random_uuid();
-    -- Phase 8.8 — normalized copies of the caller-supplied identity, used for
-    -- both the candidate lookup and the identity assertion (see step 2).
-    v_code      varchar;
-    v_name      varchar;
-    v_class     varchar;
-    v_sec_cfg   jsonb;
+    v_exam              public.exams%rowtype;
+    v_student           public.students%rowtype;
+    v_session           public.active_sessions%rowtype;
+    v_exam_session      public.exam_sessions%rowtype;
+    v_new_token         uuid := gen_random_uuid();
+    v_code              varchar;
+    v_name              varchar;
+    v_class             varchar;
+    v_sec_cfg           jsonb;
+    v_now               timestamptz := now();
+    v_remaining_seconds int := 0;
 begin
     -- 1. Exam must exist and be open.
     select * into v_exam from public.exams where code = p_exam_code;
@@ -793,23 +836,18 @@ begin
         return jsonb_build_object('success', false, 'message', 'EXAM_NOT_FOUND');
     end if;
 
-    -- 1.0 Soft-deleted exams are indistinguishable from missing ones: the Trash
-    --     is a teacher-only concept, and revealing it would leak that the code
-    --     once existed. Same code as a genuine miss on purpose.
     if v_exam.deleted_at is not null then
         return jsonb_build_object('success', false, 'message', 'EXAM_NOT_FOUND');
     end if;
 
-    -- 1.a Teacher open/close switch.
     if v_exam.is_active is not true then
         return jsonb_build_object('success', false, 'message', 'EXAM_INACTIVE');
     end if;
 
-    -- 1.b Scheduling window. A NULL bound means "unbounded on that side".
-    if v_exam.starts_at is not null and now() < v_exam.starts_at then
+    if v_exam.starts_at is not null and v_now < v_exam.starts_at then
         return jsonb_build_object('success', false, 'message', 'EXAM_NOT_STARTED');
     end if;
-    if v_exam.ends_at is not null and now() > v_exam.ends_at then
+    if v_exam.ends_at is not null and v_now > v_exam.ends_at then
         return jsonb_build_object('success', false, 'message', 'EXAM_EXPIRED');
     end if;
 
@@ -826,37 +864,17 @@ begin
       "auto_submit_on_limit": false
     }'::jsonb);
 
-    -- 2. Resolve the whitelisted candidate (Phase 8.8).
-    --
-    --    The SPA no longer has a student-code input, so it resolves one from the
-    --    roster when it can and sends NULL when it cannot. Matching server-side
-    --    on (class_name, full_name) removes that hard dependency: a candidate
-    --    whose name and class are exactly right can log in even when the roster
-    --    RPC failed or the exam has an empty roster.
-    --
-    --    Both inputs are normalized in SQL (collapsed whitespace, trimmed,
-    --    case-folded) rather than trusting the client to have done it: this is
-    --    the authentication path, and a legitimate candidate must never be
-    --    rejectable by a stray double space.
+    -- 2. Resolve candidate.
     v_code  := nullif(lower(trim(coalesce(p_student_code, ''))), '');
     v_name  := nullif(lower(regexp_replace(trim(coalesce(p_full_name, '')), '\s+', ' ', 'g')), '');
     v_class := nullif(lower(regexp_replace(trim(coalesce(p_class_name, '')), '\s+', ' ', 'g')), '');
 
     if v_code is not null then
-        -- Fast path: the client resolved a roster row and sent its code.
         select * into v_student
           from public.students s
          where s.exam_code = p_exam_code
            and lower(trim(s.student_code)) = v_code;
     elsif v_name is not null and v_class is not null then
-        -- Fallback: no usable code, so match the normalized name + class.
-        --
-        -- `order by student_code` + `limit 1` makes a duplicate roster row
-        -- deterministic instead of "whichever the planner returns first". The
-        -- `students_code_exam_uniq` constraint is on (student_code, exam_code),
-        -- NOT on (full_name, class_name), so two students may share a name in
-        -- one class; the lowest code is stable, and the PIN/DOB check below
-        -- still has to pass, so a wrong pick cannot authenticate.
         select * into v_student
           from public.students s
          where s.exam_code = p_exam_code
@@ -870,27 +888,13 @@ begin
         return jsonb_build_object('success', false, 'message', 'STUDENT_NOT_WHITELISTED');
     end if;
 
-    -- 3. Identity must match the whitelist.
-    --
-    --    When the code was supplied, step 2 matched only on it, so this checks
-    --    the name/class the student typed against THAT row — a code alone must
-    --    never let someone sit an exam under another candidate's name. When the
-    --    fallback matched on name+class this holds by construction, but it is
-    --    kept unconditional so both paths run the same assertion.
+    -- 3. Identity verification
     if lower(regexp_replace(trim(v_student.full_name),  '\s+', ' ', 'g')) <> coalesce(v_name, '')
        or lower(regexp_replace(trim(v_student.class_name), '\s+', ' ', 'g')) <> coalesce(v_class, '') then
         return jsonb_build_object('success', false, 'message', 'IDENTITY_MISMATCH');
     end if;
 
-    -- 3.b PIN gate (Phase 6.1). Placed AFTER identity so a wrong PIN can never
-    --     touch the session lock or the results table, and BEFORE the
-    --     duplicate-submission probe so a failed attempt is side-effect free.
-    --
-    --     Comparison uses `is distinct from` (null-safe): the naive
-    --     `trim(p_pin) = trim(global_pin)` evaluates to NULL when the teacher
-    --     selected GLOBAL but left global_pin unset, and the enclosing IF would
-    --     fall through — silently admitting EVERY candidate. An exam credential
-    --     must fail closed.
+    -- 3.b PIN gate
     if v_exam.pin_mode = 'GLOBAL' then
         if trim(coalesce(p_pin, '')) is distinct from trim(v_exam.global_pin) then
             return jsonb_build_object(
@@ -902,7 +906,6 @@ begin
 
     elsif v_exam.pin_mode = 'INDIVIDUAL' then
         if v_student.pin is not null and trim(v_student.pin) <> '' then
-            -- Per-student PIN takes precedence over DOB.
             if trim(coalesce(p_pin, '')) is distinct from trim(v_student.pin) then
                 return jsonb_build_object(
                     'success', false,
@@ -912,7 +915,6 @@ begin
             end if;
 
         elsif v_student.dob is not null then
-            -- DOB fallback: DDMM, e.g. 2008-09-05 -> '0509'.
             if trim(coalesce(p_pin, '')) is distinct from to_char(v_student.dob, 'DDMM') then
                 return jsonb_build_object(
                     'success', false,
@@ -921,27 +923,61 @@ begin
                 );
             end if;
         end if;
-        -- Neither pin nor dob set -> legacy/minimal row -> no PIN required.
     end if;
-    -- pin_mode = 'NONE' -> no verification. The chk_pin_mode CHECK guarantees
-    -- pin_mode is one of the three, so no ELSE branch is reachable.
 
-    -- 4. One submission per candidate, ever.
-    --
-    --    Keyed on the RESOLVED roster code (Phase 8.8), not the caller's input:
-    --    the same candidate must not be able to dodge this by omitting
-    --    `p_student_code` and logging in through the name+class fallback.
+    -- 4. Check existing submission
     if exists (
         select 1 from public.exam_results
          where exam_code = p_exam_code and student_code = v_student.student_code
     ) then
-        return jsonb_build_object('success', false, 'message', 'ALREADY_SUBMITTED');
+        return jsonb_build_object(
+            'success', false,
+            'code', 'EXAM_ALREADY_SUBMITTED',
+            'message', 'ALREADY_SUBMITTED'
+        );
     end if;
 
-    -- 5. Atomic single-device lock.
-    --    FOR UPDATE serialises concurrent logins for the same candidate. Also
-    --    keyed on the resolved code, so the fallback path is subject to exactly
-    --    the same lock as the fast path.
+    -- 5. Server-anchored timing recovery via exam_sessions
+    select * into v_exam_session
+      from public.exam_sessions
+     where exam_id = v_exam.id
+       and lower(trim(student_code)) = lower(trim(v_student.student_code));
+
+    if found then
+        if v_exam_session.is_completed then
+            return jsonb_build_object(
+                'success', false,
+                'code', 'EXAM_ALREADY_SUBMITTED',
+                'message', 'ALREADY_SUBMITTED'
+            );
+        end if;
+
+        v_remaining_seconds := greatest(0, extract(epoch from (v_exam_session.ends_at - v_now))::int);
+        if v_remaining_seconds <= 0 then
+            update public.exam_sessions
+               set is_completed = true,
+                   submitted_at = v_now
+             where id = v_exam_session.id;
+
+            return jsonb_build_object(
+                'success', false,
+                'code', 'EXAM_TIME_EXPIRED',
+                'message', 'EXAM_TIME_EXPIRED'
+            );
+        end if;
+    else
+        -- Initial session creation
+        insert into public.exam_sessions (
+            exam_id, exam_code, student_code, started_at, ends_at, is_completed
+        ) values (
+            v_exam.id, p_exam_code, v_student.student_code, v_now,
+            v_now + (v_exam.duration_minutes || ' minutes')::interval, false
+        ) returning * into v_exam_session;
+
+        v_remaining_seconds := v_exam.duration_minutes * 60;
+    end if;
+
+    -- 6. Active sessions lock & recovery
     select * into v_session
       from public.active_sessions
      where exam_code = p_exam_code
@@ -949,12 +985,10 @@ begin
      for update;
 
     if found then
-        if v_session.last_heartbeat > now() - interval '60 seconds' then
-            -- Live session.
+        if v_session.last_heartbeat > v_now - interval '60 seconds' then
             if p_existing_token is not null and p_existing_token = v_session.session_token then
-                -- Same device reloaded: extend rather than lock out (F5 tolerance).
                 update public.active_sessions
-                   set last_heartbeat = now(),
+                   set last_heartbeat = v_now,
                        device_info    = coalesce(p_device_info, device_info)
                  where exam_code = p_exam_code
                    and student_code = v_student.student_code;
@@ -966,19 +1000,20 @@ begin
                     'class_name',   v_student.class_name,
                     'exam_title',   v_exam.title,
                     'duration_minutes', v_exam.duration_minutes,
+                    'time_remaining_seconds', v_remaining_seconds,
+                    'started_at', v_exam_session.started_at,
+                    'ends_at', v_exam_session.ends_at,
                     'shuffle_questions', v_exam.shuffle_questions,
                     'security_config', v_sec_cfg,
                     'message', 'SESSION_RESUMED'
                 );
             end if;
-            -- Foreign device while a session is alive -> reject.
             return jsonb_build_object('success', false, 'message', 'SESSION_ACTIVE_ELSEWHERE');
         end if;
 
-        -- Stale session (>60s silent): take it over, reset telemetry.
         update public.active_sessions
            set session_token         = v_new_token,
-               last_heartbeat        = now(),
+               last_heartbeat        = v_now,
                current_question      = 0,
                answered_count        = 0,
                blur_count            = 0,
@@ -994,20 +1029,23 @@ begin
             'class_name',   v_student.class_name,
             'exam_title',   v_exam.title,
             'duration_minutes', v_exam.duration_minutes,
+            'time_remaining_seconds', v_remaining_seconds,
+            'started_at', v_exam_session.started_at,
+            'ends_at', v_exam_session.ends_at,
             'shuffle_questions', v_exam.shuffle_questions,
             'security_config', v_sec_cfg,
             'message', 'SESSION_ACQUIRED'
         );
     end if;
 
-    -- No session row -> create one.
     insert into public.active_sessions (
         student_code, exam_code, session_token, last_heartbeat,
         current_question, answered_count, blur_count, fullscreen_exit_count, device_info
     ) values (
-        v_student.student_code, p_exam_code, v_new_token, now(),
+        v_student.student_code, p_exam_code, v_new_token, v_now,
         0, 0, 0, 0, p_device_info
     );
+
     return jsonb_build_object(
         'success', true,
         'session_token', v_new_token,
@@ -1016,6 +1054,9 @@ begin
         'class_name',   v_student.class_name,
         'exam_title',   v_exam.title,
         'duration_minutes', v_exam.duration_minutes,
+        'time_remaining_seconds', v_remaining_seconds,
+        'started_at', v_exam_session.started_at,
+        'ends_at', v_exam_session.ends_at,
         'shuffle_questions', v_exam.shuffle_questions,
         'security_config', v_sec_cfg,
         'message', 'SESSION_ACQUIRED'
@@ -1023,7 +1064,6 @@ begin
 
 exception
     when unique_violation then
-        -- Lost an insert race against a concurrent login.
         return jsonb_build_object('success', false, 'message', 'SESSION_ACTIVE_ELSEWHERE');
 end;
 $$;
@@ -1394,6 +1434,13 @@ begin
         (v_grade ->> 'needs_grading')::boolean
     )
     returning id into v_result_id;
+
+    -- 5. Mark completed in exam_sessions if present
+    update public.exam_sessions
+       set is_completed = true,
+           submitted_at = now()
+     where exam_id = v_exam.id
+       and lower(trim(student_code)) = lower(trim(p_student_code));
 
     -- 6. Retire the session so the token can never be reused.
     delete from public.active_sessions
@@ -2515,6 +2562,147 @@ begin
   return jsonb_build_object('success', true, 'exam_code', v_exam.code, 'student_code', p_student_code);
 end;
 $$;
+
+-- ----------------------------------------------------------------------------
+-- C.15.2  reset_student_exam_attempt (teacher — authenticated)
+--         Deletes previous candidate submission, active session, and exam_session.
+-- ----------------------------------------------------------------------------
+create or replace function public.reset_student_exam_attempt(
+  p_exam_code varchar,
+  p_student_code varchar,
+  p_reason text default 'Giáo viên cấp lại lượt thi mới'
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_teacher_id uuid;
+  v_exam record;
+  v_clean_code varchar;
+  v_clean_student varchar;
+begin
+  v_teacher_id := auth.uid();
+  if v_teacher_id is null then
+    return jsonb_build_object('success', false, 'code', 'UNAUTHORIZED', 'message', 'Yêu cầu đăng nhập giáo viên.');
+  end if;
+
+  v_clean_code := upper(trim(p_exam_code));
+  v_clean_student := trim(p_student_code);
+
+  select id, code, user_id into v_exam
+  from public.exams
+  where code = v_clean_code and user_id = v_teacher_id;
+
+  if not found then
+    return jsonb_build_object('success', false, 'code', 'FORBIDDEN', 'message', 'Không tìm thấy đề thi hoặc bạn không có quyền.');
+  end if;
+
+  delete from public.active_sessions
+  where exam_code = v_clean_code and lower(trim(student_code)) = lower(v_clean_student);
+
+  delete from public.exam_results
+  where exam_code = v_clean_code and lower(trim(student_code)) = lower(v_clean_student);
+
+  delete from public.exam_sessions
+  where exam_id = v_exam.id and lower(trim(student_code)) = lower(v_clean_student);
+
+  insert into public.exam_audit_logs (
+    exam_code, student_code, violation_type, violation_message, metadata, occurred_at
+  ) values (
+    v_clean_code, v_clean_student, 'TEACHER_RESET_ATTEMPT', coalesce(p_reason, 'Cấp lại lượt thi'),
+    jsonb_build_object('proctor_id', v_teacher_id), now()
+  );
+
+  return jsonb_build_object('success', true, 'exam_code', v_clean_code, 'student_code', v_clean_student);
+end;
+$$;
+
+revoke all on function public.reset_student_exam_attempt(varchar, varchar, text) from public;
+revoke all on function public.reset_student_exam_attempt(varchar, varchar, text) from anon;
+grant execute on function public.reset_student_exam_attempt(varchar, varchar, text) to authenticated;
+
+-- ----------------------------------------------------------------------------
+-- C.15.3  reopen_student_exam_session (teacher — authenticated)
+--         Reopens an exam session and extends its ends_at by p_extra_minutes.
+-- ----------------------------------------------------------------------------
+create or replace function public.reopen_student_exam_session(
+  p_exam_code varchar,
+  p_student_code varchar,
+  p_extra_minutes int default 5
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_teacher_id uuid;
+  v_exam record;
+  v_clean_code varchar;
+  v_clean_student varchar;
+  v_new_ends_at timestamptz;
+  v_mins int := coalesce(p_extra_minutes, 5);
+begin
+  v_teacher_id := auth.uid();
+  if v_teacher_id is null then
+    return jsonb_build_object('success', false, 'code', 'UNAUTHORIZED', 'message', 'Yêu cầu đăng nhập.');
+  end if;
+
+  v_clean_code := upper(trim(p_exam_code));
+  v_clean_student := trim(p_student_code);
+
+  select id, code, user_id into v_exam
+  from public.exams
+  where code = v_clean_code and user_id = v_teacher_id;
+
+  if not found then
+    return jsonb_build_object('success', false, 'code', 'FORBIDDEN', 'message', 'Không tìm thấy đề thi hoặc bạn không có quyền.');
+  end if;
+
+  select ends_at into v_new_ends_at
+  from public.exam_sessions
+  where exam_id = v_exam.id and lower(trim(student_code)) = lower(v_clean_student);
+
+  if not found then
+    v_new_ends_at := now() + (v_mins || ' minutes')::interval;
+    insert into public.exam_sessions (
+      exam_id, exam_code, student_code, started_at, ends_at, is_completed
+    ) values (
+      v_exam.id, v_clean_code, v_clean_student, now(), v_new_ends_at, false
+    );
+  else
+    v_new_ends_at := greatest(now(), v_new_ends_at) + (v_mins || ' minutes')::interval;
+
+    update public.exam_sessions
+    set is_completed = false,
+        submitted_at = null,
+        ends_at = v_new_ends_at
+    where exam_id = v_exam.id and lower(trim(student_code)) = lower(v_clean_student);
+  end if;
+
+  delete from public.exam_results
+  where exam_code = v_clean_code and lower(trim(student_code)) = lower(v_clean_student);
+
+  delete from public.active_sessions
+  where exam_code = v_clean_code and lower(trim(student_code)) = lower(v_clean_student);
+
+  insert into public.exam_audit_logs (
+    exam_code, student_code, violation_type, violation_message, metadata, occurred_at
+  ) values (
+    v_clean_code, v_clean_student, 'TEACHER_REOPEN_SESSION', 'Mở lại bài thi và gia hạn ' || v_mins || ' phút',
+    jsonb_build_object('proctor_id', v_teacher_id, 'new_ends_at', v_new_ends_at), now()
+  );
+
+  return jsonb_build_object('success', true, 'new_ends_at', v_new_ends_at);
+end;
+$$;
+
+revoke all on function public.reopen_student_exam_session(varchar, varchar, int) from public;
+revoke all on function public.reopen_student_exam_session(varchar, varchar, int) from anon;
+grant execute on function public.reopen_student_exam_session(varchar, varchar, int) to authenticated;
+
 
 
 -- ----------------------------------------------------------------------------

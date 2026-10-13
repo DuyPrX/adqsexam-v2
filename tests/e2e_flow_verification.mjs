@@ -8553,6 +8553,335 @@ async function main() {
     examResultsContainerSrc.includes('Giám sát trực tiếp 🛡️'),
     'missing ExamResultsContainer integration');
 
+  // =========================================================================
+  // Step 52: Server-Anchored Timing Recovery, Proctor RPCs, Lightbox & PWA
+  // =========================================================================
+  console.log('\n--- Step 52: Server-Anchored Timing Recovery, Proctor RPCs, Lightbox & PWA ---');
+  const STEP52_EXAM_CODE = '520001';
+  const STEP52_STUDENT_CODE = 'HS52_01';
+
+  const studentClient = createClient(SB_URL, SB_PUBLISHABLE, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+
+  // Cleanup fixture in case of prior run
+  await adminClient.from('exam_audit_logs').delete().eq('exam_code', STEP52_EXAM_CODE);
+  await adminClient.from('exams').delete().eq('code', STEP52_EXAM_CODE);
+
+  const exam52Res = await teacher.from('exams').insert({
+    code: STEP52_EXAM_CODE,
+    title: 'Đề thi Kiểm thử Timing & Proctor Actions Step 52',
+    duration_minutes: 30,
+    user_id: teacherId,
+    is_active: true,
+    pin_mode: 'NONE',
+    security_config: { shuffle_options: true },
+  }).select().single();
+
+  check('52a: Exam for Step 52 created successfully',
+    !exam52Res.error && exam52Res.data?.code === STEP52_EXAM_CODE,
+    JSON.stringify(exam52Res));
+
+  await teacher.from('students').insert({
+    exam_code: STEP52_EXAM_CODE,
+    student_code: STEP52_STUDENT_CODE,
+    full_name: 'Nguyễn Văn Kiểm Thử 52',
+    class_name: '12A52',
+  });
+
+  // 1. Initial verify_and_acquire_session creates session and anchors duration
+  const acq1 = await studentClient.rpc('verify_and_acquire_session', {
+    p_exam_code: STEP52_EXAM_CODE,
+    p_student_code: STEP52_STUDENT_CODE,
+    p_full_name: 'Nguyễn Văn Kiểm Thử 52',
+    p_class_name: '12A52',
+  });
+
+  check('52a: verify_and_acquire_session returns exact timing payload (time_remaining_seconds, started_at, ends_at)',
+    acq1.data?.success === true &&
+    typeof acq1.data?.time_remaining_seconds === 'number' &&
+    acq1.data?.time_remaining_seconds > 1750 &&
+    acq1.data?.time_remaining_seconds <= 1800 &&
+    Boolean(acq1.data?.started_at) &&
+    Boolean(acq1.data?.ends_at),
+    JSON.stringify(acq1));
+
+  const token1 = acq1.data?.session_token;
+
+  const sess1 = await teacher.from('exam_sessions')
+    .select('*')
+    .eq('exam_id', exam52Res.data.id)
+    .eq('student_code', STEP52_STUDENT_CODE)
+    .single();
+
+  check('52b: exam_sessions record inserted with is_completed=false and matching started_at/ends_at',
+    !sess1.error &&
+    sess1.data?.is_completed === false &&
+    sess1.data?.submitted_at === null &&
+    Boolean(sess1.data?.started_at) &&
+    Boolean(sess1.data?.ends_at),
+    JSON.stringify(sess1));
+
+  // 2. Simulate F5 reload with decremented ends_at
+  const targetRemainingSecs = 480;
+  const simulatedEndsAt = new Date(Date.now() + targetRemainingSecs * 1000).toISOString();
+  await adminClient.from('exam_sessions')
+    .update({ ends_at: simulatedEndsAt })
+    .eq('exam_id', exam52Res.data.id)
+    .eq('student_code', STEP52_STUDENT_CODE);
+
+  const f5Acq = await studentClient.rpc('verify_and_acquire_session', {
+    p_exam_code: STEP52_EXAM_CODE,
+    p_student_code: STEP52_STUDENT_CODE,
+    p_full_name: 'Nguyễn Văn Kiểm Thử 52',
+    p_class_name: '12A52',
+    p_existing_token: token1,
+  });
+
+  check('52c: verify_and_acquire_session returns decremented time_remaining_seconds upon simulated F5 reload',
+    f5Acq.data?.success === true &&
+    f5Acq.data?.time_remaining_seconds >= 475 &&
+    f5Acq.data?.time_remaining_seconds <= 480,
+    `expected ~480s, got: ${f5Acq.data?.time_remaining_seconds}`);
+
+  // 3. Simulate expired session: ends_at in past
+  const expiredEndsAt = new Date(Date.now() - 30 * 1000).toISOString();
+  await adminClient.from('exam_sessions')
+    .update({ ends_at: expiredEndsAt, is_completed: false, submitted_at: null })
+    .eq('exam_id', exam52Res.data.id)
+    .eq('student_code', STEP52_STUDENT_CODE);
+
+  const expAcq = await studentClient.rpc('verify_and_acquire_session', {
+    p_exam_code: STEP52_EXAM_CODE,
+    p_student_code: STEP52_STUDENT_CODE,
+    p_full_name: 'Nguyễn Văn Kiểm Thử 52',
+    p_class_name: '12A52',
+    p_existing_token: token1,
+  });
+
+  check('52d: verify_and_acquire_session returns EXAM_TIME_EXPIRED when session duration has expired',
+    expAcq.data?.success === false &&
+    expAcq.data?.code === 'EXAM_TIME_EXPIRED',
+    JSON.stringify(expAcq));
+
+  const sessExpDb = await teacher.from('exam_sessions')
+    .select('is_completed, submitted_at')
+    .eq('exam_id', exam52Res.data.id)
+    .eq('student_code', STEP52_STUDENT_CODE)
+    .single();
+
+  check('52d: session is marked is_completed=true with submitted_at timestamp upon expiry',
+    sessExpDb.data?.is_completed === true && Boolean(sessExpDb.data?.submitted_at),
+    JSON.stringify(sessExpDb));
+
+  // A completed session re-entry returns EXAM_ALREADY_SUBMITTED
+  const completedAcq = await studentClient.rpc('verify_and_acquire_session', {
+    p_exam_code: STEP52_EXAM_CODE,
+    p_student_code: STEP52_STUDENT_CODE,
+    p_full_name: 'Nguyễn Văn Kiểm Thử 52',
+    p_class_name: '12A52',
+    p_existing_token: token1,
+  });
+
+  check('52d: completed session returns EXAM_ALREADY_SUBMITTED',
+    completedAcq.data?.success === false &&
+    completedAcq.data?.code === 'EXAM_ALREADY_SUBMITTED',
+    JSON.stringify(completedAcq));
+
+  // 4. Test Teacher RPC: reopen_student_exam_session
+  const reopenAnon = await studentClient.rpc('reopen_student_exam_session', {
+    p_exam_code: STEP52_EXAM_CODE,
+    p_student_code: STEP52_STUDENT_CODE,
+    p_extra_minutes: 5,
+  });
+  check('52e: reopen_student_exam_session rejects unauthorized / anonymous caller',
+    Boolean(reopenAnon.error) || reopenAnon.data?.success === false,
+    JSON.stringify(reopenAnon));
+
+  const reopenRes = await teacher.rpc('reopen_student_exam_session', {
+    p_exam_code: STEP52_EXAM_CODE,
+    p_student_code: STEP52_STUDENT_CODE,
+    p_extra_minutes: 5,
+  });
+
+  check('52e: teacher reopen_student_exam_session successfully reopens session and extends ends_at',
+    reopenRes.data?.success === true && Boolean(reopenRes.data?.new_ends_at),
+    JSON.stringify(reopenRes));
+
+  const sessReopenedDb = await teacher.from('exam_sessions')
+    .select('is_completed, submitted_at, ends_at')
+    .eq('exam_id', exam52Res.data.id)
+    .eq('student_code', STEP52_STUDENT_CODE)
+    .single();
+
+  const reopenedEndsAtMs = new Date(sessReopenedDb.data?.ends_at).getTime();
+  check('52e: reopened session has is_completed=false, submitted_at=null, and ends_at extended by ~5 minutes',
+    sessReopenedDb.data?.is_completed === false &&
+    sessReopenedDb.data?.submitted_at === null &&
+    reopenedEndsAtMs > Date.now() + 280 * 1000 &&
+    reopenedEndsAtMs <= Date.now() + 310 * 1000,
+    JSON.stringify(sessReopenedDb));
+
+  const reopenAudit = await teacher.from('exam_audit_logs')
+    .select('*')
+    .eq('exam_code', STEP52_EXAM_CODE)
+    .eq('student_code', STEP52_STUDENT_CODE)
+    .eq('violation_type', 'TEACHER_REOPEN_SESSION')
+    .limit(1);
+
+  check('52e: reopen_student_exam_session logs TEACHER_REOPEN_SESSION audit event',
+    reopenAudit.data?.length === 1 &&
+    reopenAudit.data[0].metadata?.proctor_id === teacherId,
+    JSON.stringify(reopenAudit));
+
+  // 5. Test Teacher RPC: reset_student_exam_attempt
+  const resetAnon = await studentClient.rpc('reset_student_exam_attempt', {
+    p_exam_code: STEP52_EXAM_CODE,
+    p_student_code: STEP52_STUDENT_CODE,
+  });
+  check('52f: reset_student_exam_attempt rejects unauthorized / anonymous caller',
+    Boolean(resetAnon.error) || resetAnon.data?.success === false,
+    JSON.stringify(resetAnon));
+
+  // Create active session and result to test complete purge
+  await adminClient.from('active_sessions').insert({
+    exam_code: STEP52_EXAM_CODE,
+    student_code: STEP52_STUDENT_CODE,
+    session_token: '11111111-2222-3333-4444-555555555555',
+    last_heartbeat: new Date().toISOString(),
+  });
+  await adminClient.from('exam_results').insert({
+    exam_code: STEP52_EXAM_CODE,
+    student_code: STEP52_STUDENT_CODE,
+    score: 9.0,
+  });
+
+  const resetRes = await teacher.rpc('reset_student_exam_attempt', {
+    p_exam_code: STEP52_EXAM_CODE,
+    p_student_code: STEP52_STUDENT_CODE,
+    p_reason: 'Cấp lại bài thi mới theo yêu cầu',
+  });
+
+  check('52f: teacher reset_student_exam_attempt succeeds',
+    resetRes.data?.success === true,
+    JSON.stringify(resetRes));
+
+  const actRem = await adminClient.from('active_sessions').select('student_code').eq('exam_code', STEP52_EXAM_CODE).eq('student_code', STEP52_STUDENT_CODE);
+  const resRem = await adminClient.from('exam_results').select('student_code').eq('exam_code', STEP52_EXAM_CODE).eq('student_code', STEP52_STUDENT_CODE);
+  const sessRem = await adminClient.from('exam_sessions').select('id').eq('exam_id', exam52Res.data.id).eq('student_code', STEP52_STUDENT_CODE);
+
+  check('52f: reset_student_exam_attempt clears active_sessions, exam_results, and exam_sessions',
+    actRem.data?.length === 0 && resRem.data?.length === 0 && sessRem.data?.length === 0,
+    `act:${actRem.data?.length}, res:${resRem.data?.length}, sess:${sessRem.data?.length}`);
+
+  const resetAudit = await teacher.from('exam_audit_logs')
+    .select('*')
+    .eq('exam_code', STEP52_EXAM_CODE)
+    .eq('student_code', STEP52_STUDENT_CODE)
+    .eq('violation_type', 'TEACHER_RESET_ATTEMPT')
+    .limit(1);
+
+  check('52f: reset_student_exam_attempt logs TEACHER_RESET_ATTEMPT audit event',
+    resetAudit.data?.length === 1 &&
+    resetAudit.data[0].metadata?.proctor_id === teacherId,
+    JSON.stringify(resetAudit));
+
+  // 6. Test Question Image Parsing and Lightbox Logic in student/app.js
+  check('52g: student app.js defines formatQuestionContent, openImageLightbox, closeImageLightbox, and isViewingImage state',
+    studentAppCode.includes('function formatQuestionContent') &&
+    studentAppCode.includes('function openImageLightbox') &&
+    studentAppCode.includes('function closeImageLightbox') &&
+    studentAppCode.includes('state.isViewingImage'),
+    'missing image lightbox helpers in student/app.js');
+
+  function parseQuestionContentForTest(rawText) {
+    if (!rawText) return '';
+    let html = String(rawText).replace(
+      /!\[(.*?)\]\((.*?)\)/g,
+      '<img src="$2" alt="$1" class="question-img" />'
+    );
+    html = html.replace(/<img(?![^>]*class=["'][^"']*question-img)/gi, '<img class="question-img"');
+    return html;
+  }
+
+  const sampleMarkdown = 'Quan sát sơ đồ mạch điện:\n![Sơ đồ mạch điện](https://cdn.example.com/circuit.png)\nHãy tính điện trở tương đương.';
+  const transformedHtml = parseQuestionContentForTest(sampleMarkdown);
+
+  check('52g: formatQuestionContent converts markdown ![alt](url) to <img class="question-img">',
+    transformedHtml.includes('<img src="https://cdn.example.com/circuit.png" alt="Sơ đồ mạch điện" class="question-img" />') &&
+    !transformedHtml.includes('!['),
+    transformedHtml);
+
+  const sampleRawImg = 'Ảnh thực hành: <img src="specimen.jpg" alt="mẫu vật">';
+  const transformedRawImg = parseQuestionContentForTest(sampleRawImg);
+
+  check('52g: formatQuestionContent injects question-img class on raw <img> tags',
+    transformedRawImg.includes('<img class="question-img" src="specimen.jpg" alt="mẫu vật">'),
+    transformedRawImg);
+
+  // 7. Test PWA Standalone Setup: manifest, service worker, and index.html
+  const manifestFile = new URL('../student/manifest.webmanifest', import.meta.url);
+  const swFile = new URL('../student/sw.js', import.meta.url);
+  const studentIndexFile = new URL('../student/index.html', import.meta.url);
+  const studentStylesFile = new URL('../student/styles.css', import.meta.url);
+
+  check('52h: student/manifest.webmanifest exists and is valid standalone PWA configuration',
+    existsSync(manifestFile),
+    'missing student/manifest.webmanifest');
+
+  const pwaManifest = JSON.parse(readFileSync(manifestFile, 'utf8'));
+  check('52h: manifest properties match PWA standalone standard',
+    pwaManifest.name === 'ADQS Exam - Phòng Thi Trực Tuyến' &&
+    pwaManifest.display === 'standalone' &&
+    pwaManifest.orientation === 'portrait-primary' &&
+    pwaManifest.background_color === '#0f172a' &&
+    pwaManifest.theme_color === '#2563eb' &&
+    Array.isArray(pwaManifest.icons) &&
+    pwaManifest.icons.length >= 2,
+    JSON.stringify(pwaManifest));
+
+  check('52h: student/sw.js exists and implements pass-through service worker',
+    existsSync(swFile),
+    'missing student/sw.js');
+
+  const swContent = readFileSync(swFile, 'utf8');
+  check('52h: sw.js includes skipWaiting, clients.claim, and fetch listener',
+    swContent.includes('skipWaiting()') &&
+    swContent.includes('clients.claim()') &&
+    swContent.includes('fetch(e.request)'),
+    swContent);
+
+  const studentHtmlContent = readFileSync(studentIndexFile, 'utf8');
+  check('52h: student/index.html includes manifest link, Apple meta tags, and imageLightboxModal',
+    studentHtmlContent.includes('rel="manifest"') &&
+    studentHtmlContent.includes('apple-mobile-web-app-capable') &&
+    studentHtmlContent.includes('apple-mobile-web-app-status-bar-style') &&
+    studentHtmlContent.includes('id="imageLightboxModal"'),
+    'missing PWA or lightbox markup in student/index.html');
+
+  const studentStylesContent = readFileSync(studentStylesFile, 'utf8');
+  check('52h: student/styles.css defines question-img and image-lightbox styles',
+    studentStylesContent.includes('.question-img') &&
+    studentStylesContent.includes('.image-lightbox') &&
+    studentStylesContent.includes('.lightbox-close-btn'),
+    'missing lightbox css in student/styles.css');
+
+  // 8. Test Teacher Web LiveProctorDashboard integration for reset & reopen
+  const proctorDashFileSrc = readFileSync(
+    new URL('../web/src/components/exams/LiveProctorDashboard.tsx', import.meta.url), 'utf8');
+  check('52i: LiveProctorDashboard contains reset_student_exam_attempt and reopen_student_exam_session actions',
+    proctorDashFileSrc.includes('reset_student_exam_attempt') &&
+    proctorDashFileSrc.includes('reopen_student_exam_session') &&
+    proctorDashFileSrc.includes('TEACHER_RESET_ATTEMPT') &&
+    proctorDashFileSrc.includes('TEACHER_REOPEN_SESSION') &&
+    proctorDashFileSrc.includes('Cấp lại lượt') &&
+    proctorDashFileSrc.includes('Mở khóa (+5p)'),
+    'missing reset or reopen actions in LiveProctorDashboard');
+
+  // Clean up Step 52 fixture
+  await teacher.from('exam_audit_logs').delete().eq('exam_code', STEP52_EXAM_CODE);
+  await teacher.from('exams').delete().eq('code', STEP52_EXAM_CODE);
+
   /* --- teardown --------------------------------------------------------- */
   await teacher.from('exam_audit_logs').delete().eq('exam_code', EXAM.code);
   await teacher.removeChannel(channel);

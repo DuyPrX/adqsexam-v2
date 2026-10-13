@@ -6,6 +6,10 @@
   <meta name="robots" content="noindex, nofollow" />
   <meta name="color-scheme" content="light dark" />
   <title>Phòng làm bài</title>
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="ADQS Exam" />
   <link rel="stylesheet" href="./styles.css" />
   <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js" defer></script>
 </head>
@@ -581,6 +585,14 @@
           <p class="cert-sheet__qr-caption">Quét mã để xác thực</p>
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- Question Image Lightbox Modal -->
+  <div id="imageLightboxModal" class="image-lightbox" style="display: none;">
+    <button type="button" id="btnCloseLightbox" class="lightbox-close-btn" aria-label="Đóng">&times;</button>
+    <div class="lightbox-content">
+      <img id="lightboxTargetImg" src="" alt="Hình ảnh câu hỏi phóng to">
     </div>
   </div>
 
