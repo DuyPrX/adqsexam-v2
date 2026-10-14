@@ -3,11 +3,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  Award,
   CheckCircle2,
   Clock,
   Eye,
   EyeOff,
   Loader2,
+  Medal,
   Radio,
   Sparkles,
   StopCircle,
@@ -47,27 +49,17 @@ interface TreeProjectorProps {
   initialSubmissions: TreeSubmissionRow[];
 }
 
+/** Podium rank: 1 = Quán quân (Gold), 2 = Á quân (Silver), 3 = Hạng ba (Bronze). */
+type PodiumRank = 1 | 2 | 3 | null;
+
 /** The four teams, in display order. */
 const TEAMS: TeamNumber[] = [1, 2, 3, 4];
 
+/** Duration (ms) for the floating finish announcement banner before auto-hiding. */
+const FINISH_BANNER_DURATION_MS = 3000;
+
 /**
  * Builds the URL a student scans to join.
- *
- * Phase 9.1 — the SHORT session code is preferred over the uuid: it is what the
- * projector prints as the PIN, so the QR and the PIN resolve to the same room and
- * a student who mistypes neither has to care which they used. The SPA's
- * `loadTreeFromUrl()` reads `?session=`/`?tree=`, and
- * `get_public_tree_session` accepts either form.
- *
- * The student SPA is a static bundle served from a directory root (Cloudflare
- * Pages `assets.directory`), with no client-side router — so the join link must
- * target its INDEX (`/` or `/index.html`) and carry the session as a query
- * parameter. A path like `/tree/join` would be a 404 because there is no such
- * document.
- *
- * The SPA is a separate origin from the teacher web, so its base comes from
- * `NEXT_PUBLIC_STUDENT_APP_URL` (see lib/env.ts); the current origin is the
- * documented local-development fallback.
  */
 function buildJoinUrl(session: TreeSessionDetail): string {
   const base = resolveStudentAppBaseUrl();
@@ -93,30 +85,31 @@ function formatRemaining(ms: number): string {
 }
 
 /**
+ * Computes the timestamp (ms) when a finished team crossed its completion threshold,
+ * so a page refresh still reconstructs the exact 1st / 2nd / 3rd finish order.
+ */
+function getTeamFinishTimestampMs(
+  teamSubmissions: TreeSubmissionRow[],
+  targetCount: number,
+): number {
+  if (teamSubmissions.length === 0) return Number.MAX_SAFE_INTEGER;
+  const sorted = [...teamSubmissions].sort((a, b) => {
+    const ta = Date.parse(String(a.submitted_at ?? '')) || 0;
+    const tb = Date.parse(String(b.submitted_at ?? '')) || 0;
+    return ta - tb;
+  });
+  const idx = Math.min(Math.max(1, targetCount) - 1, sorted.length - 1);
+  return Date.parse(String(sorted[idx]?.submitted_at ?? '')) || Number.MAX_SAFE_INTEGER;
+}
+
+/**
  * TreeProjector — the classroom projector view for one tree session.
- *
- * Phase 7.3 rendered one class-wide tree. Phase 8.4 turns the stage into a 2×2
- * "competition arena": each Tổ gets its OWN tree, seeded by
- * `getTeamSeed(session.tree_seed, teamNumber)` so the four trees are visually
- * distinct, and fed only that team's submissions. The FIRST team to reach 100%
- * of its roster is latched as the champion.
- *
- * Live growth is still driven purely by the `submissions` array: the engine
- * derives each tree from its seed + that team's data on every render, so a
- * Realtime event only merges one row into state and all four trees redraw
- * themselves. No stored geometry and no incremental animation bookkeeping means
- * a late-joining projector and a live one show the identical arena.
  */
 export function TreeProjector({ session, initialSubmissions }: TreeProjectorProps) {
   const [submissions, setSubmissions] = useState<TreeSubmissionRow[]>(initialSubmissions);
   const [isActive, setIsActive] = useState(session.is_active);
-  // Phase 9.1 — the loopback status. Held in state (not read from the prop) so the
-  // lobby can flip to the arena without a server round-trip after start.
   const [status, setStatus] = useState(session.status);
   const [startedAt, setStartedAt] = useState<string | null>(session.started_at);
-  // Phase 9.1 — the server-stamped deadline, adopted from the start RPC so the
-  // countdown does not have to be recomputed locally (and cannot drift from the
-  // `time_remaining_seconds` every student received).
   const [endsAt, setEndsAt] = useState<string | null>(session.ends_at);
   const [isStarting, setIsStarting] = useState(false);
   const [connection, setConnection] = useState<'connecting' | 'live' | 'error'>('connecting');
@@ -126,19 +119,14 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
   const [error, setError] = useState<string | null>(null);
   const [isEnding, setIsEnding] = useState(false);
   const [muted, setMuted] = useState(false);
-  const [firstFinishedTeam, setFirstFinishedTeam] = useState<TeamNumber | null>(null);
+  // Ordered list of teams that have reached 100% (index 0 -> 1st, index 1 -> 2nd, index 2 -> 3rd).
+  const [finishOrder, setFinishOrder] = useState<TeamNumber[]>([]);
   const [isSummaryOpen, setIsSummaryOpen] = useState(false);
 
-  // Phase 8.3 — sound is opt-out and its state lives in localStorage, but the
-  // value can only be read on the client, so it is synced after mount rather
-  // than in the initializer (which would desync SSR and hydration).
   useEffect(() => {
     setMuted(isAudioMuted());
   }, []);
 
-  // Autoplay Policy: an AudioContext starts suspended and may only be resumed
-  // from a user gesture. One capture-phase listener unlocks it on the first
-  // click anywhere, then removes itself.
   useEffect(() => {
     const unlock = () => {
       void resumeAudioContext();
@@ -156,15 +144,6 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
   }, [session.game_mode, submissions]);
 
   // --- countdown -----------------------------------------------------------
-  /**
-   * Phase 9.1 — the deadline now anchors on `ends_at` once the bout has started.
-   *
-   * The pre-9.1 formula (`created_at + time_limit_minutes`) started the clock at
-   * CREATION, which is wrong for a lobby: a class that waited ten minutes for
-   * stragglers would have already burned ten minutes of the bout. `ends_at` is
-   * stamped by `start_tree_session`, so the full duration is honoured; the lobby
-   * falls back to the old anchor only for a session started before this phase.
-   */
   const deadline = useMemo(() => {
     if (endsAt) return new Date(endsAt).getTime();
     const anchor = startedAt ?? session.created_at;
@@ -194,8 +173,6 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
 
       const row = payload.new as TreeSubmissionRow;
       if (!row?.id) return;
-      // Guard against a missing server-side filter: a row for another session
-      // must never be merged into this arena.
       if (row.session_id !== session.id) return;
 
       setSubmissions((previous) => {
@@ -230,43 +207,23 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
   }, [session.id]);
 
   // --- per-team projections -----------------------------------------------
-  /**
-   * Phase 9.2 — the arena's per-team denominator, from the PRE-FLIGHT config.
-   *
-   * `session.team_counts` is the raw roster tally: it includes students the
-   * teacher marked ABSENT, so a Tổ with four present members and one absentee
-   * would cap at 80% and could never finish. This applies
-   * `participant_config` (absentees removed, team overrides honoured) exactly as
-   * `get_public_tree_session` does, so the projector, the lobby and every student
-   * agree on who is on which Cây and how many answers complete it.
-   */
   const activeMembersPerTeam = useMemo(
     () => countActiveMembersPerTeam(session.roster, session.participant_config),
     [session.roster, session.participant_config],
   );
 
-  /**
-   * One entry per team: its active headcount, its submissions, the derived tree
-   * state and whether it has finished. `useMemo` keyed on `submissions` keeps a
-   * tooltip re-render from recomputing four anchor relaxations.
-   */
   const teamStats = useMemo(() => {
     return TEAMS.map((team) => {
       const teamSubmissions = submissions.filter(
         (row) => clampTeamNumber(row.team_number) === team,
       );
       const done = teamSubmissions.length;
-      // Phase 9.2 — BRAINSTORM completes on the team's own present headcount;
-      // SPEED_QUIZ on the session's explicit target score.
       const { denominator, progress, isFinished } = computeTeamProgress({
         gameMode: session.game_mode,
         acceptedCount: done,
         activeMembersCount: activeMembersPerTeam[team] ?? 0,
         targetScore: session.target_score,
       });
-      // The tree's growth ratio divides by the SAME denominator as the completion
-      // progress, so BLOOM (P = 1.0) coincides exactly with the Golden Latch
-      // instead of drifting when a team is uneven or has absentees.
       const treeState: TreeState = computeTreeState({
         totalStudents: denominator,
         submissions: teamSubmissions,
@@ -282,6 +239,9 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
         treeState,
         isFinished,
         teamSubmissions,
+        finishTimestampMs: isFinished
+          ? getTeamFinishTimestampMs(teamSubmissions, denominator)
+          : Number.MAX_SAFE_INTEGER,
       };
     });
   }, [
@@ -299,8 +259,6 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
   const totalStudents = Math.max(session.total_students, 1);
   const percent = Math.min(100, Math.round((k / totalStudents) * 100));
 
-  // Phase 8.3 — vitality for the dewdrop chime, from the class-wide tree so the
-  // sound tracks the overall pace rather than any single team's.
   const vitality = useMemo(
     () =>
       computeTreeState({
@@ -313,14 +271,11 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
     [totalStudents, submissions, session.time_limit_minutes, session.created_at, session.tree_seed],
   );
 
-  // --- first-to-finish latch (Tổ cán đích đầu tiên) ------------------------
-  // Sound is edge-triggered, not level-triggered: a chirp per NEW submission and
-  // a fanfare on the single first-finish transition. Comparing against refs means
-  // an UPDATE echo or a re-render can never replay a sound.
+  // --- Podium latch: 1st (Gold), 2nd (Silver), 3rd (Bronze) ----------------
   const previousCountRef = useRef(submissions.length);
   const vitalityRef = useRef(vitality);
   vitalityRef.current = vitality;
-  const firstFinishedRef = useRef<TeamNumber | null>(null);
+  const finishedSetRef = useRef<Set<TeamNumber>>(new Set());
 
   useEffect(() => {
     const previousCount = previousCountRef.current;
@@ -335,33 +290,52 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
   }, [k]);
 
   useEffect(() => {
-    // The champion is whichever team finished first and is not yet latched. Once
-    // set it never changes, so a later team reaching 100% does not steal the 🏆.
-    if (firstFinishedRef.current !== null) return;
-    const finishing = teamStats.find((stat) => stat.isFinished);
-    if (!finishing) return;
+    // Find any team that has finished but is not yet latched in `finishedSetRef`.
+    const newlyFinished = teamStats
+      .filter((stat) => stat.isFinished && !finishedSetRef.current.has(stat.team))
+      .sort((a, b) => a.finishTimestampMs - b.finishTimestampMs || a.team - b.team);
 
-    firstFinishedRef.current = finishing.team;
-    setFirstFinishedTeam(finishing.team);
-    playBloomFanfare();
+    if (newlyFinished.length === 0) return;
+
+    const wasEmpty = finishedSetRef.current.size === 0;
+    newlyFinished.forEach((stat) => finishedSetRef.current.add(stat.team));
+
+    setFinishOrder((prev) => {
+      const next = [...prev];
+      for (const item of newlyFinished) {
+        if (!next.includes(item.team)) next.push(item.team);
+      }
+      return next;
+    });
+
+    // Play fanfare when a podium spot (1st, 2nd, or 3rd) is claimed live
+    if (wasEmpty || finishedSetRef.current.size <= 3) {
+      playBloomFanfare();
+    }
   }, [teamStats]);
 
+  /** Maps each team (1..4) to its podium rank (1, 2, 3, or null). */
+  const podiumRanks = useMemo<Record<TeamNumber, PodiumRank>>(() => {
+    const map: Record<TeamNumber, PodiumRank> = { 1: null, 2: null, 3: null, 4: null };
+    finishOrder.forEach((teamNum, idx) => {
+      if (idx === 0) map[teamNum] = 1;
+      else if (idx === 1) map[teamNum] = 2;
+      else if (idx === 2) map[teamNum] = 3;
+    });
+    return map;
+  }, [finishOrder]);
+
   const handleToggleMute = useCallback(() => {
-    // Resume first: the toggle button is itself a gesture, so this is the
-    // natural place to satisfy the Autoplay Policy before flipping the flag.
     void resumeAudioContext();
     setMuted(toggleAudioMute());
   }, []);
 
-  // The pinned fruit wins over the transient hover, so a click "sticks" while
-  // the pointer moves off to read the preview.
   const activeFruit = useMemo(() => {
     if (pinnedId) return submissions.find((row) => row.id === pinnedId) ?? null;
     if (!hovered) return null;
     return submissions.find((row) => row.id === hovered.anchor.id) ?? null;
   }, [pinnedId, hovered, submissions]);
 
-  /** Which team card should host the detail card: the pinned fruit's, else the hovered one. */
   const tooltipTeam = useMemo<{ team: TeamNumber; anchor: LayoutFruitAnchor | null } | null>(() => {
     if (pinnedId && activeFruit) {
       return { team: clampTeamNumber(activeFruit.team_number), anchor: null };
@@ -371,8 +345,6 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
   }, [pinnedId, activeFruit, hovered]);
 
   useEffect(() => {
-    // Reset the answer reveal whenever a different fruit is selected — an
-    // inherited "revealed" state would leak one student's answer over another's.
     setShowAnswer(false);
   }, [activeFruit?.id]);
 
@@ -394,14 +366,6 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
     }
   };
 
-  /**
-   * Phase 9.1 — the LOBBY -> ACTIVE transition.
-   *
-   * The post-start deadline is taken from the RPC's own `ends_at` rather than
-   * recomputed locally, so the projector's countdown and every student's timer
-   * agree to the millisecond (the students read `time_remaining_seconds` from the
-   * same server clock).
-   */
   const handleStartSession = async () => {
     setIsStarting(true);
     setError(null);
@@ -419,7 +383,8 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
   };
 
   const handleSaveImage = () => {
-    const dataUrl = canvasRefs.current[1]?.current?.exportImage();
+    const targetTeam = finishOrder[0] ?? 1;
+    const dataUrl = canvasRefs.current[targetTeam]?.current?.exportImage();
     if (!dataUrl) {
       setError('Không tạo được ảnh. Vui lòng thử lại.');
       return;
@@ -432,7 +397,6 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
     link.remove();
   };
 
-  // One ref per team card, so the "memory picture" can export a single tree.
   const canvasRefs = useRef<Record<TeamNumber, { current: TreeCanvasHandle | null }>>({
     1: { current: null },
     2: { current: null },
@@ -440,13 +404,10 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
     4: { current: null },
   });
 
-  const champion = firstFinishedTeam;
+  const champion = finishOrder[0] ?? null;
+  const secondPlace = finishOrder[1] ?? null;
+  const thirdPlace = finishOrder[2] ?? null;
 
-  // Phase 9.1 — the waiting room. Rendered INSTEAD of the arena while the session
-  // is still in LOBBY, so the class sees the QR/PIN and the roster split rather
-  // than four empty trees. All the arena state above stays mounted (its hooks must
-  // run unconditionally), and the Realtime subscription is already live, so the
-  // first submissions after start paint immediately.
   if (status === 'LOBBY') {
     return (
       <>
@@ -493,7 +454,7 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
           </span>
         </div>
 
-        {/* Timer + progress + champion */}
+        {/* Timer + progress + podium leaderboard */}
         <div className="space-y-3 rounded-xl bg-slate-900 p-4">
           <div className="flex items-center justify-between">
             <span className="flex items-center gap-1.5 text-sm font-semibold text-slate-300">
@@ -529,11 +490,27 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
           </div>
 
           {champion ? (
-            <div className="flex items-center gap-2 rounded-lg border border-amber-400/60 bg-amber-500/15 px-3 py-2">
-              <Trophy size={16} className="shrink-0 text-amber-300" />
-              <p className="text-xs font-bold text-amber-100">
-                QUÁN QUÂN: TỔ {champion} về đích đầu tiên!
-              </p>
+            <div className="space-y-1.5">
+              <div className="flex items-center gap-2 rounded-lg border border-amber-400/60 bg-amber-500/15 px-3 py-2">
+                <Trophy size={16} className="shrink-0 text-amber-300" />
+                <p className="text-xs font-bold text-amber-100">
+                  QUÁN QUÂN: TỔ {champion} về đích đầu tiên!
+                </p>
+              </div>
+              {(secondPlace || thirdPlace) && (
+                <div className="flex flex-wrap gap-1.5 pt-0.5">
+                  {secondPlace && (
+                    <span className="inline-flex items-center gap-1 rounded-md border border-slate-300/40 bg-slate-300/10 px-2.5 py-1 text-[11px] font-bold text-slate-200">
+                      🥈 Á quân: Tổ {secondPlace}
+                    </span>
+                  )}
+                  {thirdPlace && (
+                    <span className="inline-flex items-center gap-1 rounded-md border border-amber-600/40 bg-amber-700/15 px-2.5 py-1 text-[11px] font-bold text-amber-400">
+                      🥉 Hạng ba: Tổ {thirdPlace}
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
           ) : (
             <p className="text-xs font-semibold text-slate-400">
@@ -615,7 +592,7 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
             key={stat.team}
             session={session}
             stat={stat}
-            isChampion={champion === stat.team}
+            rank={podiumRanks[stat.team]}
             canvasRef={canvasRefs.current[stat.team]}
             onFruitHover={(anchor) =>
               setHovered(anchor ? { team: stat.team, anchor } : null)
@@ -653,11 +630,11 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
   );
 }
 
-/** One team's card: header, tree canvas and (optionally) the detail card. */
+/** One team's card: header, podium border (Gold/Silver/Bronze), 3s finish banner, and tree canvas. */
 function TeamCard({
   session,
   stat,
-  isChampion,
+  rank,
   canvasRef,
   onFruitHover,
   onFruitClick,
@@ -673,7 +650,7 @@ function TeamCard({
     isFinished: boolean;
     teamSubmissions: TreeSubmissionRow[];
   };
-  isChampion: boolean;
+  rank: PodiumRank;
   canvasRef: { current: TreeCanvasHandle | null };
   onFruitHover: (anchor: LayoutFruitAnchor | null) => void;
   onFruitClick: (anchor: LayoutFruitAnchor | null) => void;
@@ -681,43 +658,104 @@ function TeamCard({
 }) {
   const { team, treeState, done, rawTotal, percent, teamSubmissions } = stat;
   const vitalityPercent = Math.round(treeState.vitality * 100);
-  // Phase 9.3 — the denominator's MEANING differs by mode: in BRAINSTORM it is
-  // the Tổ's own present headcount (so the label counts answers/students), while
-  // in SPEED_QUIZ it is the explicit target score (so it counts points).
   const isBrainstorm = session.game_mode === 'BRAINSTORM';
   const progressLabel = isBrainstorm
     ? `${done}/${rawTotal} đã nộp`
     : `${done}/${rawTotal} điểm`;
 
+  // --- Auto-dismissing 3-second finish banner state ------------------------
+  const [showFinishToast, setShowFinishToast] = useState(false);
+  const announcedRankRef = useRef<PodiumRank>(null);
+
+  useEffect(() => {
+    if (rank !== null && announcedRankRef.current !== rank) {
+      announcedRankRef.current = rank;
+      setShowFinishToast(true);
+      const timer = setTimeout(() => {
+        setShowFinishToast(false);
+      }, FINISH_BANNER_DURATION_MS);
+      return () => clearTimeout(timer);
+    }
+    if (rank === null) {
+      announcedRankRef.current = null;
+      setShowFinishToast(false);
+    }
+  }, [rank]);
+
+  // --- Podium visual hierarchy: Gold (1st) > Silver (2nd) > Bronze (3rd) ---
+  const cardBorderClasses =
+    rank === 1
+      ? 'border-amber-400 ring-2 ring-amber-400/80 shadow-[0_0_32px_rgba(251,191,36,0.28)]'
+      : rank === 2
+        ? 'border-slate-300/80 ring-1 ring-slate-300/40 shadow-[0_0_18px_rgba(203,213,225,0.16)]'
+        : rank === 3
+          ? 'border-amber-700/85 ring-1 ring-amber-600/35 shadow-[0_0_14px_rgba(217,119,6,0.14)]'
+          : 'border-slate-800';
+
+  const teamBadgeClasses =
+    rank === 1
+      ? 'bg-amber-400 text-amber-950 shadow-sm shadow-amber-400/30'
+      : rank === 2
+        ? 'bg-slate-200 text-slate-900'
+        : rank === 3
+          ? 'bg-amber-700 text-amber-50'
+          : 'bg-emerald-600 text-white';
+
+  const toastBannerConfig =
+    rank === 1
+      ? {
+          text: `🏆 QUÁN QUÂN: TỔ ${team} VỀ ĐÍCH ĐẦU TIÊN! 🌸`,
+          cls: 'border-amber-300 bg-gradient-to-r from-amber-400 via-yellow-300 to-amber-400 text-amber-950 shadow-[0_10px_30px_rgba(251,191,36,0.5)] scale-105',
+        }
+      : rank === 2
+        ? {
+            text: `🥈 Á QUÂN: TỔ ${team} VỀ ĐÍCH THỨ HAI! ✨`,
+            cls: 'border-slate-200 bg-gradient-to-r from-slate-200 via-white to-slate-300 text-slate-900 shadow-[0_8px_22px_rgba(203,213,225,0.35)]',
+          }
+        : rank === 3
+          ? {
+              text: `🥉 HẠNG BA: TỔ ${team} HOÀN THÀNH XUẤT SẮC! 🌱`,
+              cls: 'border-amber-500/60 bg-gradient-to-r from-amber-700 via-amber-600 to-amber-700 text-amber-50 shadow-[0_8px_20px_rgba(180,83,9,0.35)]',
+            }
+          : null;
+
   return (
     <section
-      className={`relative flex min-h-[42vh] flex-col overflow-hidden rounded-2xl border bg-slate-900/60 transition-shadow lg:min-h-0 ${
-        isChampion
-          ? 'border-amber-400 ring-4 ring-amber-400 shadow-xl shadow-amber-500/20'
-          : 'border-slate-800'
-      }`}
+      className={`relative flex min-h-[42vh] flex-col overflow-hidden rounded-2xl border bg-[#090d16] transition-all duration-300 lg:min-h-0 ${cardBorderClasses}`}
     >
-      <header className="flex items-center justify-between gap-2 border-b border-slate-800/80 px-3 py-2">
+      <header className="relative z-10 flex items-center justify-between gap-2 border-b border-slate-800/80 bg-slate-950/75 px-3 py-2 backdrop-blur-md">
         <div className="flex items-center gap-2">
-          <span
-            className={`rounded-lg px-2.5 py-1 text-sm font-extrabold ${
-              isChampion ? 'bg-amber-400 text-amber-950' : 'bg-emerald-600 text-white'
-            }`}
-          >
+          <span className={`rounded-lg px-2.5 py-1 text-sm font-extrabold transition-colors ${teamBadgeClasses}`}>
             Tổ {team}
           </span>
-          {isChampion && (
-            <span className="flex items-center gap-1 text-xs font-bold text-amber-300">
-              <Trophy size={14} />
+
+          {rank === 1 && (
+            <span className="inline-flex items-center gap-1 rounded-full border border-amber-400/50 bg-amber-400/15 px-2.5 py-0.5 text-xs font-extrabold text-amber-300">
+              <Trophy size={13} />
               Quán quân
             </span>
           )}
+
+          {rank === 2 && (
+            <span className="inline-flex items-center gap-1 rounded-full border border-slate-300/40 bg-slate-300/15 px-2.5 py-0.5 text-xs font-bold text-slate-200">
+              <Medal size={13} />
+              Á quân
+            </span>
+          )}
+
+          {rank === 3 && (
+            <span className="inline-flex items-center gap-1 rounded-full border border-amber-600/45 bg-amber-700/20 px-2.5 py-0.5 text-xs font-bold text-amber-400">
+              <Award size={13} />
+              Hạng ba
+            </span>
+          )}
         </div>
+
         <div className="flex items-center gap-2 text-[11px] font-semibold">
-          <span className="rounded-full bg-slate-800 px-2 py-0.5 text-slate-200">
+          <span className="rounded-full bg-slate-800/90 px-2.5 py-0.5 text-slate-200">
             {progressLabel} ({percent}%)
           </span>
-          <span className="rounded-full bg-slate-800 px-2 py-0.5 text-teal-300">
+          <span className="rounded-full border border-teal-500/25 bg-teal-500/10 px-2.5 py-0.5 text-teal-300">
             Sức sống {vitalityPercent}%
           </span>
         </div>
@@ -734,11 +772,14 @@ function TeamCard({
           onFruitHover={onFruitHover}
         />
 
-        {isChampion && (
-          <div className="pointer-events-none absolute inset-x-0 top-2 flex justify-center px-2">
-            <p className="animate-pulse rounded-full border border-amber-400/70 bg-amber-500/25 px-4 py-1.5 text-center text-xs font-extrabold text-amber-50 shadow-lg backdrop-blur">
-              🏆 QUÁN QUÂN: TỔ {team} VỀ ĐÍCH ĐẦU TIÊN! 🌸
-            </p>
+        {/* Floating finish banner: pops in prominently for 3 seconds then auto-hides */}
+        {showFinishToast && toastBannerConfig && (
+          <div className="pointer-events-none absolute inset-x-0 top-3 z-20 flex justify-center px-3">
+            <div
+              className={`animate-bounce rounded-full border px-4 py-1.5 text-center text-xs font-extrabold tracking-wide transition-all duration-300 ${toastBannerConfig.cls}`}
+            >
+              {toastBannerConfig.text}
+            </div>
           </div>
         )}
 
@@ -786,7 +827,6 @@ function ConnectionBadge({ state }: { state: 'connecting' | 'live' | 'error' }) 
 }
 
 interface FruitTooltipProps {
-  /** The hovered fruit, used to position the card. Null when a click pinned it. */
   anchor: LayoutFruitAnchor | null;
   fruit: TreeSubmissionRow;
   showAnswer: boolean;
@@ -796,11 +836,6 @@ interface FruitTooltipProps {
 
 /**
  * Floating fruit detail card, hosted inside the owning team's card.
- *
- * Positioned from the hovered anchor's pixel coordinates (which are already in
- * that card's canvas space), clamped inside the card so a fruit near an edge does
- * not push the card off-screen. When a fruit is pinned (no hover) the card docks
- * to a fixed corner instead of tracking a pointer that is no longer there.
  */
 function FruitTooltip({ anchor, fruit, showAnswer, onToggleAnswer, onClose }: FruitTooltipProps) {
   return (
