@@ -1933,7 +1933,7 @@ function bindAntiCheat(cfg) {
   if (config.enforce_fullscreen) {
     const reqFs = () => {
       if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
-        document.documentElement.requestFullscreen().catch(() => {});
+        document.documentElement.requestFullscreen().catch(() => { });
       }
     };
     reqFs();
@@ -1978,7 +1978,7 @@ function bindAntiCheat(cfg) {
       if (state.examStatus !== 'IN_PROGRESS' && state.mode !== 'quiz') return;
       const acc = e.accelerationIncludingGravity;
       if (!acc) return;
-      const mag = Math.sqrt((acc.x || 0)**2 + (acc.y || 0)**2 + (acc.z || 0)**2);
+      const mag = Math.sqrt((acc.x || 0) ** 2 + (acc.y || 0) ** 2 + (acc.z || 0) ** 2);
       if (Math.abs(mag - 9.81) > 4.5 && Date.now() - lastAccTime > 3000) {
         lastAccTime = Date.now();
         reportViolation('PHONE_MOVED', 'Phát hiện thiết bị bị nhấc lên hoặc di chuyển mạnh');
@@ -1988,7 +1988,7 @@ function bindAntiCheat(cfg) {
       if (typeof DeviceMotionEvent.requestPermission === 'function') {
         DeviceMotionEvent.requestPermission().then(res => {
           if (res === 'granted') window.addEventListener('devicemotion', onDeviceMotion);
-        }).catch(() => {});
+        }).catch(() => { });
       } else {
         window.addEventListener('devicemotion', onDeviceMotion);
       }
@@ -3634,10 +3634,44 @@ function setTreeView(view) {
  * back to a neutral line when the RPC returned no team (a walk-in code that is
  * not on the roster).
  */
+function broadcastStudentLobbyPresence() {
+  const ch = state.treeSessionChannel;
+  if (!ch) return;
+
+  const code = state.treeIdentity?.student_code || state.studentCode || null;
+  const name = state.treeIdentity?.full_name || null;
+
+  try {
+    void ch.track({
+      student_code: code,
+      full_name: name,
+      team: state.studentTeam || null,
+      joined_at: Date.now(),
+    });
+    if (code) {
+      void ch.send({
+        type: 'broadcast',
+        event: 'student_checkin',
+        payload: {
+          student_code: code,
+          full_name: name,
+          team: state.studentTeam || null,
+        },
+      });
+    }
+  } catch {
+    // Ignore transient socket errors
+  }
+}
+
 function renderTreeLobby() {
   setTreeView('lobby');
   const session = state.treeSession;
   if (!session) return;
+
+  // Ngay khi học sinh bước vào màn hình Phòng chờ (sau khi chọn tên),
+  // bắn tín hiệu điểm danh để tên học sinh sáng đèn xanh trên Máy chiếu!
+  broadcastStudentLobbyPresence();
 
   $('treeLobbyTitle').textContent = session.title || 'Cây Tri Thức';
   $('treeLobbyTeam').textContent = state.studentTeam
@@ -3917,19 +3951,119 @@ function unsubscribeTreeChannel() {
  * row is re-checked client-side anyway so a stale channel from a previous
  * session can never promote this one.
  */
+let treeLobbyPollInterval = null;
+
+function stopTreeLobbyPolling() {
+  if (treeLobbyPollInterval) {
+    clearInterval(treeLobbyPollInterval);
+    treeLobbyPollInterval = null;
+  }
+}
+
+function triggerBoutStartTransition(sessionPayload) {
+  if (state.treeStatus !== 'LOBBY') return;
+  stopTreeLobbyPolling();
+
+  state.treeStatus = 'ACTIVE';
+  if (sessionPayload && state.treeSession) {
+    if (sessionPayload.started_at) {
+      state.treeSession.startedAt = sessionPayload.started_at;
+    }
+    if (sessionPayload.time_remaining_seconds !== undefined) {
+      state.treeSession.timeRemainingSeconds = Number(sessionPayload.time_remaining_seconds) || 0;
+    }
+  }
+
+  // Nếu có sẵn hàm handleRealtimeSessionUpdate trong app.js thì gọi để đồng bộ đồng hồ
+  if (typeof handleRealtimeSessionUpdate === 'function' && sessionPayload) {
+    try {
+      handleRealtimeSessionUpdate({ new: sessionPayload });
+    } catch {
+      // Fallback bên dưới sẽ đảm nhiệm chuyển view
+    }
+  }
+
+  // Nếu học sinh đã chọn tên (có treeIdentity) -> Mở ngay màn hình nhập câu trả lời!
+  if (state.treeIdentity && !state.treeIsAbsent) {
+    finishTreeWorkspace();
+  }
+}
+
 function subscribeTreeSessionChannel(sessionId) {
+  stopTreeLobbyPolling();
+
   if (state.treeSessionChannel && state.supabase) {
     state.supabase.removeChannel(state.treeSessionChannel);
+    state.treeSessionChannel = null;
   }
+  if (!state.supabase || !sessionId) return;
+
+  const presenceKey =
+    state.treeIdentity?.student_code ||
+    state.studentCode ||
+    `anon_${Math.random().toString(36).slice(2, 8)}`;
+
+  // QUAN TRỌNG: Dùng tên kênh `tree-lobby-${sessionId}` tách biệt hoàn toàn với
+  // `tree-session-${sessionId}` của subscribeTreeChannel để không bị ghi đè!
   state.treeSessionChannel = state.supabase
-    .channel(`tree-session-${sessionId}`)
-    .on('postgres_changes', {
-      event: 'UPDATE',
-      schema: 'public',
-      table: 'tree_sessions',
-      filter: `id=eq.${sessionId}`,
-    }, handleRealtimeSessionUpdate)
-    .subscribe();
+    .channel(`tree-lobby-${sessionId}`, {
+      config: { presence: { key: presenceKey } },
+    })
+    .on(
+      'postgres_changes',
+      {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'tree_sessions',
+        filter: `id=eq.${sessionId}`,
+      },
+      (payload) => {
+        if (typeof handleRealtimeSessionUpdate === 'function') {
+          handleRealtimeSessionUpdate(payload);
+        }
+        if (payload?.new && payload.new.status !== 'LOBBY') {
+          triggerBoutStartTransition(payload.new);
+        }
+      }
+    )
+    .on('broadcast', { event: 'bout_started' }, () => {
+      triggerBoutStartTransition({
+        status: 'ACTIVE',
+        started_at: new Date().toISOString(),
+      });
+    })
+    .subscribe((status) => {
+      if (status === 'SUBSCRIBED') {
+        broadcastStudentLobbyPresence();
+      }
+    });
+
+  // Cơ chế Auto-Poll dự phòng mỗi 2.5s khi đang ở LOBBY:
+  // Đảm bảo 100% học sinh tự chuyển vào làm bài ngay cả khi RLS chặn postgres_changes
+  treeLobbyPollInterval = setInterval(async () => {
+    if (state.treeStatus !== 'LOBBY') {
+      stopTreeLobbyPolling();
+      return;
+    }
+
+    // Liên tục cập nhật điểm danh nếu học sinh vừa chọn tên xong ở màn hình Check-in
+    broadcastStudentLobbyPresence();
+
+    const ref = state.treeSession?.sessionCode || sessionId;
+    if (!ref) return;
+
+    const res = await callRpc('get_public_tree_session', {
+      p_session_code: String(ref),
+      p_student_code: state.treeIdentity?.student_code || state.studentCode || null,
+    });
+
+    if (res.ok && res.data?.success && res.data.session) {
+      const s = res.data.session;
+      if (s.status && s.status !== 'LOBBY') {
+        triggerBoutStartTransition(s);
+      }
+    }
+  }, 2500);
 }
 
 /** Promotes a waiting-room student to the arena once the teacher starts. */
@@ -4497,7 +4631,7 @@ async function boot() {
 
   // PWA standalone pass-through Service Worker
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
+    navigator.serviceWorker.register('sw.js').catch(() => { });
   }
 
   // Phase 7.4 — an explicit tree link wins over both the login form and a

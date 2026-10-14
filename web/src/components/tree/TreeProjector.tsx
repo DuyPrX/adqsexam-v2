@@ -9,7 +9,9 @@ import {
   Eye,
   EyeOff,
   Loader2,
+  Maximize2,
   Medal,
+  Minimize2,
   Radio,
   Sparkles,
   StopCircle,
@@ -58,16 +60,12 @@ const TEAMS: TeamNumber[] = [1, 2, 3, 4];
 /** Duration (ms) for the floating finish announcement banner before auto-hiding. */
 const FINISH_BANNER_DURATION_MS = 3000;
 
-/**
- * Builds the URL a student scans to join.
- */
 function buildJoinUrl(session: TreeSessionDetail): string {
   const base = resolveStudentAppBaseUrl();
   const code = session.session_code || session.id;
   return base ? `${base}/?tree=${code}` : `/?tree=${code}`;
 }
 
-/** Strips characters that are illegal in a filename on Windows/macOS. */
 function toSafeFilename(title: string): string {
   const cleaned = title
     .replace(/[\\/:*?"<>|]+/g, '')
@@ -76,7 +74,6 @@ function toSafeFilename(title: string): string {
   return cleaned || 'Phien';
 }
 
-/** `mm:ss` remaining, floored at 0. */
 function formatRemaining(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
   const minutes = Math.floor(total / 60);
@@ -84,10 +81,6 @@ function formatRemaining(ms: number): string {
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 }
 
-/**
- * Computes the timestamp (ms) when a finished team crossed its completion threshold,
- * so a page refresh still reconstructs the exact 1st / 2nd / 3rd finish order.
- */
 function getTeamFinishTimestampMs(
   teamSubmissions: TreeSubmissionRow[],
   targetCount: number,
@@ -102,10 +95,8 @@ function getTeamFinishTimestampMs(
   return Date.parse(String(sorted[idx]?.submitted_at ?? '')) || Number.MAX_SAFE_INTEGER;
 }
 
-/**
- * TreeProjector — the classroom projector view for one tree session.
- */
 export function TreeProjector({ session, initialSubmissions }: TreeProjectorProps) {
+  const rootContainerRef = useRef<HTMLDivElement>(null);
   const [submissions, setSubmissions] = useState<TreeSubmissionRow[]>(initialSubmissions);
   const [isActive, setIsActive] = useState(session.is_active);
   const [status, setStatus] = useState(session.status);
@@ -119,12 +110,35 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
   const [error, setError] = useState<string | null>(null);
   const [isEnding, setIsEnding] = useState(false);
   const [muted, setMuted] = useState(false);
-  // Ordered list of teams that have reached 100% (index 0 -> 1st, index 1 -> 2nd, index 2 -> 3rd).
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [finishOrder, setFinishOrder] = useState<TeamNumber[]>([]);
   const [isSummaryOpen, setIsSummaryOpen] = useState(false);
 
   useEffect(() => {
     setMuted(isAudioMuted());
+  }, []);
+
+  // Track browser fullscreen state (including when exited via Esc key)
+  useEffect(() => {
+    const onFullscreenChange = () => {
+      setIsFullscreen(Boolean(document.fullscreenElement));
+      // Trigger resize event so all 4 canvases recalculate dimensions immediately
+      window.dispatchEvent(new Event('resize'));
+    };
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
+  }, []);
+
+  const handleToggleFullscreen = useCallback(async () => {
+    try {
+      if (!document.fullscreenElement) {
+        await document.documentElement.requestFullscreen();
+      } else {
+        await document.exitFullscreen();
+      }
+    } catch {
+      // Ignore if browser blocks fullscreen
+    }
   }, []);
 
   useEffect(() => {
@@ -290,7 +304,6 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
   }, [k]);
 
   useEffect(() => {
-    // Find any team that has finished but is not yet latched in `finishedSetRef`.
     const newlyFinished = teamStats
       .filter((stat) => stat.isFinished && !finishedSetRef.current.has(stat.team))
       .sort((a, b) => a.finishTimestampMs - b.finishTimestampMs || a.team - b.team);
@@ -308,13 +321,11 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
       return next;
     });
 
-    // Play fanfare when a podium spot (1st, 2nd, or 3rd) is claimed live
     if (wasEmpty || finishedSetRef.current.size <= 3) {
       playBloomFanfare();
     }
   }, [teamStats]);
 
-  /** Maps each team (1..4) to its podium rank (1, 2, 3, or null). */
   const podiumRanks = useMemo<Record<TeamNumber, PodiumRank>>(() => {
     const map: Record<TeamNumber, PodiumRank> = { 1: null, 2: null, 3: null, 4: null };
     finishOrder.forEach((teamNum, idx) => {
@@ -427,20 +438,34 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
   }
 
   return (
-    <div className="flex min-h-screen flex-col bg-slate-950 text-slate-100 lg:h-screen lg:flex-row">
+    <div
+      ref={rootContainerRef}
+      className="flex min-h-screen flex-col bg-slate-950 text-slate-100 lg:h-screen lg:w-screen lg:flex-row lg:overflow-hidden"
+    >
       {/* ---------------- Sidebar ---------------- */}
-      <aside className="flex w-full shrink-0 flex-col gap-4 overflow-y-auto border-slate-800 p-5 lg:w-[24rem] lg:border-r">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-widest text-emerald-400">
-            Đấu trường Cây Tri Thức
-          </p>
-          <h1 className="mt-1 text-2xl font-bold leading-tight">{session.title}</h1>
-          <p className="mt-1 text-xs text-slate-400">Lớp {session.class_name} · 4 Tổ thi đua</p>
+      <aside className="flex w-full shrink-0 flex-col gap-3.5 overflow-y-auto border-slate-800 p-4 lg:h-full lg:w-[22rem] lg:border-r">
+        <div className="flex items-start justify-between gap-2">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-widest text-emerald-400">
+              Đấu trường Cây Tri Thức
+            </p>
+            <h1 className="mt-0.5 text-xl font-bold leading-tight">{session.title}</h1>
+            <p className="mt-0.5 text-xs text-slate-400">Lớp {session.class_name} · 4 Tổ thi đua</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void handleToggleFullscreen()}
+            title={isFullscreen ? 'Thoát toàn màn hình (Esc)' : 'Toàn màn hình (F11)'}
+            className="flex shrink-0 items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-emerald-500/60 hover:bg-slate-800"
+          >
+            {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+            <span className="hidden xl:inline">{isFullscreen ? 'Thu nhỏ' : 'Toàn màn hình'}</span>
+          </button>
         </div>
 
-        <div className="rounded-xl bg-slate-900 p-4">
+        <div className="rounded-xl bg-slate-900 p-3.5">
           <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Câu hỏi</p>
-          <p className="mt-2 whitespace-pre-wrap text-base font-semibold leading-snug text-slate-50">
+          <p className="mt-1.5 whitespace-pre-wrap text-sm font-semibold leading-snug text-slate-50">
             {session.question_text}
           </p>
         </div>
@@ -455,7 +480,7 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
         </div>
 
         {/* Timer + progress + podium leaderboard */}
-        <div className="space-y-3 rounded-xl bg-slate-900 p-4">
+        <div className="space-y-2.5 rounded-xl bg-slate-900 p-3.5">
           <div className="flex items-center justify-between">
             <span className="flex items-center gap-1.5 text-sm font-semibold text-slate-300">
               <Clock size={15} />
@@ -481,7 +506,7 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
                 {k}/{totalStudents} bạn đã góp dưỡng chất ({percent}%)
               </span>
             </div>
-            <div className="mt-1.5 h-2.5 w-full overflow-hidden rounded-full bg-slate-800">
+            <div className="mt-1.5 h-2 w-full overflow-hidden rounded-full bg-slate-800">
               <div
                 className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-teal-400 transition-[width] duration-500"
                 style={{ width: `${percent}%` }}
@@ -522,9 +547,9 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
         </div>
 
         {/* QR */}
-        <div className="flex flex-col items-center gap-2 rounded-xl bg-slate-900 p-4">
-          <p className="text-sm font-semibold text-slate-200">Quét mã để tham gia</p>
-          <TreeQrCode value={joinUrl} size={160} />
+        <div className="flex flex-col items-center gap-2 rounded-xl bg-slate-900 p-3.5">
+          <p className="text-xs font-semibold text-slate-200">Quét mã để tham gia</p>
+          <TreeQrCode value={joinUrl} size={148} />
           <p className="break-all text-center text-[11px] leading-tight text-slate-400">{joinUrl}</p>
         </div>
 
@@ -544,22 +569,33 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
             </p>
           )}
 
-          <button
-            type="button"
-            onClick={handleToggleMute}
-            title={muted ? 'Bật âm thanh' : 'Tắt âm thanh'}
-            aria-pressed={!muted}
-            className="flex w-full items-center justify-center gap-2 rounded-lg border border-slate-700 px-4 py-2.5 text-sm font-semibold text-slate-100 transition hover:bg-slate-800"
-          >
-            {muted ? '🔇 Đã tắt âm' : '🔊 Âm thanh'}
-          </button>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={handleToggleMute}
+              title={muted ? 'Bật âm thanh' : 'Tắt âm thanh'}
+              aria-pressed={!muted}
+              className="flex items-center justify-center gap-1.5 rounded-lg border border-slate-700 px-3 py-2 text-xs font-semibold text-slate-100 transition hover:bg-slate-800"
+            >
+              {muted ? '🔇 Tắt âm' : '🔊 Âm thanh'}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => void handleToggleFullscreen()}
+              className="flex items-center justify-center gap-1.5 rounded-lg border border-slate-700 px-3 py-2 text-xs font-semibold text-slate-100 transition hover:bg-slate-800"
+            >
+              {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+              {isFullscreen ? 'Thoát Full' : 'Toàn màn hình'}
+            </button>
+          </div>
 
           <button
             type="button"
             onClick={handleSaveImage}
-            className="flex w-full items-center justify-center gap-2 rounded-lg border border-slate-700 px-4 py-2.5 text-sm font-semibold text-slate-100 transition hover:bg-slate-800"
+            className="flex w-full items-center justify-center gap-2 rounded-lg border border-slate-700 px-4 py-2 text-xs font-semibold text-slate-100 transition hover:bg-slate-800"
           >
-            <Sparkles size={16} />
+            <Sparkles size={15} />
             📸 Lưu ảnh kỷ niệm
           </button>
 
@@ -567,7 +603,7 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
             <button
               type="button"
               onClick={() => setIsSummaryOpen(true)}
-              className="flex w-full items-center justify-center gap-2 rounded-lg border border-amber-500/50 bg-amber-500/10 px-4 py-2.5 text-sm font-semibold text-amber-200 transition hover:bg-amber-500/20"
+              className="flex w-full items-center justify-center gap-2 rounded-lg border border-amber-500/50 bg-amber-500/10 px-4 py-2 text-xs font-semibold text-amber-200 transition hover:bg-amber-500/20"
             >
               💡 Xem tổng kết ý tưởng
             </button>
@@ -577,16 +613,16 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
             type="button"
             onClick={() => void handleEndSession()}
             disabled={isEnding || !isActive}
-            className="flex w-full items-center justify-center gap-2 rounded-lg bg-rose-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-40"
+            className="flex w-full items-center justify-center gap-2 rounded-lg bg-rose-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            {isEnding ? <Loader2 size={16} className="animate-spin" /> : <StopCircle size={16} />}
+            {isEnding ? <Loader2 size={15} className="animate-spin" /> : <StopCircle size={15} />}
             {isEnding ? 'Đang kết thúc…' : 'Kết thúc hoạt động'}
           </button>
         </div>
       </aside>
 
-      {/* ---------------- Arena stage (2x2) ---------------- */}
-      <main className="grid flex-1 grid-cols-1 gap-3 overflow-y-auto p-3 sm:grid-cols-2 lg:min-h-0">
+      {/* ---------------- Arena stage (Strict 2x2 Equal Grid, No Scrollbar) ---------------- */}
+      <main className="grid flex-1 grid-cols-1 gap-3 p-3 sm:grid-cols-2 sm:grid-rows-2 lg:h-full lg:min-h-0 lg:overflow-hidden">
         {teamStats.map((stat) => (
           <TeamCard
             key={stat.team}
@@ -630,7 +666,7 @@ export function TreeProjector({ session, initialSubmissions }: TreeProjectorProp
   );
 }
 
-/** One team's card: header, podium border (Gold/Silver/Bronze), 3s finish banner, and tree canvas. */
+/** One team's card: strict equal height (`min-h-0 h-full`) so Row 1 and Row 2 are identical in size. */
 function TeamCard({
   session,
   stat,
@@ -663,7 +699,6 @@ function TeamCard({
     ? `${done}/${rawTotal} đã nộp`
     : `${done}/${rawTotal} điểm`;
 
-  // --- Auto-dismissing 3-second finish banner state ------------------------
   const [showFinishToast, setShowFinishToast] = useState(false);
   const announcedRankRef = useRef<PodiumRank>(null);
 
@@ -682,7 +717,6 @@ function TeamCard({
     }
   }, [rank]);
 
-  // --- Podium visual hierarchy: Gold (1st) > Silver (2nd) > Bronze (3rd) ---
   const cardBorderClasses =
     rank === 1
       ? 'border-amber-400 ring-2 ring-amber-400/80 shadow-[0_0_32px_rgba(251,191,36,0.28)]'
@@ -721,11 +755,11 @@ function TeamCard({
 
   return (
     <section
-      className={`relative flex min-h-[42vh] flex-col overflow-hidden rounded-2xl border bg-[#090d16] transition-all duration-300 lg:min-h-0 ${cardBorderClasses}`}
+      className={`relative flex h-full min-h-[38vh] flex-col overflow-hidden rounded-2xl border bg-[#090d16] transition-all duration-300 sm:min-h-0 ${cardBorderClasses}`}
     >
-      <header className="relative z-10 flex items-center justify-between gap-2 border-b border-slate-800/80 bg-slate-950/75 px-3 py-2 backdrop-blur-md">
+      <header className="relative z-10 flex shrink-0 items-center justify-between gap-2 border-b border-slate-800/80 bg-slate-950/75 px-3 py-2 backdrop-blur-md">
         <div className="flex items-center gap-2">
-          <span className={`rounded-lg px-2.5 py-1 text-sm font-extrabold transition-colors ${teamBadgeClasses}`}>
+          <span className={`rounded-lg px-2.5 py-0.5 text-xs font-extrabold transition-colors ${teamBadgeClasses}`}>
             Tổ {team}
           </span>
 
@@ -761,7 +795,7 @@ function TeamCard({
         </div>
       </header>
 
-      <div className="relative flex-1">
+      <div className="relative min-h-0 flex-1">
         <TreeCanvas
           ref={canvasRef}
           session={session}
@@ -772,7 +806,6 @@ function TeamCard({
           onFruitHover={onFruitHover}
         />
 
-        {/* Floating finish banner: pops in prominently for 3 seconds then auto-hides */}
         {showFinishToast && toastBannerConfig && (
           <div className="pointer-events-none absolute inset-x-0 top-3 z-20 flex justify-center px-3">
             <div
@@ -797,7 +830,6 @@ function TeamCard({
   );
 }
 
-/** Realtime connection indicator. */
 function ConnectionBadge({ state }: { state: 'connecting' | 'live' | 'error' }) {
   if (state === 'connecting') {
     return (
@@ -834,9 +866,6 @@ interface FruitTooltipProps {
   onClose: () => void;
 }
 
-/**
- * Floating fruit detail card, hosted inside the owning team's card.
- */
 function FruitTooltip({ anchor, fruit, showAnswer, onToggleAnswer, onClose }: FruitTooltipProps) {
   return (
     <div
