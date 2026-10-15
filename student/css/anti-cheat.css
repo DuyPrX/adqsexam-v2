@@ -1,0 +1,97 @@
+/* ==========================================================================
+   Anti-Cheat Suite — Client Defense Shield & Forensic Watermark (Phase 11.0 & 11.1)
+   ========================================================================== */
+.security-locked {
+  -webkit-touch-callout: none !important;
+  -webkit-user-select: none !important;
+  user-select: none !important;
+}
+
+.security-locked input, 
+.security-locked textarea {
+  -webkit-user-select: text !important;
+  user-select: text !important;
+}
+
+body.security-blur {
+  filter: blur(28px) grayscale(100%);
+  user-select: none !important;
+  pointer-events: none !important;
+}
+
+#securityBlurOverlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 999999;
+  background: rgba(15, 23, 42, 0.88);
+  backdrop-filter: blur(12px);
+  color: #ffffff;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 24px;
+}
+
+body.security-blur #securityBlurOverlay {
+  display: flex !important;
+  pointer-events: auto !important;
+}
+
+.watermark-overlay {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  opacity: 0.12;
+  background-repeat: repeat;
+}
+
+/* Phase 11.1 — Fullscreen enforcement & Violation Badge */
+.security-violation-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  margin-left: 8px;
+}
+.security-violation-badge.is-clean {
+  display: none;
+}
+.security-violation-badge.is-warning {
+  background: rgba(245, 158, 11, 0.15);
+  color: #d97706;
+  border-color: rgba(245, 158, 11, 0.35);
+}
+.security-violation-badge.is-danger {
+  background: rgba(239, 68, 68, 0.2);
+  color: #dc2626;
+  border-color: rgba(239, 68, 68, 0.5);
+  animation: pulse-danger 1.5s infinite;
+}
+@keyframes pulse-danger {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.05); }
+}
+.security-btn-fullscreen {
+  margin-top: 16px;
+  padding: 10px 20px;
+  background: #2563eb;
+  color: #fff;
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  font-size: 14px;
+  transition: background 0.2s;
+}
+.security-btn-fullscreen:hover {
+  background: #1d4ed8;
+}

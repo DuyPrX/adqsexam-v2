@@ -265,7 +265,56 @@ const { zipSync, strToU8 } = await import(
 const { default: workerApp } = await import(
   new URL('../worker/src/index.ts', import.meta.url).href
 );
-const { existsSync, readFileSync } = await import('node:fs');
+const { existsSync, readFileSync: _rawReadFileSync, readdirSync, statSync } = await import('node:fs');
+const { fileURLToPath } = await import('node:url');
+const { default: path } = await import('node:path');
+
+function readStudentJsBundle() {
+  const studentDir = fileURLToPath(new URL('../student', import.meta.url));
+  let code = _rawReadFileSync(path.join(studentDir, 'app.js'), 'utf8');
+  function scanDir(dir) {
+    if (!existsSync(dir)) return;
+    for (const entry of readdirSync(dir)) {
+      const full = path.join(dir, entry);
+      if (statSync(full).isDirectory()) {
+        scanDir(full);
+      } else if (full.endsWith('.js')) {
+        code += '\n' + _rawReadFileSync(full, 'utf8');
+      }
+    }
+  }
+  scanDir(path.join(studentDir, 'js'));
+  return code;
+}
+
+function readStudentCssBundle() {
+  const studentDir = fileURLToPath(new URL('../student', import.meta.url));
+  let code = _rawReadFileSync(path.join(studentDir, 'styles.css'), 'utf8');
+  function scanDir(dir) {
+    if (!existsSync(dir)) return;
+    for (const entry of readdirSync(dir)) {
+      const full = path.join(dir, entry);
+      if (statSync(full).isDirectory()) {
+        scanDir(full);
+      } else if (full.endsWith('.css')) {
+        code += '\n' + _rawReadFileSync(full, 'utf8');
+      }
+    }
+  }
+  scanDir(path.join(studentDir, 'css'));
+  return code;
+}
+
+function readFileSync(pathOrUrl, options) {
+  const resolved = String(pathOrUrl instanceof URL ? fileURLToPath(pathOrUrl) : pathOrUrl).replace(/\\/g, '/');
+  if (resolved.endsWith('/student/app.js') || resolved.endsWith('student/app.js')) {
+    return readStudentJsBundle();
+  }
+  if (resolved.endsWith('/student/styles.css') || resolved.endsWith('student/styles.css')) {
+    return readStudentCssBundle();
+  }
+  return _rawReadFileSync(pathOrUrl, options);
+}
 // Step 21 seeds/inspects cron.job_run_details, which is not API-exposed.
 const { execFileSync } = await import('node:child_process');
 
@@ -9277,6 +9326,114 @@ async function main() {
 
     await teacher.from('classes').delete().eq('id', testClassId);
   }
+
+  /* --- Step 54: Modular Architecture Verification for Student SPA ------- */
+  console.log('\n--- Step 54: Modular Architecture Verification for Student SPA ---');
+
+  const rawAppJs = _rawReadFileSync(new URL('../student/app.js', import.meta.url), 'utf8');
+  const appJsLines = rawAppJs.split('\n').length;
+  check('54a: student/app.js is a concise orchestrator (< 800 lines)',
+    appJsLines < 800,
+    `student/app.js line count: ${appJsLines}`);
+
+  check('54a: student/app.js imports from modular js/ directories',
+    rawAppJs.includes('./js/core/') &&
+    rawAppJs.includes('./js/exam/') &&
+    rawAppJs.includes('./js/games/'),
+    'missing module imports in student/app.js');
+
+  const expectedModules = [
+    'student/js/core/state.js',
+    'student/js/core/utils.js',
+    'student/js/core/theme.js',
+    'student/js/exam/anti-cheat.js',
+    'student/js/exam/exam-session.js',
+    'student/js/exam/exam-runner.js',
+    'student/js/exam/practice-docx.js',
+    'student/js/games/tree-arena.js',
+    'student/js/games/tug-of-war.js',
+  ];
+
+  for (const modPath of expectedModules) {
+    const fullModUrl = new URL(`../${modPath}`, import.meta.url);
+    const modExists = existsSync(fileURLToPath(fullModUrl));
+    const modContent = modExists ? _rawReadFileSync(fullModUrl, 'utf8') : '';
+    check(`54b: module ${modPath} exists and is non-empty`,
+      modExists && modContent.length > 50,
+      `file ${modPath} missing or empty`);
+
+    let syntaxValid = false;
+    try {
+      execFileSync(process.execPath, ['--check', fileURLToPath(fullModUrl)], { stdio: 'pipe' });
+      syntaxValid = true;
+    } catch {
+      syntaxValid = false;
+    }
+    check(`54b: module ${modPath} passes syntax check`,
+      syntaxValid,
+      `syntax error in ${modPath}`);
+  }
+
+  const rawStylesCss = _rawReadFileSync(new URL('../student/styles.css', import.meta.url), 'utf8');
+  check('54c: student/styles.css imports modular stylesheets under ./css/',
+    rawStylesCss.includes("@import './css/base.css'") &&
+    rawStylesCss.includes("@import './css/exam.css'") &&
+    rawStylesCss.includes("@import './css/anti-cheat.css'") &&
+    rawStylesCss.includes("@import './css/tree-arena.css'") &&
+    rawStylesCss.includes("@import './css/tug-of-war.css'"),
+    'missing @import rules in student/styles.css');
+
+  const expectedCssModules = [
+    'student/css/base.css',
+    'student/css/exam.css',
+    'student/css/anti-cheat.css',
+    'student/css/tree-arena.css',
+    'student/css/tug-of-war.css',
+  ];
+  for (const cssPath of expectedCssModules) {
+    const fullCssUrl = new URL(`../${cssPath}`, import.meta.url);
+    const cssExists = existsSync(fileURLToPath(fullCssUrl));
+    const cssContent = cssExists ? _rawReadFileSync(fullCssUrl, 'utf8') : '';
+    check(`54c: css module ${cssPath} exists and is non-empty`,
+      cssExists && cssContent.length > 50,
+      `css file ${cssPath} missing or empty`);
+  }
+
+  // 54d: Native ES Module execution of pure utils
+  const {
+    hashStringToSeed: modHashStringToSeed,
+    createMulberry32: modCreateMulberry32,
+    shuffleOptionsDeterministically: modShuffleOptions,
+    formatQuestionContent: modFormatQuestionContent,
+    isUuid: modIsUuid,
+  } = await import(new URL('../student/js/core/utils.js', import.meta.url).href);
+
+  const testSeed = modHashStringToSeed('HS123_q456');
+  const rng1 = modCreateMulberry32(testSeed);
+  const rng2 = modCreateMulberry32(testSeed);
+  check('54d: native utils export hashStringToSeed and createMulberry32 PRNG accurately',
+    typeof testSeed === 'number' && testSeed > 0 && rng1() === rng2(),
+    'PRNG mismatch in utils.js');
+
+  const testOptions = ['Lựa chọn A', 'Lựa chọn B', 'Lựa chọn C', 'Lựa chọn D'];
+  const shuffled1 = modShuffleOptions(testOptions, 'HS123', 'q456');
+  const shuffled2 = modShuffleOptions(testOptions, 'HS123', 'q456');
+  check('54d: shuffleOptionsDeterministically executes natively and deterministically',
+    shuffled1.length === 4 &&
+    shuffled1[0].originalIndex !== undefined &&
+    JSON.stringify(shuffled1) === JSON.stringify(shuffled2),
+    'deterministic shuffle failure');
+
+  const formattedImg = modFormatQuestionContent('Xem ảnh: ![Hình 1](https://example.com/test.png) và trả lời.');
+  check('54d: formatQuestionContent transforms image markdown into .question-img HTML',
+    formattedImg.includes('<img src="https://example.com/test.png" alt="Hình 1" class="question-img" />'),
+    formattedImg);
+
+  check('54d: isUuid helper validates UUID format correctly',
+    modIsUuid('a1b2c3d4-e5f6-4a5b-8c9d-0e1f2a3b4c5d') === true &&
+    modIsUuid('not-a-uuid') === false,
+    'isUuid validator failure');
+
 
   /* --- teardown --------------------------------------------------------- */
   await teacher.from('exam_audit_logs').delete().eq('exam_code', EXAM.code);

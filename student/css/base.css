@@ -1,0 +1,211 @@
+/* ==========================================================================
+   ADQS Exam v2 — Student SPA Base Stylesheet
+   Design tokens + resets + typography + base layout shell.
+   ========================================================================== */
+
+/* Phase 8.5 — CANONICAL design tokens.
+   These are the source of truth. Every legacy token below is an ALIAS so the
+   pre-existing rules keep working unchanged while every control gains a real
+   surface + border. `--surface-btn` / `--border-color` are deliberately opaque:
+   the old top-bar buttons used `--surface` on `--bg`, which is a ~1.02 contrast
+   ratio on the light theme — i.e. invisible. See section 2 for the fix. */
+:root {
+  /* surfaces */
+  --bg-app: #f8fafc;
+  --surface-card: #ffffff;
+  --surface-btn: #f1f5f9;
+  --surface-btn-hover: #e2e8f0;
+  /* ink */
+  --text-main: #0f172a;
+  --text-muted: #64748b;
+  /* lines */
+  --border-color: #cbd5e1;
+  --border-focus: #3b82f6;
+  /* brand */
+  --primary: #2563eb;
+  --primary-hover: #1d4ed8;
+  --primary-light: #dbeafe;
+  /* status */
+  --success: #16a34a;
+  --success-light: #dcfce7;
+  --warning: #d97706;
+  --warning-light: #fef3c7;
+  --danger: #dc2626;
+  --danger-weak: #fef2f2;
+  /* elevation */
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+  /* typography — `--reading-scale` multiplies the exam reading text only, so
+     enlarging the font never breaks the chrome layout. */
+  --font-base: 16px;
+  --reading-scale: 1;
+  /* geometry */
+  --radius: 12px;
+  --radius-sm: 8px;
+  --shadow: var(--shadow-sm);
+  --shadow-lg: 0 8px 40px rgba(15, 23, 42, .18);
+  --focus: 0 0 0 3px color-mix(in srgb, var(--border-focus) 40%, transparent);
+  --header-h: 60px;
+
+  /* ---- legacy aliases (do not add new uses) ---- */
+  --bg: var(--bg-app);
+  --surface: var(--surface-card);
+  --surface-2: var(--surface-btn);
+  --border: var(--border-color);
+  --border-strong: var(--border-color);
+  --text: var(--text-main);
+  --text-faint: var(--text-muted);
+  --accent: var(--primary);
+  --accent-weak: var(--primary-light);
+  --accent-text: var(--primary-hover);
+  --ok: var(--success);
+  --ok-weak: var(--success-light);
+  --warn: var(--warning);
+  --warn-weak: var(--warning-light);
+}
+
+/* Phase 8.5 — Dark (Zinc/Navy). Every pair below clears WCAG AA on its own
+   surface: e.g. --text-main #f8fafc on --surface-card #131b2e = ~15:1, and
+   --text-muted #94a3b8 on the same = ~6.4:1. */
+:root[data-theme="dark"] {
+  --bg-app: #090d16;
+  --surface-card: #131b2e;
+  --surface-btn: #1e293b;
+  --surface-btn-hover: #334155;
+  --text-main: #f8fafc;
+  --text-muted: #94a3b8;
+  --border-color: #334155;
+  --border-focus: #60a5fa;
+  --primary: #3b82f6;
+  --primary-hover: #60a5fa;
+  --primary-light: #1e3a8a;
+  --success: #22c55e;
+  --success-light: #14532d;
+  --warning: #f59e0b;
+  --warning-light: #78350f;
+  --danger: #f87171;
+  --danger-weak: #7f1d1d;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 4px 18px rgba(0, 0, 0, .35);
+  --shadow-lg: 0 12px 48px rgba(0, 0, 0, .6);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, .4);
+  --shadow-md: 0 4px 18px rgba(0, 0, 0, .35);
+}
+
+/* Phase 8.5 — Eye-Care Sepia (Warm Sand/Amber). Low blue-light: a warm sand
+   ground with amber accents; --text-main #451a03 on --surface-card #f4e5c3 is
+   ~11:1, so it stays comfortable for long reading sessions. */
+:root[data-theme="sepia"] {
+  --bg-app: #fbf0d9;
+  --surface-card: #f4e5c3;
+  --surface-btn: #ebd5a8;
+  --surface-btn-hover: #dfc491;
+  --text-main: #451a03;
+  --text-muted: #78350f;
+  --border-color: #d7b97e;
+  --border-focus: #b45309;
+  --primary: #b45309;
+  --primary-hover: #92400e;
+  --primary-light: #fde68a;
+  --success: #15803d;
+  --success-light: #bbf7d0;
+  --warning: #b45309;
+  --warning-light: #fef3c7;
+  --danger: #b91c1c;
+  --danger-weak: #fee2e2;
+  --shadow: 0 1px 2px rgba(69, 26, 3, .08), 0 4px 16px rgba(69, 26, 3, .10);
+  --shadow-lg: 0 8px 40px rgba(69, 26, 3, .22);
+  --shadow-sm: 0 1px 2px rgba(69, 26, 3, .08);
+  --shadow-md: 0 4px 16px rgba(69, 26, 3, .10);
+}
+
+/* Phase 8.5 — font-size ladder. The exam reading text scales; the chrome does
+   not, so a 20px setting never overflows the top bar or the bottom nav.
+   Phase 8.6 — the steps were widened to 1 / 1.18 / 1.36: at 1/1.125/1.25 the
+   `lg` and `xl` rungs were close enough that students reported the button
+   "doing nothing". */
+:root[data-font="lg"] { --font-base: 18px; --reading-scale: 1.18; }
+:root[data-font="xl"] { --font-base: 20px; --reading-scale: 1.36; }
+
+/* OS dark mode only wins when the student has NOT chosen a theme. Sepia is an
+   explicit choice and must survive a dark-mode OS. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="sepia"]) {
+    --bg-app: #090d16;
+    --surface-card: #131b2e;
+    --surface-btn: #1e293b;
+    --surface-btn-hover: #334155;
+    --text-main: #f8fafc;
+    --text-muted: #94a3b8;
+    --border-color: #334155;
+    --border-focus: #60a5fa;
+    --primary: #3b82f6;
+    --primary-hover: #60a5fa;
+    --primary-light: #1e3a8a;
+    --success: #22c55e;
+    --success-light: #14532d;
+    --warning: #f59e0b;
+    --warning-light: #78350f;
+    --danger: #f87171;
+    --danger-weak: #7f1d1d;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 4px 18px rgba(0, 0, 0, .35);
+    --shadow-lg: 0 12px 48px rgba(0, 0, 0, .6);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, .4);
+    --shadow-md: 0 4px 18px rgba(0, 0, 0, .35);
+  }
+}
+
+/* ---------- base ---------- */
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Be Vietnam Pro", system-ui, -apple-system, "Segoe UI", Roboto,
+               "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  letter-spacing: -0.01em;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-text-size-adjust: 100%;
+}
+
+.hidden { display: none !important; }
+
+:focus-visible { outline: none; box-shadow: var(--focus); border-radius: var(--radius-sm); }
+
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 200;
+  padding: 10px 16px;
+  background: var(--accent);
+  color: #fff;
+  border-radius: 0 0 var(--radius-sm) 0;
+  font-weight: 600;
+}
+.skip-link:focus { left: 0; }
+
+/* ---------- layout ---------- */
+.app {
+  min-height: 100%;
+  padding: 20px 16px 40px;
+}
+
+.screen { animation: fadeIn .28s ease-out; }
+
+@keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+/* Phase 8.6 — global shell header */
+.app-global-header {
+  display: flex;
+  justify-content: flex-end;
+  padding: 8px 16px;
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 40;
+}
+
+.spa-view { width: 100%; }
