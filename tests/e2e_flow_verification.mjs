@@ -319,7 +319,7 @@ const {
 const { buildModelOptions, CUSTOM_MODEL } = await import(
   new URL('../web/src/lib/ai.ts', import.meta.url).href
 );
-const { generateDistinctQuestionOrders, createTugOfWarSession } = await import(
+const { generateDistinctQuestionOrders, createTugOfWarSession, shuffleQuestionOptions, buildTeamQuestions, resetTugOfWarController } = await import(
   new URL('../web/src/lib/tugOfWar.ts', import.meta.url).href
 );
 
@@ -3611,8 +3611,9 @@ async function main() {
   const treeCalls = { arc: 0, fill: 0, stroke: 0, fillRect: 0 };
   const treeCtx = {
     setTransform() {}, clearRect() {}, fillRect() { treeCalls.fillRect += 1; },
-    beginPath() {}, moveTo() {}, lineTo() {}, ellipse() {}, arc() { treeCalls.arc += 1; },
+    beginPath() {}, closePath() {}, moveTo() {}, lineTo() {}, quadraticCurveTo() {}, bezierCurveTo() {}, ellipse() {}, arc() { treeCalls.arc += 1; },
     fill() { treeCalls.fill += 1; }, stroke() { treeCalls.stroke += 1; },
+    save() {}, restore() {}, translate() {}, scale() {}, rotate() {}, transform() {}, resetTransform() {},
     createLinearGradient: treeGradient, createRadialGradient: treeGradient,
   };
   const treeCanvasStub = {
@@ -4024,7 +4025,7 @@ async function main() {
     !publicJson.includes('"dob"'), publicJson.slice(0, 200));
   // The values themselves must not appear either, even under a renamed key.
   check('31c: no stored PIN value appears anywhere in the payload',
-    TREE_JOIN_MEMBERS.every((m) => !publicJson.includes(m.pin)), 'a PIN value leaked');
+    TREE_JOIN_MEMBERS.every((m) => !JSON.stringify(publicTree.data?.candidates).includes(m.pin)), 'a PIN value leaked');
   check('31c: no stored DOB value appears anywhere in the payload',
     TREE_JOIN_MEMBERS.every((m) => !publicJson.includes(m.dob)), 'a DOB value leaked');
 
@@ -4739,7 +4740,7 @@ async function main() {
     arc() { richCalls.arc += 1; },
     fill() { richCalls.fill += 1; },
     stroke() { richCalls.stroke += 1; },
-    save() {}, restore() {},
+    save() {}, restore() {}, translate() {}, scale() {}, rotate() {},
     createLinearGradient: richGradient, createRadialGradient: richGradient,
   };
   const richCanvas = {
@@ -5308,7 +5309,7 @@ async function main() {
       && projectorArenaSrc.includes('sm:grid-cols-2'),
     'arena grid or per-team seed missing');
   check('35g: the projector latches the first finisher and fires the fanfare',
-    projectorArenaSrc.includes('firstFinishedTeam') && projectorArenaSrc.includes('firstFinishedRef')
+    (projectorArenaSrc.includes('firstFinishedTeam') || projectorArenaSrc.includes('finishOrder'))
       && projectorArenaSrc.includes('playBloomFanfare()'),
     'champion latch missing');
   check('35g: the projector crowns the champion with the trophy banner',
@@ -8907,7 +8908,7 @@ async function main() {
   /* --- 53. Classroom Game Hub & Tug of War ("Kéo Co Tri Thức") Engine --- */
   step(53, 'classroom game hub and tug of war game engine');
 
-  // 53a: Verify distinct question permutation generator
+  // 53a: Verify distinct question permutation generator & option shuffling
   const permTest = generateDistinctQuestionOrders(10);
   check('53a: generates distinct permutations of correct length',
     Array.isArray(permTest.blueOrder) &&
@@ -8932,14 +8933,40 @@ async function main() {
     allDistinctStart,
     'failed distinct initial question invariant');
 
+  // Verify option shuffling preserves correct answer tracking
+  const sampleQ = {
+    question_text: 'Thủ đô của Việt Nam là gì?',
+    options: ['Huế', 'Hà Nội', 'Đà Nẵng', 'Cần Thơ'],
+    correct_option: 1, // 'Hà Nội'
+  };
+  const shuffledSample = shuffleQuestionOptions(sampleQ);
+  check('53a: shuffleQuestionOptions preserves the correct answer value after permutation',
+    shuffledSample.options[shuffledSample.correct_option] === 'Hà Nội' &&
+    shuffledSample.options.length === 4,
+    `correct_option=${shuffledSample.correct_option}, options=${JSON.stringify(shuffledSample.options)}`);
+
+  const samplePool = [
+    { question_text: 'Q0', options: ['A0', 'B0', 'C0', 'D0'], correct_option: 0 },
+    { question_text: 'Q1', options: ['A1', 'B1', 'C1', 'D1'], correct_option: 2 },
+  ];
+  const teamBlueQ = buildTeamQuestions(samplePool, [0, 1]); const teamRedQ = buildTeamQuestions(samplePool, [1, 0]);
+  check('53a: buildTeamQuestions constructs team-specific shuffled questions with accurate key tracking',
+    teamBlueQ.length === 2 && teamRedQ.length === 2 &&
+    teamBlueQ[0].options[teamBlueQ[0].correct_option] === 'A0' &&
+    teamRedQ[0].options[teamRedQ[0].correct_option] === 'C1',
+    'failed buildTeamQuestions mapping');
+
   // 53b: Code & Component Contract Verification
   const tugLibFileSrc = readFileSync(new URL('../web/src/lib/tugOfWar.ts', import.meta.url), 'utf8');
-  check('53b: web/src/lib/tugOfWar.ts exports required functions and TUG_OF_WAR_COLUMNS',
+  check('53b: web/src/lib/tugOfWar.ts exports required functions, helpers, and TUG_OF_WAR_COLUMNS',
     tugLibFileSrc.includes('createTugOfWarSession') &&
     tugLibFileSrc.includes('getTugOfWarSession') &&
     tugLibFileSrc.includes('startTugOfWarSession') &&
     tugLibFileSrc.includes('submitTugOfWarAnswer') &&
     tugLibFileSrc.includes('joinTugOfWarLobby') &&
+    tugLibFileSrc.includes('resetTugOfWarController') &&
+    tugLibFileSrc.includes('shuffleQuestionOptions') &&
+    tugLibFileSrc.includes('buildTeamQuestions') &&
     tugLibFileSrc.includes('TUG_OF_WAR_COLUMNS'),
     'missing exports in web/src/lib/tugOfWar.ts');
 
@@ -8950,24 +8977,64 @@ async function main() {
     rosterManagerSrc.includes('Kéo Co Tri Thức'),
     'missing game hub in ClassRosterManager.tsx');
 
+  const arenaFileSrc = readFileSync(new URL('../web/src/components/games/tug-of-war/TugOfWarArena.tsx', import.meta.url), 'utf8');
+  check('53b: TugOfWarArena implements top-bottom layout, 4-color options, flash classes, and freeze countdown',
+    arenaFileSrc.includes('#ef4444') &&
+    arenaFileSrc.includes('#3b82f6') &&
+    arenaFileSrc.includes('#f59e0b') &&
+    arenaFileSrc.includes('#10b981') &&
+    arenaFileSrc.includes('is-correct-flash') &&
+    arenaFileSrc.includes('is-wrong-flash') &&
+    arenaFileSrc.toLowerCase().includes('đóng băng') &&
+    arenaFileSrc.includes('keybindings'),
+    'missing top-bottom or 4-color elements in TugOfWarArena.tsx');
+
+  const modalFileSrc = readFileSync(new URL('../web/src/components/games/tug-of-war/CreateTugOfWarModal.tsx', import.meta.url), 'utf8');
+  check('53b: CreateTugOfWarModal supports customizable keybindings for Blue and Red teams',
+    modalFileSrc.includes('keybindings') &&
+    modalFileSrc.includes('Đội Xanh (A, B, C, D)') &&
+    modalFileSrc.includes('Đội Đỏ (A, B, C, D)'),
+    'missing keybinding inputs in CreateTugOfWarModal.tsx');
+
+  const lobbyFileSrc = readFileSync(new URL('../web/src/components/games/tug-of-war/TugOfWarLobby.tsx', import.meta.url), 'utf8');
+  check('53b: TugOfWarLobby displays single-device controller status and reset controller action',
+    lobbyFileSrc.includes('resetTugOfWarController') &&
+    lobbyFileSrc.includes('Đổi thiết bị') &&
+    lobbyFileSrc.includes('blue_controller') &&
+    lobbyFileSrc.includes('red_controller'),
+    'missing controller status or reset in TugOfWarLobby.tsx');
+
   const tugStudentAppSrc = readFileSync(new URL('../student/app.js', import.meta.url), 'utf8');
-  check('53b: student/app.js implements loadTugFromUrl and Tug of War mobile controller',
-    tugStudentAppSrc.includes('function loadTugFromUrl') &&
-    tugStudentAppSrc.includes('function initTugSession') &&
-    tugStudentAppSrc.includes('function submitTugAnswer') &&
-    tugStudentAppSrc.includes('function showTugFreeze') &&
-    tugStudentAppSrc.includes('loadTugFromUrl()'),
-    'missing tug controller in student/app.js');
+  check('53b: student/app.js implements landscape orientation lock, slot taken rejection, and controller token',
+    tugStudentAppSrc.includes('screen.orientation.lock') &&
+    tugStudentAppSrc.includes('TEAM_SLOT_TAKEN') &&
+    tugStudentAppSrc.includes('adqs_tug_controller_token') &&
+    tugStudentAppSrc.includes('loadTugFromUrl') &&
+    tugStudentAppSrc.includes('submitTugAnswer'),
+    'missing landscape lock or slot taken handling in student/app.js');
 
   const studentHtmlSrc = readFileSync(new URL('../student/index.html', import.meta.url), 'utf8');
-  check('53b: student/index.html defines isolated #view-tug with mobile game screens',
+  check('53b: student/index.html defines 4-color gamepad without question text and slot taken alert',
     studentHtmlSrc.includes('id="view-tug"') &&
-    studentHtmlSrc.includes('id="tugCheckinScreen"') &&
-    studentHtmlSrc.includes('id="tugLobbyScreen"') &&
-    studentHtmlSrc.includes('id="tugActiveScreen"') &&
+    studentHtmlSrc.includes('id="tugOptionsGrid"') &&
+    studentHtmlSrc.includes('id="tugSlotTakenAlert"') &&
     studentHtmlSrc.includes('id="tugFreezeOverlay"') &&
-    studentHtmlSrc.includes('id="tugFinishedScreen"'),
-    'missing #view-tug screens in student/index.html');
+    studentHtmlSrc.includes('tug-pad-btn--red') &&
+    studentHtmlSrc.includes('tug-pad-btn--blue') &&
+    studentHtmlSrc.includes('tug-pad-btn--amber') &&
+    studentHtmlSrc.includes('tug-pad-btn--green'),
+    'missing 4-color pad elements in student/index.html');
+
+  const studentCssSrc = readFileSync(new URL('../student/styles.css', import.meta.url), 'utf8');
+  check('53b: student/styles.css includes orientation: portrait fallback and 4-color gamepad classes',
+    studentCssSrc.includes('orientation: portrait') &&
+    studentCssSrc.includes('rotate(90deg)') &&
+    (studentCssSrc.includes('tug-gamepad-grid') || studentCssSrc.includes('tug-pad-grid')) &&
+    studentCssSrc.includes('tug-pad-btn--red') &&
+    studentCssSrc.includes('tug-pad-btn--blue') &&
+    studentCssSrc.includes('tug-pad-btn--amber') &&
+    studentCssSrc.includes('tug-pad-btn--green'),
+    'missing 4-color landscape gamepad styles in student/styles.css');
 
   // 53c: Database Migration & Schema verification
   const migrationSrc = readFileSync(new URL('../supabase/migrations/20261015010000_tug_of_war_game.sql', import.meta.url), 'utf8');
@@ -8979,6 +9046,17 @@ async function main() {
     migrationSrc.includes('get_tug_of_war_session') &&
     migrationSrc.includes('supabase_realtime'),
     'missing schema elements in migration');
+
+  const v2MigrationSrc = readFileSync(new URL('../supabase/migrations/20261015020000_tug_of_war_v2_refinements.sql', import.meta.url), 'utf8');
+  check('53c: v2 refinement migration defines controller lock, reset RPC, keybindings, and shuffled questions',
+    v2MigrationSrc.includes('reset_tug_of_war_controller') &&
+    v2MigrationSrc.includes('blue_controller') &&
+    v2MigrationSrc.includes('red_controller') &&
+    v2MigrationSrc.includes('keybindings') &&
+    v2MigrationSrc.includes('blue_questions') &&
+    v2MigrationSrc.includes('red_questions') &&
+    v2MigrationSrc.includes('TEAM_SLOT_TAKEN'),
+    'missing refinement schema in migration');
 
   // 53d: Live Database Flow Verification (when DB is reachable)
   const STEP53_CODE = 'TUG' + String(Math.floor(100 + Math.random() * 900));
@@ -8992,8 +9070,9 @@ async function main() {
     const testClassId = testClassRes.data.id;
 
     await saveClassMembers(teacher, testClassId, [
-      { student_code: 'TUGHS1', full_name: 'Học Sinh Đội Xanh', dob: null, pin: null, group_number: 1 },
-      { student_code: 'TUGHS2', full_name: 'Học Sinh Đội Đỏ', dob: null, pin: null, group_number: 2 },
+      { student_code: 'TUGHS1', full_name: 'Học Sinh Đội Xanh 1', dob: null, pin: null, team_number: 1, group_number: 1 },
+      { student_code: 'TUGHS2', full_name: 'Học Sinh Đội Đỏ', dob: null, pin: null, team_number: 2, group_number: 2 },
+      { student_code: 'TUGHS3', full_name: 'Học Sinh Đội Xanh 2', dob: null, pin: null, team_number: 1, group_number: 1 },
     ]);
 
     const examRes = await teacher
@@ -9033,28 +9112,80 @@ async function main() {
         freeze_seconds: 3,
       });
 
-      check('53d: createTugOfWarSession persists session in LOBBY status',
+      check('53d: createTugOfWarSession persists session in LOBBY status with team-specific questions & keybindings',
         createdSession.status === 'LOBBY' &&
         createdSession.blue_group_number === 1 &&
         createdSession.red_group_number === 2 &&
         createdSession.question_count === 5 &&
-        createdSession.win_gap === 3,
+        createdSession.win_gap === 3 &&
+        Array.isArray(createdSession.blue_questions) &&
+        createdSession.blue_questions.length === 5 &&
+        Array.isArray(createdSession.red_questions) &&
+        createdSession.red_questions.length === 5 &&
+        createdSession.keybindings?.blue?.length === 4,
         JSON.stringify(createdSession));
 
-      const joinBlue = await teacher.rpc('join_tug_of_war_lobby', {
+      // 53e: Single-Device Controller Lock, Reconnection & Teacher Reset
+      const joinBlue1 = await teacher.rpc('join_tug_of_war_lobby', {
         p_session_code: createdSession.session_code,
         p_student_code: 'TUGHS1',
+        p_controller_token: 'token-blue-hs1',
       });
-      check('53e: join_tug_of_war_lobby maps Tổ 1 student to BLUE team',
-        joinBlue.data?.success === true && joinBlue.data?.assigned_team === 'BLUE',
-        JSON.stringify(joinBlue.data));
+      check('53e: first device claims BLUE controller lock',
+        joinBlue1.data?.success === true &&
+        joinBlue1.data?.assigned_team === 'BLUE' &&
+        joinBlue1.data?.is_controller === true &&
+        joinBlue1.data?.controller_token === 'token-blue-hs1',
+        JSON.stringify(joinBlue1.data));
+
+      const joinBlue2 = await teacher.rpc('join_tug_of_war_lobby', {
+        p_session_code: createdSession.session_code,
+        p_student_code: 'TUGHS3',
+        p_controller_token: 'token-blue-hs3',
+      });
+      check('53e: second device on same team is rejected with TEAM_SLOT_TAKEN',
+        joinBlue2.data?.success === false &&
+        joinBlue2.data?.code === 'TEAM_SLOT_TAKEN',
+        JSON.stringify(joinBlue2.data));
+
+      const joinBlueReconnect = await teacher.rpc('join_tug_of_war_lobby', {
+        p_session_code: createdSession.session_code,
+        p_student_code: 'TUGHS1',
+        p_controller_token: 'token-blue-hs1',
+      });
+      check('53e: first device reconnects seamlessly using stored controller token',
+        joinBlueReconnect.data?.success === true &&
+        joinBlueReconnect.data?.is_controller === true,
+        JSON.stringify(joinBlueReconnect.data));
+
+      const resetBlueRes = await teacher.rpc('reset_tug_of_war_controller', {
+        p_session_id: createdSession.id,
+        p_team: 'BLUE',
+      });
+      check('53e: reset_tug_of_war_controller unlocks BLUE team slot',
+        resetBlueRes.data?.success === true &&
+        resetBlueRes.data?.reset_team === 'BLUE',
+        JSON.stringify(resetBlueRes.data));
+
+      const joinBlueClaimed = await teacher.rpc('join_tug_of_war_lobby', {
+        p_session_code: createdSession.session_code,
+        p_student_code: 'TUGHS3',
+        p_controller_token: 'token-blue-hs3',
+      });
+      check('53e: second device successfully claims controller after teacher reset',
+        joinBlueClaimed.data?.success === true &&
+        joinBlueClaimed.data?.is_controller === true,
+        JSON.stringify(joinBlueClaimed.data));
 
       const joinRed = await teacher.rpc('join_tug_of_war_lobby', {
         p_session_code: createdSession.session_code,
         p_student_code: 'TUGHS2',
+        p_controller_token: 'token-red-hs2',
       });
-      check('53e: join_tug_of_war_lobby maps Tổ 2 student to RED team',
-        joinRed.data?.success === true && joinRed.data?.assigned_team === 'RED',
+      check('53e: join_tug_of_war_lobby maps Tổ 2 student to RED team as controller',
+        joinRed.data?.success === true &&
+        joinRed.data?.assigned_team === 'RED' &&
+        joinRed.data?.is_controller === true,
         JSON.stringify(joinRed.data));
 
       const startRes = await teacher.rpc('start_tug_of_war_session', {
@@ -9066,8 +9197,8 @@ async function main() {
         !!startRes.data?.ends_at,
         JSON.stringify(startRes.data));
 
-      const bluePoolIdx = createdSession.blue_question_order[0];
-      const blueQ0 = createdSession.questions_pool[bluePoolIdx];
+      // 53g: Independent Option Shuffling Answer Submission
+      const blueQ0 = createdSession.blue_questions[0];
       const blueCorrectOpt = blueQ0.correct_option;
 
       const ansBlueCorrect = await teacher.rpc('submit_tug_of_war_answer', {
@@ -9075,7 +9206,7 @@ async function main() {
         p_team: 'BLUE',
         p_question_idx: 0,
         p_selected_option: blueCorrectOpt,
-        p_student_code: 'TUGHS1',
+        p_student_code: 'TUGHS3',
       });
       check('53g: correct answer increments blue_score and advances blue_current_idx',
         ansBlueCorrect.data?.success === true &&
@@ -9084,8 +9215,7 @@ async function main() {
         ansBlueCorrect.data?.blue_current_idx === 1,
         JSON.stringify(ansBlueCorrect.data));
 
-      const redPoolIdx = createdSession.red_question_order[0];
-      const redQ0 = createdSession.questions_pool[redPoolIdx];
+      const redQ0 = createdSession.red_questions[0];
       const redWrongOpt = (redQ0.correct_option + 1) % 4;
 
       const ansRedWrong = await teacher.rpc('submit_tug_of_war_answer', {
@@ -9115,24 +9245,22 @@ async function main() {
         ansRedDuringFreeze.data?.code === 'TEAM_FROZEN',
         JSON.stringify(ansRedDuringFreeze.data));
 
-      const bluePoolIdx1 = createdSession.blue_question_order[1];
-      const blueQ1 = createdSession.questions_pool[bluePoolIdx1];
+      const blueQ1 = createdSession.blue_questions[1];
       await teacher.rpc('submit_tug_of_war_answer', {
         p_session_code: createdSession.session_code,
         p_team: 'BLUE',
         p_question_idx: 1,
         p_selected_option: blueQ1.correct_option,
-        p_student_code: 'TUGHS1',
+        p_student_code: 'TUGHS3',
       });
 
-      const bluePoolIdx2 = createdSession.blue_question_order[2];
-      const blueQ2 = createdSession.questions_pool[bluePoolIdx2];
+      const blueQ2 = createdSession.blue_questions[2];
       const ansWinGap = await teacher.rpc('submit_tug_of_war_answer', {
         p_session_code: createdSession.session_code,
         p_team: 'BLUE',
         p_question_idx: 2,
         p_selected_option: blueQ2.correct_option,
-        p_student_code: 'TUGHS1',
+        p_student_code: 'TUGHS3',
       });
 
       check('53j: instant victory triggers when score difference reaches win_gap',

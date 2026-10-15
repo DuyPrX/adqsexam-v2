@@ -426,6 +426,18 @@ export interface TugOfWarQuestionItem {
   correct_option: number;
 }
 
+export interface TugOfWarKeybindings {
+  blue: [string, string, string, string];
+  red: [string, string, string, string];
+}
+
+export interface TugOfWarControllerInfo {
+  token: string;
+  student_code: string;
+  full_name: string;
+  connected_at: string;
+}
+
 export interface TugOfWarSessionRow {
   id: string;
   user_id: string;
@@ -442,15 +454,20 @@ export interface TugOfWarSessionRow {
   duration_seconds: number;
   win_gap: number;
   freeze_seconds: number;
+  keybindings: TugOfWarKeybindings;
   questions_pool: TugOfWarQuestionItem[];
   blue_question_order: number[];
   red_question_order: number[];
+  blue_questions: TugOfWarQuestionItem[];
+  red_questions: TugOfWarQuestionItem[];
   blue_current_idx: number;
   red_current_idx: number;
   blue_score: number;
   red_score: number;
   blue_frozen_until: string | null;
   red_frozen_until: string | null;
+  blue_controller: TugOfWarControllerInfo | null;
+  red_controller: TugOfWarControllerInfo | null;
   joined_participants: {
     blue: TugOfWarParticipant[];
     red: TugOfWarParticipant[];

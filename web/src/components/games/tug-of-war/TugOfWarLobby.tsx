@@ -1,8 +1,10 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { Loader2, Maximize2, Minimize2, Play, QrCode, Users, Volume2, VolumeX } from 'lucide-react';
+import { Loader2, Maximize2, Minimize2, Play, QrCode, RotateCcw, Smartphone, Users, Volume2, VolumeX } from 'lucide-react';
 import { resolveStudentAppBaseUrl } from '@/lib/env';
+import { createClient } from '@/lib/supabase/client';
+import { resetTugOfWarController } from '@/lib/tugOfWar';
 import type { TugOfWarParticipant, TugOfWarSessionDetail } from '@/lib/types';
 import { TugOfWarQrCode } from './TugOfWarQrCode';
 
@@ -44,6 +46,20 @@ export function TugOfWarLobby({ session, isStarting, onStart }: TugOfWarLobbyPro
 
   const blueParticipants: TugOfWarParticipant[] = session.joined_participants?.blue || [];
   const redParticipants: TugOfWarParticipant[] = session.joined_participants?.red || [];
+
+  const [resettingTeam, setResettingTeam] = useState<'BLUE' | 'RED' | null>(null);
+
+  const handleResetController = async (team: 'BLUE' | 'RED') => {
+    try {
+      setResettingTeam(team);
+      const supabase = createClient();
+      await resetTugOfWarController(supabase, session.id, team);
+    } catch (err) {
+      console.error('Failed to reset controller:', err);
+    } finally {
+      setResettingTeam(null);
+    }
+  };
 
   return (
     <div className="flex h-screen w-screen flex-col bg-slate-950 text-slate-100 select-none overflow-hidden">
@@ -132,6 +148,48 @@ export function TugOfWarLobby({ session, isStarting, onStart }: TugOfWarLobbyPro
             </div>
           </div>
 
+          {/* Blue Controller Device Status */}
+          <div className="mt-4 flex items-center justify-between rounded-2xl border border-blue-500/40 bg-blue-950/60 p-3 shadow-inner">
+            <div className="flex items-center gap-2.5">
+              <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-blue-600/30 text-blue-300">
+                <Smartphone size={18} />
+              </span>
+              <div>
+                <div className="text-xs font-bold text-white flex items-center gap-2">
+                  <span>Tay cầm điều khiển:</span>
+                  {session.blue_controller ? (
+                    <span className="text-emerald-400 font-extrabold flex items-center gap-1">
+                      <span className="inline-block h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+                      {session.blue_controller.full_name || session.blue_controller.student_code}
+                    </span>
+                  ) : (
+                    <span className="text-amber-400 font-medium">Chờ quét mã...</span>
+                  )}
+                </div>
+                <div className="text-[11px] text-blue-300/70">
+                  {session.blue_controller
+                    ? 'Thiết bị đại diện duy nhất của Đội Xanh đã kết nối'
+                    : 'Thiết bị đầu tiên quét mã sẽ trở thành tay cầm bấm đáp án'}
+                </div>
+              </div>
+            </div>
+            {session.blue_controller && (
+              <button
+                type="button"
+                onClick={() => handleResetController('BLUE')}
+                disabled={resettingTeam === 'BLUE'}
+                className="flex items-center gap-1 rounded-xl border border-rose-500/40 bg-rose-500/20 px-2.5 py-1.5 text-xs font-bold text-rose-300 transition hover:bg-rose-500/30 disabled:opacity-50"
+              >
+                {resettingTeam === 'BLUE' ? (
+                  <Loader2 size={13} className="animate-spin" />
+                ) : (
+                  <RotateCcw size={13} />
+                )}
+                <span>Đổi thiết bị</span>
+              </button>
+            )}
+          </div>
+
           {/* Live Roster List */}
           <div className="flex-1 overflow-y-auto mt-4 pr-1">
             <h3 className="text-xs font-bold uppercase tracking-wider text-blue-400 mb-2">
@@ -201,6 +259,48 @@ export function TugOfWarLobby({ session, isStarting, onStart }: TugOfWarLobbyPro
                 {redJoinUrl}
               </p>
             </div>
+          </div>
+
+          {/* Red Controller Device Status */}
+          <div className="mt-4 flex items-center justify-between rounded-2xl border border-rose-500/40 bg-rose-950/60 p-3 shadow-inner">
+            <div className="flex items-center gap-2.5">
+              <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-rose-600/30 text-rose-300">
+                <Smartphone size={18} />
+              </span>
+              <div>
+                <div className="text-xs font-bold text-white flex items-center gap-2">
+                  <span>Tay cầm điều khiển:</span>
+                  {session.red_controller ? (
+                    <span className="text-emerald-400 font-extrabold flex items-center gap-1">
+                      <span className="inline-block h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+                      {session.red_controller.full_name || session.red_controller.student_code}
+                    </span>
+                  ) : (
+                    <span className="text-amber-400 font-medium">Chờ quét mã...</span>
+                  )}
+                </div>
+                <div className="text-[11px] text-rose-300/70">
+                  {session.red_controller
+                    ? 'Thiết bị đại diện duy nhất của Đội Đỏ đã kết nối'
+                    : 'Thiết bị đầu tiên quét mã sẽ trở thành tay cầm bấm đáp án'}
+                </div>
+              </div>
+            </div>
+            {session.red_controller && (
+              <button
+                type="button"
+                onClick={() => handleResetController('RED')}
+                disabled={resettingTeam === 'RED'}
+                className="flex items-center gap-1 rounded-xl border border-rose-500/40 bg-rose-500/20 px-2.5 py-1.5 text-xs font-bold text-rose-300 transition hover:bg-rose-500/30 disabled:opacity-50"
+              >
+                {resettingTeam === 'RED' ? (
+                  <Loader2 size={13} className="animate-spin" />
+                ) : (
+                  <RotateCcw size={13} />
+                )}
+                <span>Đổi thiết bị</span>
+              </button>
+            )}
           </div>
 
           {/* Live Roster List */}

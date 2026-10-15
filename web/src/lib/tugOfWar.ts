@@ -1,5 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type {
+  TugOfWarControllerInfo,
+  TugOfWarKeybindings,
   TugOfWarParticipant,
   TugOfWarQuestionItem,
   TugOfWarSessionDetail,
@@ -15,7 +17,7 @@ export class PersistenceError extends Error {
 }
 
 export const TUG_OF_WAR_COLUMNS =
-  'id, user_id, class_id, exam_id, session_code, title, status, blue_group_number, red_group_number, blue_team_name, red_team_name, question_count, duration_seconds, win_gap, freeze_seconds, questions_pool, blue_question_order, red_question_order, blue_current_idx, red_current_idx, blue_score, red_score, blue_frozen_until, red_frozen_until, joined_participants, winner, started_at, ends_at, created_at';
+  'id, user_id, class_id, exam_id, session_code, title, status, blue_group_number, red_group_number, blue_team_name, red_team_name, question_count, duration_seconds, win_gap, freeze_seconds, keybindings, questions_pool, blue_question_order, red_question_order, blue_questions, red_questions, blue_current_idx, red_current_idx, blue_score, red_score, blue_frozen_until, red_frozen_until, blue_controller, red_controller, joined_participants, winner, started_at, ends_at, created_at';
 
 async function requireUserId(supabase: SupabaseClient): Promise<string> {
   const {
@@ -40,6 +42,34 @@ export function shuffleArray<T>(items: readonly T[]): T[] {
 }
 
 /**
+ * Shuffles the 4 options of a question independently and remaps correct_option.
+ */
+export function shuffleQuestionOptions(q: TugOfWarQuestionItem): TugOfWarQuestionItem {
+  const indices = Array.from({ length: q.options.length }, (_, i) => i);
+  const shuffledIndices = shuffleArray(indices);
+  const newOptions = shuffledIndices.map((origIdx) => q.options[origIdx]);
+  const newCorrectOption = shuffledIndices.indexOf(q.correct_option);
+  return {
+    ...q,
+    options: newOptions,
+    correct_option: newCorrectOption >= 0 ? newCorrectOption : 0,
+  };
+}
+
+/**
+ * Builds a team's dedicated question sequence with independently shuffled options.
+ */
+export function buildTeamQuestions(
+  pool: TugOfWarQuestionItem[],
+  order: number[],
+): TugOfWarQuestionItem[] {
+  return order.map((poolIdx) => {
+    const base = pool[poolIdx];
+    return shuffleQuestionOptions(base);
+  });
+}
+
+/**
  * Generates two distinct permutations of 0..N-1 such that:
  * blue_order[0] !== red_order[0] when N > 1.
  */
@@ -57,7 +87,6 @@ export function generateDistinctQuestionOrders(count: number): {
 
   // Ensure first questions are distinct when count > 1
   if (redOrder[0] === blueOrder[0]) {
-    // Swap redOrder[0] with any index j > 0
     const swapIdx = Math.floor(1 + Math.random() * (count - 1));
     const temp = redOrder[0];
     redOrder[0] = redOrder[swapIdx];
@@ -79,6 +108,7 @@ export interface CreateTugOfWarParams {
   duration_seconds?: number;
   win_gap?: number;
   freeze_seconds?: number;
+  keybindings?: TugOfWarKeybindings;
 }
 
 /**
@@ -87,7 +117,8 @@ export interface CreateTugOfWarParams {
  * 2. Fetches MCQ questions from exam's question_bank.
  * 3. Randomly samples question_count items.
  * 4. Generates non-overlapping initial question permutations for Blue and Red.
- * 5. Persists session in LOBBY state.
+ * 5. Independently shuffles the 4 options per team and remaps correct option indices.
+ * 6. Persists session in LOBBY state.
  */
 export async function createTugOfWarSession(
   supabase: SupabaseClient,
@@ -182,11 +213,20 @@ export async function createTugOfWarSession(
 
   const { blueOrder, redOrder } = generateDistinctQuestionOrders(questionsPool.length);
 
+  // Build independently shuffled questions & options for Blue and Red
+  const blueQuestions = buildTeamQuestions(questionsPool, blueOrder);
+  const redQuestions = buildTeamQuestions(questionsPool, redOrder);
+
   const durationSeconds = Math.max(30, params.duration_seconds ?? 120);
   const winGap = Math.max(0, params.win_gap ?? 3);
   const freezeSeconds = Math.max(0, params.freeze_seconds ?? 3);
   const blueTeamName = (params.blue_team_name || `Đội Xanh (Tổ ${params.blue_group_number})`).trim();
   const redTeamName = (params.red_team_name || `Đội Đỏ (Tổ ${params.red_group_number})`).trim();
+
+  const keybindings: TugOfWarKeybindings = params.keybindings ?? {
+    blue: ['Q', 'W', 'A', 'S'],
+    red: ['O', 'P', 'K', 'L'],
+  };
 
   // Generate 6-char random PIN code
   const sessionCode = Math.random().toString(36).substring(2, 8).toUpperCase();
@@ -208,13 +248,18 @@ export async function createTugOfWarSession(
       duration_seconds: durationSeconds,
       win_gap: winGap,
       freeze_seconds: freezeSeconds,
+      keybindings,
       questions_pool: questionsPool,
       blue_question_order: blueOrder,
       red_question_order: redOrder,
+      blue_questions: blueQuestions,
+      red_questions: redQuestions,
       blue_current_idx: 0,
       red_current_idx: 0,
       blue_score: 0,
       red_score: 0,
+      blue_controller: null,
+      red_controller: null,
       joined_participants: { blue: [], red: [] },
     })
     .select(TUG_OF_WAR_COLUMNS)
@@ -339,27 +384,38 @@ export async function submitTugOfWarAnswer(
   return data as SubmitTugOfWarAnswerResult;
 }
 
+export interface JoinTugOfWarResult {
+  success: boolean;
+  code?: string;
+  sessionId?: string;
+  sessionCode?: string;
+  assignedTeam?: TugOfWarTeam;
+  controllerToken?: string;
+  isController?: boolean;
+  fullName?: string;
+  studentCode?: string;
+  title?: string;
+  status?: string;
+  message?: string;
+  controller?: TugOfWarControllerInfo;
+}
+
 /**
  * Student joins Tug of War waiting room / lobby.
+ * Enforces single-device controller lock per team.
  */
 export async function joinTugOfWarLobby(
   supabase: SupabaseClient,
   sessionCode: string,
   studentCode: string,
   preferredTeam?: TugOfWarTeam,
-): Promise<{
-  success: boolean;
-  sessionId?: string;
-  assignedTeam?: TugOfWarTeam;
-  fullName?: string;
-  title?: string;
-  status?: string;
-  message?: string;
-}> {
+  controllerToken?: string | null,
+): Promise<JoinTugOfWarResult> {
   const { data, error } = await supabase.rpc('join_tug_of_war_lobby', {
     p_session_code: sessionCode,
     p_student_code: studentCode,
     p_preferred_team: preferredTeam ?? null,
+    p_controller_token: controllerToken ?? null,
   });
 
   if (error) {
@@ -367,16 +423,55 @@ export async function joinTugOfWarLobby(
   }
 
   if (data?.success !== true) {
+    // If team slot is already taken, return the structured rejection
+    if (data?.code === 'TEAM_SLOT_TAKEN') {
+      return {
+        success: false,
+        code: data.code,
+        message: data.message,
+        assignedTeam: data.assigned_team as TugOfWarTeam,
+        controller: data.controller as TugOfWarControllerInfo,
+      };
+    }
     throw new PersistenceError(data?.message || 'Không thể tham gia phòng thi đấu.');
   }
 
   return {
     success: true,
     sessionId: data.session_id,
+    sessionCode: data.session_code,
     assignedTeam: data.assigned_team as TugOfWarTeam,
+    controllerToken: data.controller_token,
+    isController: Boolean(data.is_controller),
     fullName: data.full_name,
+    studentCode: data.student_code,
     title: data.title,
     status: data.status,
     message: data.message,
   };
 }
+
+/**
+ * Teacher resets a team's controller lock so a replacement device can connect.
+ */
+export async function resetTugOfWarController(
+  supabase: SupabaseClient,
+  sessionId: string,
+  team: TugOfWarTeam,
+): Promise<{ success: boolean; message?: string }> {
+  const { data, error } = await supabase.rpc('reset_tug_of_war_controller', {
+    p_session_id: sessionId,
+    p_team: team,
+  });
+
+  if (error) {
+    throw new PersistenceError(`Không thể đặt lại thiết bị: ${error.message}`);
+  }
+
+  if (data?.success !== true) {
+    throw new PersistenceError(data?.message || 'Không thể đặt lại thiết bị.');
+  }
+
+  return { success: true, message: data.message };
+}
+

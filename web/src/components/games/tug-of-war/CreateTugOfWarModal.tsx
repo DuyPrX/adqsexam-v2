@@ -34,6 +34,8 @@ export function CreateTugOfWarModal({ klass, onClose }: CreateTugOfWarModalProps
   const [durationSeconds, setDurationSeconds] = useState<number>(120);
   const [winGap, setWinGap] = useState<number>(3);
   const [freezeSeconds, setFreezeSeconds] = useState<number>(3);
+  const [blueKeys, setBlueKeys] = useState<[string, string, string, string]>(['Q', 'W', 'A', 'S']);
+  const [redKeys, setRedKeys] = useState<[string, string, string, string]>(['O', 'P', 'K', 'L']);
 
   // Load members and exams
   useEffect(() => {
@@ -118,6 +120,7 @@ export function CreateTugOfWarModal({ klass, onClose }: CreateTugOfWarModalProps
         duration_seconds: durationSeconds,
         win_gap: winGap,
         freeze_seconds: freezeSeconds,
+        keybindings: { blue: blueKeys, red: redKeys },
       });
 
       router.push(`/games/tug-of-war/${session.id}`);
@@ -370,6 +373,62 @@ export function CreateTugOfWarModal({ klass, onClose }: CreateTugOfWarModalProps
                     <p className="text-[11px] text-slate-500">
                       Thời gian đội bị khóa nút và phủ băng tuyết trước khi sang câu kế tiếp.
                     </p>
+                  </div>
+
+                  {/* Customizable Keybindings */}
+                  <div className="rounded-xl border border-slate-800 bg-slate-800/40 p-3 space-y-3">
+                    <label className="text-xs text-slate-300 font-semibold flex items-center gap-1.5">
+                      <span>⌨️</span> Phím bấm trên bàn phím máy tính (Dành cho giáo viên/máy tính)
+                    </label>
+                    <div className="grid grid-cols-2 gap-3 text-xs">
+                      {/* Blue Team Keys */}
+                      <div className="rounded-lg border border-blue-500/30 bg-blue-950/30 p-2.5">
+                        <div className="font-bold text-blue-300 mb-2">Đội Xanh (A, B, C, D)</div>
+                        <div className="grid grid-cols-4 gap-1.5 text-center">
+                          {['A', 'B', 'C', 'D'].map((label, idx) => (
+                            <div key={label}>
+                              <span className="text-[10px] text-slate-400 font-bold block">{label}</span>
+                              <input
+                                type="text"
+                                maxLength={1}
+                                value={blueKeys[idx]}
+                                onChange={(e) => {
+                                  const val = (e.target.value.slice(-1) || 'Q').toUpperCase();
+                                  const next = [...blueKeys] as [string, string, string, string];
+                                  next[idx] = val;
+                                  setBlueKeys(next);
+                                }}
+                                className="w-full text-center rounded bg-slate-900 border border-blue-500/50 py-1 font-mono font-bold text-blue-200 focus:outline-none"
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Red Team Keys */}
+                      <div className="rounded-lg border border-rose-500/30 bg-rose-950/30 p-2.5">
+                        <div className="font-bold text-rose-300 mb-2">Đội Đỏ (A, B, C, D)</div>
+                        <div className="grid grid-cols-4 gap-1.5 text-center">
+                          {['A', 'B', 'C', 'D'].map((label, idx) => (
+                            <div key={label}>
+                              <span className="text-[10px] text-slate-400 font-bold block">{label}</span>
+                              <input
+                                type="text"
+                                maxLength={1}
+                                value={redKeys[idx]}
+                                onChange={(e) => {
+                                  const val = (e.target.value.slice(-1) || 'O').toUpperCase();
+                                  const next = [...redKeys] as [string, string, string, string];
+                                  next[idx] = val;
+                                  setRedKeys(next);
+                                }}
+                                className="w-full text-center rounded bg-slate-900 border border-rose-500/50 py-1 font-mono font-bold text-rose-200 focus:outline-none"
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>

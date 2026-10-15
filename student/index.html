@@ -485,6 +485,11 @@
             Nhập mã học sinh để gia nhập đội thi đấu
           </p>
           <div id="tugCheckinError" class="alert alert--error hidden"></div>
+          <div id="tugSlotTakenAlert" class="alert alert--warn hidden" style="margin-top: 14px; text-align: left;">
+            <strong>⚠️ Đội đã có thiết bị đại diện!</strong>
+            <p style="margin: 4px 0 8px; font-size: 13px;">Đội của bạn đã có một bạn giữ tay cầm điều khiển. Cả nhóm hãy nhìn lên máy chiếu và cùng thảo luận nhé!</p>
+            <button type="button" id="btnRetryTugCheckin" class="btn btn--secondary btn--sm">Thử kết nối lại</button>
+          </div>
           <div class="field" style="margin-top: 16px;">
             <label for="tugStudentCodeInput">Mã học sinh của bạn</label>
             <input
@@ -514,52 +519,58 @@
             <p>Đang chờ giáo viên bắt đầu trận đấu...</p>
           </div>
           <p class="tug-hint">
-            👀 Hãy chú ý nhìn lên máy chiếu! Khi trận đấu bắt đầu, các câu hỏi sẽ xuất hiện ngay tại đây.
+            👀 Thiết bị này là <strong>Tay Cầm Bấm Đáp Án</strong> của đội! Cả nhóm hãy cùng nhìn lên máy chiếu và bấm chọn 4 màu A, B, C, D khi trận đấu bắt đầu!
           </p>
         </div>
       </section>
 
-      <!-- Screen 3: Active Question Workspace -->
-      <section id="tugActiveScreen" class="tug-screen hidden">
-        <div class="tug-active-header">
-          <span id="tugQuestionProgress" class="tug-q-progress">Câu 1/10</span>
-          <span id="tugTeamScore" class="tug-score-pill">Điểm: 0</span>
-        </div>
+      <!-- Screen 3: 4-Color Landscape Gamepad (No Question Text on Phone) -->
+      <section id="tugActiveScreen" class="tug-screen tug-gamepad-screen hidden">
+        <div class="tug-gamepad-container">
+          <!-- Slim Top Bar -->
+          <div class="tug-gamepad-header">
+            <div class="tug-gamepad-team">
+              <span id="tugGamepadTeamDot" class="tug-team-dot">🔵</span>
+              <span id="tugGamepadTeamName" class="tug-team-name">Đội Xanh</span>
+            </div>
+            <div class="tug-gamepad-stats">
+              <span id="tugQuestionProgress" class="tug-q-progress">Câu 1/10</span>
+              <span id="tugTeamScore" class="tug-score-pill">0đ</span>
+            </div>
+          </div>
 
-        <!-- Question text box -->
-        <div class="tug-question-card">
-          <p id="tugQuestionText" class="tug-question-text">
-            Đang tải câu hỏi...
-          </p>
-        </div>
+          <!-- 4-Color 2x2 Fullscreen Button Grid -->
+          <div id="tugOptionsGrid" class="tug-gamepad-grid">
+            <button type="button" class="tug-pad-btn tug-pad-btn--red" data-opt="0">
+              <span class="tug-pad-letter">A</span>
+            </button>
+            <button type="button" class="tug-pad-btn tug-pad-btn--blue" data-opt="1">
+              <span class="tug-pad-letter">B</span>
+            </button>
+            <button type="button" class="tug-pad-btn tug-pad-btn--amber" data-opt="2">
+              <span class="tug-pad-letter">C</span>
+            </button>
+            <button type="button" class="tug-pad-btn tug-pad-btn--green" data-opt="3">
+              <span class="tug-pad-letter">D</span>
+            </button>
+          </div>
 
-        <!-- 4 Big Option Buttons -->
-        <div id="tugOptionsGrid" class="tug-options-grid">
-          <button type="button" class="tug-opt-btn" data-opt="0">
-            <span class="tug-opt-badge">A</span>
-            <span class="tug-opt-text" id="tugOptText0">Lựa chọn A</span>
-          </button>
-          <button type="button" class="tug-opt-btn" data-opt="1">
-            <span class="tug-opt-badge">B</span>
-            <span class="tug-opt-text" id="tugOptText1">Lựa chọn B</span>
-          </button>
-          <button type="button" class="tug-opt-btn" data-opt="2">
-            <span class="tug-opt-badge">C</span>
-            <span class="tug-opt-text" id="tugOptText2">Lựa chọn C</span>
-          </button>
-          <button type="button" class="tug-opt-btn" data-opt="3">
-            <span class="tug-opt-badge">D</span>
-            <span class="tug-opt-text" id="tugOptText3">Lựa chọn D</span>
-          </button>
-        </div>
+          <!-- Flash Feedback Overlays -->
+          <div id="tugCorrectFlashOverlay" class="tug-flash-overlay is-correct hidden">
+            <div class="tug-flash-box">
+              <span class="tug-flash-icon">✅</span>
+              <span class="tug-flash-text">CHÍNH XÁC!</span>
+            </div>
+          </div>
 
-        <!-- Freeze Penalty Overlay -->
-        <div id="tugFreezeOverlay" class="tug-freeze-overlay hidden">
-          <div class="tug-freeze-card">
-            <span class="tug-freeze-icon">❄️</span>
-            <h3>ĐÓNG BĂNG!</h3>
-            <p>Có thành viên trả lời sai! Hãy chờ phạt...</p>
-            <div class="tug-freeze-timer" id="tugFreezeTimer">3.0s</div>
+          <!-- Freeze Penalty Overlay -->
+          <div id="tugFreezeOverlay" class="tug-freeze-overlay hidden">
+            <div class="tug-freeze-card">
+              <span class="tug-freeze-icon">❄️</span>
+              <h3>ĐÓNG BĂNG!</h3>
+              <p>Trả lời sai! Hãy nhìn máy chiếu để rút kinh nghiệm...</p>
+              <div class="tug-freeze-timer" id="tugFreezeTimer">3.0s</div>
+            </div>
           </div>
         </div>
       </section>

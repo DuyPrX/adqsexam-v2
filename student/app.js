@@ -4489,25 +4489,45 @@ async function initTugSession(sessionCode, preferredTeam) {
       btnJoin.textContent = 'Đang vào phòng...';
       if (checkinErr) checkinErr.classList.add('hidden');
 
+      const existingToken = localStorage.getItem('adqs_tug_controller_token');
       const joinRes = await callRpc('join_tug_of_war_lobby', {
         p_session_code: sessionCode,
         p_student_code: studentCode,
         p_preferred_team: preferredTeam,
+        p_controller_token: existingToken || null,
       });
 
       btnJoin.disabled = false;
       btnJoin.textContent = 'Vào Phòng Thi Đấu';
 
+      const slotTakenAlert = $('tugSlotTakenAlert');
+      const retryBtn = $('btnRetryTugCheckin');
+      if (retryBtn) {
+        retryBtn.onclick = () => {
+          localStorage.removeItem('adqs_tug_controller_token');
+          if (slotTakenAlert) slotTakenAlert.classList.add('hidden');
+          if (checkinErr) checkinErr.classList.add('hidden');
+        };
+      }
+
       if (!joinRes.ok || !joinRes.data?.success) {
-        if (checkinErr) {
+        if (joinRes.data?.code === 'TEAM_SLOT_TAKEN') {
+          if (slotTakenAlert) slotTakenAlert.classList.remove('hidden');
+          if (checkinErr) checkinErr.classList.add('hidden');
+        } else if (checkinErr) {
           checkinErr.textContent = joinRes.data?.message || 'Không thể tham gia phòng.';
           checkinErr.classList.remove('hidden');
+          if (slotTakenAlert) slotTakenAlert.classList.add('hidden');
         }
         return;
       }
 
+      if (slotTakenAlert) slotTakenAlert.classList.add('hidden');
       state.studentCode = studentCode;
       localStorage.setItem('adqs_student_code', studentCode);
+      if (joinRes.data.controller_token) {
+        localStorage.setItem('adqs_tug_controller_token', joinRes.data.controller_token);
+      }
       state.tugTeam = joinRes.data.assigned_team;
       state.tugStudentName = joinRes.data.full_name || studentCode;
 
@@ -4522,8 +4542,8 @@ async function initTugSession(sessionCode, preferredTeam) {
     };
   }
 
-  const optButtons = document.querySelectorAll('.tug-opt-btn');
-  optButtons.forEach((btn) => {
+  const padButtons = document.querySelectorAll('.tug-pad-btn');
+  padButtons.forEach((btn) => {
     btn.onclick = () => {
       const optIdx = parseInt(btn.getAttribute('data-opt'), 10);
       void submitTugAnswer(optIdx);
@@ -4552,6 +4572,11 @@ function enterTugGame(data) {
       teamBadge.className = 'tug-team-badge is-red';
       teamBadge.textContent = `🔴 ${data.red_team_name || 'Đội Đỏ'}`;
     }
+  }
+
+  // Attempt auto-landscape presentation on device orientation API
+  if (typeof screen !== 'undefined' && screen.orientation && typeof screen.orientation.lock === 'function') {
+    screen.orientation.lock('landscape').catch(() => {});
   }
 
   subscribeTugRealtime(data.session_id);
@@ -4654,14 +4679,23 @@ function renderTugActiveQuestion(session) {
 
   const prog = $('tugQuestionProgress');
   const scoreEl = $('tugTeamScore');
+  const teamDot = $('tugGamepadTeamDot');
+  const teamName = $('tugGamepadTeamName');
+
   if (prog) prog.textContent = `Câu ${Math.min(currentIdx + 1, session.question_count)} / ${session.question_count}`;
-  if (scoreEl) scoreEl.textContent = `Điểm: ${score}`;
+  if (scoreEl) scoreEl.textContent = `${score}đ`;
+  if (teamDot) teamDot.textContent = isBlue ? '🔵' : '🔴';
+  if (teamName) teamName.textContent = isBlue ? (session.blue_team_name || 'Đội Xanh') : (session.red_team_name || 'Đội Đỏ');
+
+  const padButtons = document.querySelectorAll('.tug-pad-btn');
 
   if (frozenUntilStr) {
     const freezeUntil = new Date(frozenUntilStr).getTime();
     const remainingMs = freezeUntil - Date.now();
     if (remainingMs > 0) {
+      padButtons.forEach((b) => { b.disabled = true; });
       showTugFreeze(remainingMs);
+      return;
     } else {
       hideTugFreeze();
     }
@@ -4669,37 +4703,13 @@ function renderTugActiveQuestion(session) {
     hideTugFreeze();
   }
 
-  const qText = $('tugQuestionText');
   if (currentIdx >= session.question_count) {
-    if (qText) qText.textContent = '🎉 Đội của bạn đã trả lời xong tất cả các câu hỏi! Đang chờ đối thủ...';
-    const optButtons = document.querySelectorAll('.tug-opt-btn');
-    optButtons.forEach((b) => { b.disabled = true; });
+    padButtons.forEach((b) => { b.disabled = true; });
     return;
   }
 
-  const order = isBlue ? session.blue_question_order : session.red_question_order;
-  const poolIdx = order[currentIdx];
-  const question = session.questions_pool[poolIdx];
-
-  if (!question) return;
-
-  if (qText) qText.textContent = question.question_text || '';
-  const options = question.options || [];
-
-  for (let i = 0; i < 4; i++) {
-    const textEl = $(`tugOptText${i}`);
-    const btn = document.querySelector(`.tug-opt-btn[data-opt="${i}"]`);
-    if (i < options.length) {
-      if (textEl) textEl.textContent = options[i];
-      if (btn) {
-        btn.style.display = 'flex';
-        btn.disabled = false;
-        btn.className = `tug-opt-btn ${isBlue ? 'is-blue' : 'is-red'}`;
-      }
-    } else {
-      if (btn) btn.style.display = 'none';
-    }
-  }
+  // Not frozen and not finished: unlock all 4 buttons
+  padButtons.forEach((b) => { b.disabled = false; });
 }
 
 function showTugFreeze(ms) {
@@ -4716,6 +4726,8 @@ function showTugFreeze(ms) {
     if (left <= 0) {
       clearInterval(tugFreezeTimerInterval);
       hideTugFreeze();
+      const padButtons = document.querySelectorAll('.tug-pad-btn');
+      padButtons.forEach((b) => { b.disabled = false; });
     }
   };
 
@@ -4733,6 +4745,9 @@ async function submitTugAnswer(optionIdx) {
   if (!tugSession || tugSession.status !== 'ACTIVE') return;
   const isBlue = state.tugTeam === 'BLUE';
   const currentIdx = isBlue ? tugSession.blue_current_idx : tugSession.red_current_idx;
+
+  const padButtons = document.querySelectorAll('.tug-pad-btn');
+  padButtons.forEach((b) => { b.disabled = true; });
 
   const res = await callRpc('submit_tug_of_war_answer', {
     p_session_code: tugSession.session_code,
@@ -4759,12 +4774,34 @@ async function submitTugAnswer(optionIdx) {
       tugSession.status = data.status ?? tugSession.status;
       tugSession.winner = data.winner ?? tugSession.winner;
 
-      syncTugState(tugSession);
-
-      if (!data.is_correct) {
+      if (data.is_correct) {
+        // Haptic feedback if supported
+        if (typeof navigator !== 'undefined' && navigator.vibrate) {
+          navigator.vibrate([40]);
+        }
+        // Correct Green Flash
+        const flashOverlay = $('tugCorrectFlashOverlay');
+        if (flashOverlay) {
+          flashOverlay.classList.remove('hidden');
+          setTimeout(() => {
+            flashOverlay.classList.add('hidden');
+          }, 450);
+        }
+      } else {
+        // Haptic feedback for wrong answer
+        if (typeof navigator !== 'undefined' && navigator.vibrate) {
+          navigator.vibrate([150, 50, 150]);
+        }
         showTugFreeze((tugSession.freeze_seconds || 3) * 1000);
       }
+
+      syncTugState(tugSession);
+    } else {
+      // Re-enable if submission was rejected (e.g. stale question)
+      padButtons.forEach((b) => { b.disabled = false; });
     }
+  } else {
+    padButtons.forEach((b) => { b.disabled = false; });
   }
 }
 

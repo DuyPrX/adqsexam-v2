@@ -1453,62 +1453,174 @@ body.security-blur #securityBlurOverlay {
   margin: 0;
 }
 
-.tug-options-grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 12px;
+.tug-gamepad-screen {
+  padding: 0 !important;
+  margin: 0 !important;
+  overflow: hidden !important;
 }
 
-.tug-opt-btn {
+.tug-gamepad-container {
+  display: flex;
+  flex-direction: column;
+  background: #090d16;
+  width: 100%;
+  height: 100%;
+  padding: 8px;
+  box-sizing: border-box;
+  position: relative;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+}
+
+/* Portrait Fallback: Rotate 90deg to enforce horizontal landscape presentation */
+@media (orientation: portrait) {
+  .tug-gamepad-container {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    width: 100vh;
+    height: 100vw;
+    transform: translate(-50%, -50%) rotate(90deg);
+    transform-origin: center center;
+    z-index: 9999;
+  }
+}
+
+@media (orientation: landscape) {
+  .tug-gamepad-container {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 9999;
+  }
+}
+
+.tug-gamepad-header {
+  height: 38px;
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 16px 18px;
-  border-radius: 16px;
-  background: rgba(30, 41, 59, 0.9);
-  border: 2px solid rgba(255, 255, 255, 0.15);
-  color: #ffffff;
-  font-size: 15px;
-  font-weight: 600;
-  text-align: left;
+  justify-content: space-between;
+  padding: 0 12px;
+  background: rgba(15, 23, 42, 0.85);
+  border-radius: 12px;
+  margin-bottom: 8px;
+  flex-shrink: 0;
+}
+
+.tug-gamepad-team {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 800;
+  color: #f8fafc;
+}
+
+.tug-gamepad-stats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 2x2 Grid of 4 Massive Colored Buttons */
+.tug-gamepad-grid,
+.tug-pad-grid {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 10px;
+  height: calc(100% - 46px);
+}
+
+.tug-pad-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 20px;
+  border: none;
+  outline: none;
   cursor: pointer;
-  transition: all 0.15s ease;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4), inset 0 2px 4px rgba(255, 255, 255, 0.25);
+  transition: transform 0.08s ease, filter 0.08s ease;
   user-select: none;
   -webkit-tap-highlight-color: transparent;
 }
 
-.tug-opt-btn:active {
-  transform: scale(0.97);
-  background: rgba(59, 130, 246, 0.4);
-  border-color: #60a5fa;
+.tug-pad-btn:active {
+  transform: scale(0.94);
+  filter: brightness(0.85);
 }
 
-.tug-opt-btn.is-blue {
-  border-color: rgba(59, 130, 246, 0.5);
-  background: linear-gradient(135deg, rgba(30, 58, 138, 0.6), rgba(30, 41, 59, 0.9));
+.tug-pad-letter {
+  font-size: clamp(48px, 14vw, 92px);
+  font-weight: 950;
+  color: #ffffff;
+  text-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  line-height: 1;
 }
 
-.tug-opt-btn.is-red {
-  border-color: rgba(239, 68, 68, 0.5);
-  background: linear-gradient(135deg, rgba(153, 27, 27, 0.6), rgba(30, 41, 59, 0.9));
+/* 4 Distinct Option Colors */
+.tug-pad-btn--red {
+  background: linear-gradient(135deg, #ef4444, #dc2626);
 }
 
-.tug-opt-badge {
+.tug-pad-btn--blue {
+  background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+}
+
+.tug-pad-btn--amber {
+  background: linear-gradient(135deg, #f59e0b, #d97706);
+}
+
+.tug-pad-btn--green {
+  background: linear-gradient(135deg, #10b981, #059669);
+}
+
+.tug-pad-btn:disabled {
+  opacity: 0.35;
+  filter: grayscale(0.5);
+  pointer-events: none;
+}
+
+/* Green Flash Overlay on Correct Answer */
+.tug-flash-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 50;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.15);
-  font-weight: 800;
-  font-size: 14px;
-  flex-shrink: 0;
+  background: rgba(16, 185, 129, 0.88);
+  backdrop-filter: blur(6px);
+  border-radius: 20px;
+  animation: tugFlashAnim 0.45s ease-out forwards;
 }
 
-.tug-opt-text {
-  flex: 1;
-  line-height: 1.35;
+.tug-flash-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  color: #ffffff;
+}
+
+.tug-flash-icon {
+  font-size: 56px;
+}
+
+.tug-flash-text {
+  font-size: 26px;
+  font-weight: 950;
+  letter-spacing: 1px;
+}
+
+@keyframes tugFlashAnim {
+  0% { opacity: 0; transform: scale(0.9); }
+  30% { opacity: 1; transform: scale(1.02); }
+  100% { opacity: 1; transform: scale(1); }
 }
 
 .tug-freeze-overlay {
