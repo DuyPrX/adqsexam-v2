@@ -462,6 +462,127 @@
   </div>
   <!-- /#view-tree -->
 
+  <!-- ================= TUG OF WAR VIEW ("KÉO CO TRI THỨC") ================= -->
+  <div id="view-tug" class="spa-view" style="display: none;">
+    <div class="tug-mobile-container">
+      <!-- Mobile Header -->
+      <header class="tug-mobile-header" id="tugHeader">
+        <div class="tug-header-brand">
+          <span class="tug-brand-icon">⚔️</span>
+          <span id="tugHeaderTitle" class="tug-header-title">Kéo Co Tri Thức</span>
+        </div>
+        <div id="tugTeamBadge" class="tug-team-badge">
+          <!-- Populated by JS: e.g. 🔵 Đội Xanh (Tổ 1) -->
+        </div>
+      </header>
+
+      <!-- Screen 1: Join / Check-in -->
+      <section id="tugCheckinScreen" class="tug-screen">
+        <div class="tug-card">
+          <div class="tug-card-icon">⚔️</div>
+          <h2 id="tugCheckinTitle" class="tug-card-title">Tham Gia Kéo Co</h2>
+          <p id="tugCheckinSubtitle" class="tug-card-subtitle">
+            Nhập mã học sinh để gia nhập đội thi đấu
+          </p>
+          <div id="tugCheckinError" class="alert alert--error hidden"></div>
+          <div class="field" style="margin-top: 16px;">
+            <label for="tugStudentCodeInput">Mã học sinh của bạn</label>
+            <input
+              id="tugStudentCodeInput"
+              type="text"
+              placeholder="VD: HS001"
+              autocomplete="off"
+              style="text-transform: uppercase;"
+            />
+          </div>
+          <button type="button" id="btnJoinTug" class="btn btn--primary btn--block" style="margin-top: 16px;">
+            Vào Phòng Thi Đấu
+          </button>
+        </div>
+      </section>
+
+      <!-- Screen 2: Waiting Room / Lobby -->
+      <section id="tugLobbyScreen" class="tug-screen hidden">
+        <div class="tug-card text-center">
+          <div id="tugLobbyTeamIcon" class="tug-card-icon">🔵</div>
+          <h2 id="tugLobbyTeamTitle" class="tug-card-title">Đội Xanh</h2>
+          <p id="tugLobbyStudentInfo" class="tug-card-subtitle">
+            Học sinh: <strong id="tugLobbyStudentName">HS001</strong>
+          </p>
+          <div class="tug-lobby-pulse">
+            <div class="spinner"></div>
+            <p>Đang chờ giáo viên bắt đầu trận đấu...</p>
+          </div>
+          <p class="tug-hint">
+            👀 Hãy chú ý nhìn lên máy chiếu! Khi trận đấu bắt đầu, các câu hỏi sẽ xuất hiện ngay tại đây.
+          </p>
+        </div>
+      </section>
+
+      <!-- Screen 3: Active Question Workspace -->
+      <section id="tugActiveScreen" class="tug-screen hidden">
+        <div class="tug-active-header">
+          <span id="tugQuestionProgress" class="tug-q-progress">Câu 1/10</span>
+          <span id="tugTeamScore" class="tug-score-pill">Điểm: 0</span>
+        </div>
+
+        <!-- Question text box -->
+        <div class="tug-question-card">
+          <p id="tugQuestionText" class="tug-question-text">
+            Đang tải câu hỏi...
+          </p>
+        </div>
+
+        <!-- 4 Big Option Buttons -->
+        <div id="tugOptionsGrid" class="tug-options-grid">
+          <button type="button" class="tug-opt-btn" data-opt="0">
+            <span class="tug-opt-badge">A</span>
+            <span class="tug-opt-text" id="tugOptText0">Lựa chọn A</span>
+          </button>
+          <button type="button" class="tug-opt-btn" data-opt="1">
+            <span class="tug-opt-badge">B</span>
+            <span class="tug-opt-text" id="tugOptText1">Lựa chọn B</span>
+          </button>
+          <button type="button" class="tug-opt-btn" data-opt="2">
+            <span class="tug-opt-badge">C</span>
+            <span class="tug-opt-text" id="tugOptText2">Lựa chọn C</span>
+          </button>
+          <button type="button" class="tug-opt-btn" data-opt="3">
+            <span class="tug-opt-badge">D</span>
+            <span class="tug-opt-text" id="tugOptText3">Lựa chọn D</span>
+          </button>
+        </div>
+
+        <!-- Freeze Penalty Overlay -->
+        <div id="tugFreezeOverlay" class="tug-freeze-overlay hidden">
+          <div class="tug-freeze-card">
+            <span class="tug-freeze-icon">❄️</span>
+            <h3>ĐÓNG BĂNG!</h3>
+            <p>Có thành viên trả lời sai! Hãy chờ phạt...</p>
+            <div class="tug-freeze-timer" id="tugFreezeTimer">3.0s</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Screen 4: Finished Victory / Defeat Screen -->
+      <section id="tugFinishedScreen" class="tug-screen hidden">
+        <div class="tug-card text-center">
+          <div id="tugFinishIcon" class="tug-card-icon">🏆</div>
+          <h2 id="tugFinishTitle" class="tug-card-title">KẾT THÚC TRẬN ĐẤU</h2>
+          <p id="tugFinishSubtitle" class="tug-card-subtitle">
+            Cảm ơn bạn đã thi đấu hết mình cùng đồng đội!
+          </p>
+          <div id="tugFinishScores" class="tug-finish-scores"></div>
+          <button type="button" id="btnExitTug" class="btn btn--primary btn--block" style="margin-top: 20px;">
+            Quay Về Trang Chủ
+          </button>
+        </div>
+      </section>
+    </div>
+  </div>
+  <!-- /#view-tug -->
+
+
   <!-- ================= QUESTION PALETTE DRAWER (Phase 8.5) ================= -->
   <div id="palette-backdrop" class="drawer-backdrop" style="display: none;"></div>
   <aside id="question-palette-drawer" class="palette-drawer" role="dialog" aria-modal="true"

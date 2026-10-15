@@ -5,8 +5,10 @@ import { useRouter } from 'next/navigation';
 import {
   AlertTriangle,
   ChevronDown,
+  Gamepad2,
   Loader2,
   Plus,
+  Swords,
   Trash2,
   Users,
   X,
@@ -28,6 +30,7 @@ import { downloadStudentCsvTemplate } from '@/lib/studentTemplate';
 import type { ClassMemberInput, ClassMemberRow, ClassRow, GroupNumber } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { CreateTreeSessionModal } from '@/components/tree/CreateTreeSessionModal';
+import { CreateTugOfWarModal } from '@/components/games/tug-of-war/CreateTugOfWarModal';
 
 /**
  * Phase 8.11 — the four group colours called for by the task, extended to the
@@ -76,6 +79,9 @@ export function ClassRosterManager({ initialClasses }: ClassRosterManagerProps) 
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   /** Class whose Tree of Knowledge session is being launched (Phase 7.3). */
   const [treeClass, setTreeClass] = useState<ClassRow | null>(null);
+  /** Class whose Tug of War session is being launched. */
+  const [tugOfWarClass, setTugOfWarClass] = useState<ClassRow | null>(null);
+  const [classTab, setClassTab] = useState<'roster' | 'games'>('roster');
   const [error, setError] = useState<string | null>(null);
   const [busyMemberId, setBusyMemberId] = useState<string | null>(null);
   /**
@@ -402,10 +408,17 @@ export function ClassRosterManager({ initialClasses }: ClassRosterManagerProps) 
               <div className="flex items-center gap-2">
                 <button
                   type="button"
+                  onClick={() => setTugOfWarClass(selected)}
+                  className="rounded-lg bg-gradient-to-r from-blue-600 to-rose-600 px-3 py-2 text-sm font-semibold text-white shadow-sm transition hover:brightness-110"
+                >
+                  ⚔️ Kéo Co Tri Thức
+                </button>
+                <button
+                  type="button"
                   onClick={() => setTreeClass(selected)}
                   className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white transition hover:bg-emerald-500"
                 >
-                  🌱 Bắt đầu Cây Tri Thức
+                  🌱 Cây Tri Thức
                 </button>
                 <button
                   type="button"
@@ -434,6 +447,188 @@ export function ClassRosterManager({ initialClasses }: ClassRosterManagerProps) 
                 />
               </div>
             </div>
+
+            {/* Class Section Tabs */}
+            <div className="flex items-center gap-2 border-b border-slate-200">
+              <button
+                type="button"
+                onClick={() => setClassTab('roster')}
+                className={cn(
+                  'flex items-center gap-2 border-b-2 px-4 py-2.5 text-sm font-semibold transition -mb-px',
+                  classTab === 'roster'
+                    ? 'border-slate-900 text-slate-900'
+                    : 'border-transparent text-slate-500 hover:text-slate-800',
+                )}
+              >
+                <Users size={16} />
+                Danh sách học sinh ({members?.length ?? selected.member_count ?? 0})
+              </button>
+              <button
+                type="button"
+                onClick={() => setClassTab('games')}
+                className={cn(
+                  'flex items-center gap-2 border-b-2 px-4 py-2.5 text-sm font-semibold transition -mb-px',
+                  classTab === 'games'
+                    ? 'border-indigo-600 text-indigo-600'
+                    : 'border-transparent text-slate-500 hover:text-slate-800',
+                )}
+              >
+                <Gamepad2 size={16} />
+                🎮 Trò chơi lớp học
+                <span className="rounded-full bg-rose-500 px-1.5 py-0.2 text-[10px] font-bold text-white uppercase">
+                  Mới
+                </span>
+              </button>
+            </div>
+
+            {classTab === 'games' ? (
+              /* Classroom Game Hub Grid */
+              <div className="grid gap-4 sm:grid-cols-2 pt-2">
+                {/* 1. Kéo Co Tri Thức */}
+                <div className="group relative flex flex-col justify-between rounded-2xl border-2 border-indigo-500/30 bg-gradient-to-br from-blue-50 via-white to-rose-50 p-5 shadow-sm transition hover:shadow-md hover:border-indigo-500/60">
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-600 to-rose-600 text-2xl text-white shadow-md shadow-indigo-500/20">
+                        ⚔️
+                      </span>
+                      <span className="rounded-full bg-emerald-100 border border-emerald-200 px-2.5 py-0.5 text-[11px] font-bold text-emerald-800">
+                        ● Sẵn sàng thi đấu
+                      </span>
+                    </div>
+                    <div>
+                      <h3 className="text-base font-bold text-slate-900 group-hover:text-indigo-600 transition">
+                        Kéo Co Tri Thức (Tug of War)
+                      </h3>
+                      <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                        Thi đấu đối kháng trực tiếp giữa 2 tổ trên máy chiếu và điện thoại thông minh. Đội giải đúng nhanh nhất sẽ kéo dây về phía mình để giành chiến thắng!
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      <span className="rounded-md bg-blue-100/80 px-2 py-0.5 text-[11px] font-semibold text-blue-800">
+                        Đối kháng 2 Tổ
+                      </span>
+                      <span className="rounded-md bg-rose-100/80 px-2 py-0.5 text-[11px] font-semibold text-rose-800">
+                        Thời gian thực
+                      </span>
+                      <span className="rounded-md bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-700">
+                        Âm thanh sôi động
+                      </span>
+                    </div>
+                  </div>
+                  <div className="pt-4 border-t border-slate-100 mt-4">
+                    <button
+                      type="button"
+                      onClick={() => setTugOfWarClass(selected)}
+                      className="w-full flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 via-indigo-600 to-rose-600 py-2.5 text-xs font-bold text-white shadow-md shadow-indigo-600/25 transition hover:brightness-110"
+                    >
+                      🚀 Bắt đầu Kéo Co
+                    </button>
+                  </div>
+                </div>
+
+                {/* 2. Cây Tri Thức */}
+                <div className="group relative flex flex-col justify-between rounded-2xl border border-emerald-200 bg-gradient-to-br from-emerald-50 via-white to-teal-50 p-5 shadow-sm transition hover:shadow-md hover:border-emerald-400">
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-600 text-2xl text-white shadow-md shadow-emerald-500/20">
+                        🌱
+                      </span>
+                      <span className="rounded-full bg-emerald-100 border border-emerald-200 px-2.5 py-0.5 text-[11px] font-bold text-emerald-800">
+                        ● Sẵn sàng thi đấu
+                      </span>
+                    </div>
+                    <div>
+                      <h3 className="text-base font-bold text-slate-900 group-hover:text-emerald-700 transition">
+                        Cây Tri Thức (Tree of Knowledge)
+                      </h3>
+                      <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                        Hoạt động xây dựng cây kiến thức chung hoặc thi đấu trắc nghiệm 4 cây theo tổ, trực quan hoá với đồ họa procedural cây sinh trưởng và phát triển.
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      <span className="rounded-md bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-800">
+                        Toàn lớp / 4 Tổ
+                      </span>
+                      <span className="rounded-md bg-teal-100 px-2 py-0.5 text-[11px] font-semibold text-teal-800">
+                        Procedural Canvas
+                      </span>
+                    </div>
+                  </div>
+                  <div className="pt-4 border-t border-slate-100 mt-4">
+                    <button
+                      type="button"
+                      onClick={() => setTreeClass(selected)}
+                      className="w-full flex items-center justify-center gap-2 rounded-xl bg-emerald-600 py-2.5 text-xs font-bold text-white shadow-md shadow-emerald-600/25 transition hover:bg-emerald-500"
+                    >
+                      🌱 Bắt đầu Cây Tri Thức
+                    </button>
+                  </div>
+                </div>
+
+                {/* 3. Đua Thuyền Tri Thức (Coming soon) */}
+                <div className="relative flex flex-col justify-between rounded-2xl border border-dashed border-slate-300 bg-slate-50/60 p-5 opacity-75">
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-200 text-2xl text-slate-500">
+                        ⛵
+                      </span>
+                      <span className="rounded-full bg-slate-200 px-2.5 py-0.5 text-[11px] font-bold text-slate-600">
+                        Sắp ra mắt
+                      </span>
+                    </div>
+                    <div>
+                      <h3 className="text-base font-bold text-slate-700">
+                        Đua Thuyền Tri Thức (Boat Racing)
+                      </h3>
+                      <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                        Cuộc đua vượt sóng theo tổ: mỗi câu trả lời đúng sẽ giúp thuyền tăng tốc về đích trước những cơn sóng thử thách.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="pt-4 border-t border-slate-200 mt-4">
+                    <button
+                      type="button"
+                      disabled
+                      className="w-full rounded-xl bg-slate-200 py-2 text-xs font-bold text-slate-500 cursor-not-allowed"
+                    >
+                      Đang phát triển
+                    </button>
+                  </div>
+                </div>
+
+                {/* 4. Vượt Chướng Ngại Vật (Coming soon) */}
+                <div className="relative flex flex-col justify-between rounded-2xl border border-dashed border-slate-300 bg-slate-50/60 p-5 opacity-75">
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-200 text-2xl text-slate-500">
+                        🏃💨
+                      </span>
+                      <span className="rounded-full bg-slate-200 px-2.5 py-0.5 text-[11px] font-bold text-slate-600">
+                        Sắp ra mắt
+                      </span>
+                    </div>
+                    <div>
+                      <h3 className="text-base font-bold text-slate-700">
+                        Vượt Chướng Ngại Vật (Obstacle Race)
+                      </h3>
+                      <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                        Chinh phục các chướng ngại vật bằng tư duy logic và kiến thức chuyên sâu để phá kỷ lục thời gian về đích.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="pt-4 border-t border-slate-200 mt-4">
+                    <button
+                      type="button"
+                      disabled
+                      className="w-full rounded-xl bg-slate-200 py-2 text-xs font-bold text-slate-500 cursor-not-allowed"
+                    >
+                      Đang phát triển
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <>
 
             {/* Phase 8.11 — group toolbar. Rendered only when a roster is loaded,
                 because every control here acts on members. */}
@@ -591,6 +786,8 @@ export function ClassRosterManager({ initialClasses }: ClassRosterManagerProps) 
                 </div>
               )}
             </div>
+              </>
+            )}
           </>
         )}
       </section>
@@ -608,6 +805,13 @@ export function ClassRosterManager({ initialClasses }: ClassRosterManagerProps) 
 
       {treeClass && (
         <CreateTreeSessionModal klass={treeClass} onClose={() => setTreeClass(null)} />
+      )}
+
+      {tugOfWarClass && (
+        <CreateTugOfWarModal
+          klass={tugOfWarClass}
+          onClose={() => setTugOfWarClass(null)}
+        />
       )}
     </div>
   );

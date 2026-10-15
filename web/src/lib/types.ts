@@ -407,3 +407,62 @@ export interface ExamCandidateRow {
   pin: string | null;
   created_at: string;
 }
+
+/** Tug of War ("Kéo Co Tri Thức") game session lifecycle. */
+export type TugOfWarSessionStatus = 'LOBBY' | 'ACTIVE' | 'FINISHED';
+export type TugOfWarTeam = 'BLUE' | 'RED';
+
+export interface TugOfWarParticipant {
+  student_code: string;
+  full_name: string;
+  group_number: number | null;
+  joined_at?: string;
+}
+
+export interface TugOfWarQuestionItem {
+  id?: string;
+  question_text: string;
+  options: string[];
+  correct_option: number;
+}
+
+export interface TugOfWarSessionRow {
+  id: string;
+  user_id: string;
+  class_id: string;
+  exam_id: string;
+  session_code: string;
+  title: string;
+  status: TugOfWarSessionStatus;
+  blue_group_number: number;
+  red_group_number: number;
+  blue_team_name: string;
+  red_team_name: string;
+  question_count: number;
+  duration_seconds: number;
+  win_gap: number;
+  freeze_seconds: number;
+  questions_pool: TugOfWarQuestionItem[];
+  blue_question_order: number[];
+  red_question_order: number[];
+  blue_current_idx: number;
+  red_current_idx: number;
+  blue_score: number;
+  red_score: number;
+  blue_frozen_until: string | null;
+  red_frozen_until: string | null;
+  joined_participants: {
+    blue: TugOfWarParticipant[];
+    red: TugOfWarParticipant[];
+  };
+  winner: 'BLUE' | 'RED' | 'DRAW' | null;
+  started_at: string | null;
+  ends_at: string | null;
+  created_at: string;
+}
+
+export interface TugOfWarSessionDetail extends TugOfWarSessionRow {
+  class_name?: string;
+  exam_title?: string;
+}
+

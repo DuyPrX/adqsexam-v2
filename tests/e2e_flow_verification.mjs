@@ -319,6 +319,9 @@ const {
 const { buildModelOptions, CUSTOM_MODEL } = await import(
   new URL('../web/src/lib/ai.ts', import.meta.url).href
 );
+const { generateDistinctQuestionOrders, createTugOfWarSession } = await import(
+  new URL('../web/src/lib/tugOfWar.ts', import.meta.url).href
+);
 
 const TEACHER = { email: 'e2e.teacher@adqsexam.local', password: 'e2e-password-123' };
 const EXAM = {
@@ -8900,6 +8903,252 @@ async function main() {
   // Clean up Step 52 fixture
   await teacher.from('exam_audit_logs').delete().eq('exam_code', STEP52_EXAM_CODE);
   await teacher.from('exams').delete().eq('code', STEP52_EXAM_CODE);
+
+  /* --- 53. Classroom Game Hub & Tug of War ("Kéo Co Tri Thức") Engine --- */
+  step(53, 'classroom game hub and tug of war game engine');
+
+  // 53a: Verify distinct question permutation generator
+  const permTest = generateDistinctQuestionOrders(10);
+  check('53a: generates distinct permutations of correct length',
+    Array.isArray(permTest.blueOrder) &&
+    Array.isArray(permTest.redOrder) &&
+    permTest.blueOrder.length === 10 &&
+    permTest.redOrder.length === 10,
+    JSON.stringify(permTest));
+
+  check('53a: blueOrder[0] !== redOrder[0] to prevent identical starting questions',
+    permTest.blueOrder[0] !== permTest.redOrder[0],
+    `blueOrder[0]=${permTest.blueOrder[0]}, redOrder[0]=${permTest.redOrder[0]}`);
+
+  let allDistinctStart = true;
+  for (let i = 0; i < 50; i++) {
+    const p = generateDistinctQuestionOrders(5);
+    if (p.blueOrder[0] === p.redOrder[0]) {
+      allDistinctStart = false;
+      break;
+    }
+  }
+  check('53a: distinct initial question invariant holds across 50 permutations',
+    allDistinctStart,
+    'failed distinct initial question invariant');
+
+  // 53b: Code & Component Contract Verification
+  const tugLibFileSrc = readFileSync(new URL('../web/src/lib/tugOfWar.ts', import.meta.url), 'utf8');
+  check('53b: web/src/lib/tugOfWar.ts exports required functions and TUG_OF_WAR_COLUMNS',
+    tugLibFileSrc.includes('createTugOfWarSession') &&
+    tugLibFileSrc.includes('getTugOfWarSession') &&
+    tugLibFileSrc.includes('startTugOfWarSession') &&
+    tugLibFileSrc.includes('submitTugOfWarAnswer') &&
+    tugLibFileSrc.includes('joinTugOfWarLobby') &&
+    tugLibFileSrc.includes('TUG_OF_WAR_COLUMNS'),
+    'missing exports in web/src/lib/tugOfWar.ts');
+
+  const rosterManagerSrc = readFileSync(new URL('../web/src/components/ClassRosterManager.tsx', import.meta.url), 'utf8');
+  check('53b: ClassRosterManager includes Game Hub tabs and Tug of War modal launcher',
+    rosterManagerSrc.includes('Trò chơi lớp học') &&
+    rosterManagerSrc.includes('CreateTugOfWarModal') &&
+    rosterManagerSrc.includes('Kéo Co Tri Thức'),
+    'missing game hub in ClassRosterManager.tsx');
+
+  const tugStudentAppSrc = readFileSync(new URL('../student/app.js', import.meta.url), 'utf8');
+  check('53b: student/app.js implements loadTugFromUrl and Tug of War mobile controller',
+    tugStudentAppSrc.includes('function loadTugFromUrl') &&
+    tugStudentAppSrc.includes('function initTugSession') &&
+    tugStudentAppSrc.includes('function submitTugAnswer') &&
+    tugStudentAppSrc.includes('function showTugFreeze') &&
+    tugStudentAppSrc.includes('loadTugFromUrl()'),
+    'missing tug controller in student/app.js');
+
+  const studentHtmlSrc = readFileSync(new URL('../student/index.html', import.meta.url), 'utf8');
+  check('53b: student/index.html defines isolated #view-tug with mobile game screens',
+    studentHtmlSrc.includes('id="view-tug"') &&
+    studentHtmlSrc.includes('id="tugCheckinScreen"') &&
+    studentHtmlSrc.includes('id="tugLobbyScreen"') &&
+    studentHtmlSrc.includes('id="tugActiveScreen"') &&
+    studentHtmlSrc.includes('id="tugFreezeOverlay"') &&
+    studentHtmlSrc.includes('id="tugFinishedScreen"'),
+    'missing #view-tug screens in student/index.html');
+
+  // 53c: Database Migration & Schema verification
+  const migrationSrc = readFileSync(new URL('../supabase/migrations/20261015010000_tug_of_war_game.sql', import.meta.url), 'utf8');
+  check('53c: migration defines tug_of_war_sessions table, RPCs, and realtime publication',
+    migrationSrc.includes('create table if not exists public.tug_of_war_sessions') &&
+    migrationSrc.includes('join_tug_of_war_lobby') &&
+    migrationSrc.includes('start_tug_of_war_session') &&
+    migrationSrc.includes('submit_tug_of_war_answer') &&
+    migrationSrc.includes('get_tug_of_war_session') &&
+    migrationSrc.includes('supabase_realtime'),
+    'missing schema elements in migration');
+
+  // 53d: Live Database Flow Verification (when DB is reachable)
+  const STEP53_CODE = 'TUG' + String(Math.floor(100 + Math.random() * 900));
+  const testClassRes = await teacher
+    .from('classes')
+    .insert({ user_id: teacherId, name: 'E2E-TUG-CLASS-' + STEP53_CODE, academic_year: '2026-2027' })
+    .select('id')
+    .maybeSingle();
+
+  if (testClassRes && testClassRes.data?.id) {
+    const testClassId = testClassRes.data.id;
+
+    await saveClassMembers(teacher, testClassId, [
+      { student_code: 'TUGHS1', full_name: 'Học Sinh Đội Xanh', dob: null, pin: null, group_number: 1 },
+      { student_code: 'TUGHS2', full_name: 'Học Sinh Đội Đỏ', dob: null, pin: null, group_number: 2 },
+    ]);
+
+    const examRes = await teacher
+      .from('exams')
+      .insert({
+        user_id: teacherId,
+        code: STEP53_CODE,
+        title: 'Tin 8: bài 2: Thông tin kĩ thuật số',
+        duration_minutes: 45,
+      })
+      .select('id')
+      .single();
+
+    const testExamId = examRes.data?.id;
+
+    if (testExamId) {
+      const questionsData = Array.from({ length: 5 }, (_, i) => ({
+        user_id: teacherId,
+        exam_id: testExamId,
+        question_text: `Câu hỏi số ${i + 1} môn Tin học`,
+        question_type: 'MCQ',
+        options: JSON.stringify(['Đáp án A', 'Đáp án B', 'Đáp án C', 'Đáp án D']),
+        correct_answer: i % 4,
+        position: i,
+      }));
+      await teacher.from('question_bank').insert(questionsData);
+
+      const createdSession = await createTugOfWarSession(teacher, {
+        class_id: testClassId,
+        exam_id: testExamId,
+        title: 'Tin 8: bài 2: Thông tin kĩ thuật số',
+        blue_group_number: 1,
+        red_group_number: 2,
+        question_count: 5,
+        duration_seconds: 120,
+        win_gap: 3,
+        freeze_seconds: 3,
+      });
+
+      check('53d: createTugOfWarSession persists session in LOBBY status',
+        createdSession.status === 'LOBBY' &&
+        createdSession.blue_group_number === 1 &&
+        createdSession.red_group_number === 2 &&
+        createdSession.question_count === 5 &&
+        createdSession.win_gap === 3,
+        JSON.stringify(createdSession));
+
+      const joinBlue = await teacher.rpc('join_tug_of_war_lobby', {
+        p_session_code: createdSession.session_code,
+        p_student_code: 'TUGHS1',
+      });
+      check('53e: join_tug_of_war_lobby maps Tổ 1 student to BLUE team',
+        joinBlue.data?.success === true && joinBlue.data?.assigned_team === 'BLUE',
+        JSON.stringify(joinBlue.data));
+
+      const joinRed = await teacher.rpc('join_tug_of_war_lobby', {
+        p_session_code: createdSession.session_code,
+        p_student_code: 'TUGHS2',
+      });
+      check('53e: join_tug_of_war_lobby maps Tổ 2 student to RED team',
+        joinRed.data?.success === true && joinRed.data?.assigned_team === 'RED',
+        JSON.stringify(joinRed.data));
+
+      const startRes = await teacher.rpc('start_tug_of_war_session', {
+        p_session_id: createdSession.id,
+      });
+      check('53f: start_tug_of_war_session transitions status to ACTIVE and stamps ends_at',
+        startRes.data?.success === true &&
+        startRes.data?.status === 'ACTIVE' &&
+        !!startRes.data?.ends_at,
+        JSON.stringify(startRes.data));
+
+      const bluePoolIdx = createdSession.blue_question_order[0];
+      const blueQ0 = createdSession.questions_pool[bluePoolIdx];
+      const blueCorrectOpt = blueQ0.correct_option;
+
+      const ansBlueCorrect = await teacher.rpc('submit_tug_of_war_answer', {
+        p_session_code: createdSession.session_code,
+        p_team: 'BLUE',
+        p_question_idx: 0,
+        p_selected_option: blueCorrectOpt,
+        p_student_code: 'TUGHS1',
+      });
+      check('53g: correct answer increments blue_score and advances blue_current_idx',
+        ansBlueCorrect.data?.success === true &&
+        ansBlueCorrect.data?.is_correct === true &&
+        ansBlueCorrect.data?.blue_score === 1 &&
+        ansBlueCorrect.data?.blue_current_idx === 1,
+        JSON.stringify(ansBlueCorrect.data));
+
+      const redPoolIdx = createdSession.red_question_order[0];
+      const redQ0 = createdSession.questions_pool[redPoolIdx];
+      const redWrongOpt = (redQ0.correct_option + 1) % 4;
+
+      const ansRedWrong = await teacher.rpc('submit_tug_of_war_answer', {
+        p_session_code: createdSession.session_code,
+        p_team: 'RED',
+        p_question_idx: 0,
+        p_selected_option: redWrongOpt,
+        p_student_code: 'TUGHS2',
+      });
+      check('53h: wrong answer triggers freeze penalty without score increment',
+        ansRedWrong.data?.success === true &&
+        ansRedWrong.data?.is_correct === false &&
+        ansRedWrong.data?.red_score === 0 &&
+        ansRedWrong.data?.red_current_idx === 1 &&
+        !!ansRedWrong.data?.red_frozen_until,
+        JSON.stringify(ansRedWrong.data));
+
+      const ansRedDuringFreeze = await teacher.rpc('submit_tug_of_war_answer', {
+        p_session_code: createdSession.session_code,
+        p_team: 'RED',
+        p_question_idx: 1,
+        p_selected_option: 0,
+        p_student_code: 'TUGHS2',
+      });
+      check('53i: submission during active freeze lock returns TEAM_FROZEN error',
+        ansRedDuringFreeze.data?.success === false &&
+        ansRedDuringFreeze.data?.code === 'TEAM_FROZEN',
+        JSON.stringify(ansRedDuringFreeze.data));
+
+      const bluePoolIdx1 = createdSession.blue_question_order[1];
+      const blueQ1 = createdSession.questions_pool[bluePoolIdx1];
+      await teacher.rpc('submit_tug_of_war_answer', {
+        p_session_code: createdSession.session_code,
+        p_team: 'BLUE',
+        p_question_idx: 1,
+        p_selected_option: blueQ1.correct_option,
+        p_student_code: 'TUGHS1',
+      });
+
+      const bluePoolIdx2 = createdSession.blue_question_order[2];
+      const blueQ2 = createdSession.questions_pool[bluePoolIdx2];
+      const ansWinGap = await teacher.rpc('submit_tug_of_war_answer', {
+        p_session_code: createdSession.session_code,
+        p_team: 'BLUE',
+        p_question_idx: 2,
+        p_selected_option: blueQ2.correct_option,
+        p_student_code: 'TUGHS1',
+      });
+
+      check('53j: instant victory triggers when score difference reaches win_gap',
+        ansWinGap.data?.success === true &&
+        ansWinGap.data?.blue_score === 3 &&
+        ansWinGap.data?.red_score === 0 &&
+        ansWinGap.data?.status === 'FINISHED' &&
+        ansWinGap.data?.winner === 'BLUE',
+        JSON.stringify(ansWinGap.data));
+
+      await teacher.from('tug_of_war_sessions').delete().eq('id', createdSession.id);
+      await teacher.from('exams').delete().eq('id', testExamId);
+    }
+
+    await teacher.from('classes').delete().eq('id', testClassId);
+  }
 
   /* --- teardown --------------------------------------------------------- */
   await teacher.from('exam_audit_logs').delete().eq('exam_code', EXAM.code);

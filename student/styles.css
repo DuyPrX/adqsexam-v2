@@ -1275,5 +1275,300 @@ body.security-blur #securityBlurOverlay {
   box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
 }
 
+/* =====================================================================
+   Tug of War ("Kéo Co Tri Thức") Mobile View
+   ===================================================================== */
+#view-tug {
+  min-height: 100vh;
+  background: var(--bg-body, #0f172a);
+  color: var(--text-main, #f8fafc);
+  display: flex;
+  flex-direction: column;
+}
+
+.tug-mobile-container {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  max-width: 600px;
+  margin: 0 auto;
+  width: 100%;
+  padding-bottom: 32px;
+}
+
+.tug-mobile-header {
+  height: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  background: rgba(15, 23, 42, 0.95);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(12px);
+  position: sticky;
+  top: 0;
+  z-index: 30;
+}
+
+.tug-header-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tug-brand-icon {
+  font-size: 20px;
+}
+
+.tug-header-title {
+  font-size: 15px;
+  font-weight: 800;
+  color: #fbbf24;
+}
+
+.tug-team-badge {
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.tug-team-badge.is-blue {
+  background: rgba(59, 130, 246, 0.25);
+  color: #93c5fd;
+  border: 1px solid rgba(59, 130, 246, 0.4);
+}
+
+.tug-team-badge.is-red {
+  background: rgba(239, 68, 68, 0.25);
+  color: #fca5a5;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+}
+
+.tug-screen {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 20px 16px;
+  position: relative;
+}
+
+.tug-card {
+  background: rgba(30, 41, 59, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 20px;
+  padding: 28px 20px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.3);
+  backdrop-filter: blur(8px);
+}
+
+.tug-card-icon {
+  font-size: 44px;
+  margin-bottom: 12px;
+  text-align: center;
+}
+
+.tug-card-title {
+  font-size: 18px;
+  font-weight: 800;
+  margin: 0 0 6px;
+  text-align: center;
+}
+
+.tug-card-subtitle {
+  font-size: 13px;
+  color: #94a3b8;
+  margin: 0 0 16px;
+  text-align: center;
+  line-height: 1.5;
+}
+
+.tug-lobby-pulse {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 24px 0;
+  color: #cbd5e1;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.tug-hint {
+  font-size: 12px;
+  color: #cbd5e1;
+  background: rgba(255, 255, 255, 0.05);
+  padding: 12px;
+  border-radius: 12px;
+  margin-top: 16px;
+  line-height: 1.4;
+  text-align: center;
+}
+
+.tug-active-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.tug-q-progress {
+  font-size: 13px;
+  font-weight: 700;
+  color: #94a3b8;
+  background: rgba(255, 255, 255, 0.08);
+  padding: 4px 12px;
+  border-radius: 999px;
+}
+
+.tug-score-pill {
+  font-size: 14px;
+  font-weight: 800;
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  padding: 4px 14px;
+  border-radius: 999px;
+}
+
+.tug-question-card {
+  background: rgba(30, 41, 59, 0.85);
+  border: 2px solid rgba(255, 255, 255, 0.12);
+  border-radius: 18px;
+  padding: 20px;
+  margin-bottom: 18px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  min-height: 110px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tug-question-text {
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.5;
+  text-align: center;
+  color: #ffffff;
+  margin: 0;
+}
+
+.tug-options-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+.tug-opt-btn {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 18px;
+  border-radius: 16px;
+  background: rgba(30, 41, 59, 0.9);
+  border: 2px solid rgba(255, 255, 255, 0.15);
+  color: #ffffff;
+  font-size: 15px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.tug-opt-btn:active {
+  transform: scale(0.97);
+  background: rgba(59, 130, 246, 0.4);
+  border-color: #60a5fa;
+}
+
+.tug-opt-btn.is-blue {
+  border-color: rgba(59, 130, 246, 0.5);
+  background: linear-gradient(135deg, rgba(30, 58, 138, 0.6), rgba(30, 41, 59, 0.9));
+}
+
+.tug-opt-btn.is-red {
+  border-color: rgba(239, 68, 68, 0.5);
+  background: linear-gradient(135deg, rgba(153, 27, 27, 0.6), rgba(30, 41, 59, 0.9));
+}
+
+.tug-opt-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.15);
+  font-weight: 800;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.tug-opt-text {
+  flex: 1;
+  line-height: 1.35;
+}
+
+.tug-freeze-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(8, 47, 73, 0.88);
+  backdrop-filter: blur(8px);
+  border-radius: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 40;
+}
+
+.tug-freeze-card {
+  text-align: center;
+  color: #e0f2fe;
+}
+
+.tug-freeze-icon {
+  font-size: 48px;
+  display: block;
+  margin-bottom: 8px;
+}
+
+.tug-freeze-card h3 {
+  font-size: 20px;
+  font-weight: 900;
+  color: #38bdf8;
+  margin: 0 0 6px;
+  letter-spacing: 0.5px;
+}
+
+.tug-freeze-card p {
+  font-size: 13px;
+  color: #bae6fd;
+  margin: 0 0 16px;
+}
+
+.tug-freeze-timer {
+  display: inline-block;
+  font-family: monospace;
+  font-size: 32px;
+  font-weight: 900;
+  color: #ffffff;
+  background: rgba(3, 105, 161, 0.5);
+  border: 1px solid rgba(56, 189, 248, 0.5);
+  padding: 6px 20px;
+  border-radius: 14px;
+}
+
+.tug-finish-scores {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin: 20px 0;
+}
+
+
 
 
