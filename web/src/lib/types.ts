@@ -483,3 +483,95 @@ export interface TugOfWarSessionDetail extends TugOfWarSessionRow {
   exam_title?: string;
 }
 
+/* -------------------------------------------------------------------------- */
+/* Vision Quiz (Đấu Trường Cử Chỉ AI) Types & Configuration                  */
+/* -------------------------------------------------------------------------- */
+
+export type VisionPlayerMode = 'SINGLE' | 'DUEL';
+export type VisionExamDistribution = 'SHARED_SYNC' | 'SAME_EXAM_SHUFFLED' | 'DUAL_EXAMS';
+export type VisionDetectionMode = 'HAND_FINGERS' | 'BODY_POSE';
+export type VisionAdvanceMode = 'AUTO' | 'MANUAL_TEACHER';
+export type PlayerId = 'BLUE' | 'RED';
+
+export interface VisionQuizConfig {
+  // 1. Players & Teams
+  playerMode: VisionPlayerMode;
+  bluePlayerName: string;          // Student 1 name or Team Blue name
+  redPlayerName: string;           // Student 2 name or Team Red name (for DUEL)
+  swapSides: boolean;              // Instantly swap Left/Right camera zones & UI panels
+
+  // 2. Exam & Question Distribution
+  examDistributionMode: VisionExamDistribution;
+  blueExamId: string;              // Primary exam ID (used for SINGLE, SHARED_SYNC, SAME_EXAM_SHUFFLED, and Player 1 in DUAL_EXAMS)
+  redExamId: string;               // Secondary exam ID (used for Player 2 when examDistributionMode === 'DUAL_EXAMS')
+  questionCount: number;           // Number of questions per player (1..total available, default: 10)
+  shuffleQuestions: boolean;       // Shuffle question order (default: true)
+  shuffleOptions: boolean;         // Shuffle A, B, C, D options independently per player (default: true)
+
+  // 3. Timing, Scoring & Victory Rules
+  durationSeconds: number;         // Total match timer (for self-paced) or per-question timer (default: 120s)
+  holdDurationMs: number;          // Dwell time required to lock answer (500ms..3000ms, default: 1200ms)
+  wrongPenaltySeconds: number;     // Freeze penalty duration on wrong answer (0s..10s, default: 2s)
+  pointsPerCorrect: number;        // Base points per correct answer (default: 10)
+  wrongPointDeduction: number;     // Points deducted on wrong answer (0..10, default: 0)
+  speedBonusEnabled: boolean;      // Award extra points for fast answers in SHARED_SYNC mode (default: true)
+  winGap: number;                  // Instant knock-out win if |scoreA - scoreB| >= winGap (0 = disabled, default: 0)
+  advanceMode: VisionAdvanceMode;  // 'AUTO' (advance after flash/freeze) or 'MANUAL_TEACHER' (wait for teacher click to explain)
+  revealAnswerOnWrong: boolean;    // Highlight the correct option when a student answers wrong (default: true)
+
+  // 4. AI Camera & Calibration Settings
+  detectionMode: VisionDetectionMode; // 'HAND_FINGERS' (1-2-3-4) or 'BODY_POSE'
+  splitRatio: number;              // Camera zone divider ratio for DUEL mode (0.30 to 0.70, default: 0.50)
+  minConfidence: number;           // MediaPipe detection confidence threshold (0.40 to 0.85, default: 0.60)
+  graceWindowMs: number;           // Anti-flicker tolerance window during hold (100ms..500ms, default: 200ms)
+  mirrorVideo: boolean;            // Mirror webcam horizontally (default: true)
+  showSkeleton: boolean;           // Draw AR hand/pose skeleton landmarks on canvas (default: true)
+
+  // 5. Fallback Keybindings
+  keybindings: {
+    blue: [string, string, string, string]; // Default: ['Q', 'W', 'A', 'S']
+    red: [string, string, string, string];  // Default: ['O', 'P', 'K', 'L']
+  };
+}
+
+export const DEFAULT_VISION_QUIZ_CONFIG: VisionQuizConfig = {
+  playerMode: 'DUEL',
+  bluePlayerName: 'Học sinh 1',
+  redPlayerName: 'Học sinh 2',
+  swapSides: false,
+  examDistributionMode: 'SHARED_SYNC',
+  blueExamId: '',
+  redExamId: '',
+  questionCount: 10,
+  shuffleQuestions: true,
+  shuffleOptions: true,
+  durationSeconds: 120,
+  holdDurationMs: 1200,
+  wrongPenaltySeconds: 2,
+  pointsPerCorrect: 10,
+  wrongPointDeduction: 0,
+  speedBonusEnabled: true,
+  winGap: 0,
+  advanceMode: 'AUTO',
+  revealAnswerOnWrong: true,
+  detectionMode: 'HAND_FINGERS',
+  splitRatio: 0.5,
+  minConfidence: 0.6,
+  graceWindowMs: 200,
+  mirrorVideo: true,
+  showSkeleton: true,
+  keybindings: {
+    blue: ['Q', 'W', 'A', 'S'],
+    red: ['O', 'P', 'K', 'L'],
+  },
+};
+
+export interface VisionQuizQuestionItem {
+  id: string;
+  question_text: string;
+  options: string[];
+  correct_option: number; // 0, 1, 2, 3
+  explanation?: string | null;
+}
+
+

@@ -31,6 +31,7 @@ import type { ClassMemberInput, ClassMemberRow, ClassRow, GroupNumber } from '@/
 import { cn } from '@/lib/utils';
 import { CreateTreeSessionModal } from '@/components/tree/CreateTreeSessionModal';
 import { CreateTugOfWarModal } from '@/components/games/tug-of-war/CreateTugOfWarModal';
+import { CreateVisionQuizModal } from '@/components/games/vision-quiz/CreateVisionQuizModal';
 
 /**
  * Phase 8.11 — the four group colours called for by the task, extended to the
@@ -81,6 +82,8 @@ export function ClassRosterManager({ initialClasses }: ClassRosterManagerProps) 
   const [treeClass, setTreeClass] = useState<ClassRow | null>(null);
   /** Class whose Tug of War session is being launched. */
   const [tugOfWarClass, setTugOfWarClass] = useState<ClassRow | null>(null);
+  /** Class whose AI Vision Quiz session is being launched. */
+  const [visionQuizClass, setVisionQuizClass] = useState<ClassRow | null>(null);
   const [classTab, setClassTab] = useState<'roster' | 'games'>('roster');
   const [error, setError] = useState<string | null>(null);
   const [busyMemberId, setBusyMemberId] = useState<string | null>(null);
@@ -484,7 +487,49 @@ export function ClassRosterManager({ initialClasses }: ClassRosterManagerProps) 
             {classTab === 'games' ? (
               /* Classroom Game Hub Grid */
               <div className="grid gap-4 sm:grid-cols-2 pt-2">
-                {/* 1. Kéo Co Tri Thức */}
+                {/* 1. Đấu Trường Cử Chỉ AI (Camera Quiz) */}
+                <div className="group relative flex flex-col justify-between rounded-2xl border-2 border-purple-500/30 bg-gradient-to-br from-purple-50 via-white to-pink-50 p-5 shadow-sm transition hover:shadow-md hover:border-purple-500/60">
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-500 via-purple-600 to-pink-500 text-2xl text-white shadow-md shadow-purple-500/25">
+                        📷
+                      </span>
+                      <span className="rounded-full bg-purple-100 border border-purple-200 px-2.5 py-0.5 text-[11px] font-bold text-purple-800">
+                        AI Camera • 1P / 2P Đối kháng
+                      </span>
+                    </div>
+                    <div>
+                      <h3 className="text-base font-bold text-slate-900 group-hover:text-purple-600 transition">
+                        📷 Đấu Trường Cử Chỉ AI (Camera Quiz)
+                      </h3>
+                      <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                        Học sinh đứng trước camera giơ ngón tay (1-2-3-4) hoặc tạo dáng cơ thể để chọn đáp án A, B, C, D.
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      <span className="rounded-md bg-purple-100/80 px-2 py-0.5 text-[11px] font-semibold text-purple-800">
+                        Nhận diện cử chỉ AI
+                      </span>
+                      <span className="rounded-md bg-pink-100/80 px-2 py-0.5 text-[11px] font-semibold text-pink-800">
+                        1P Cá nhân / 2P Đối kháng
+                      </span>
+                      <span className="rounded-md bg-indigo-100 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">
+                        Không cần điện thoại
+                      </span>
+                    </div>
+                  </div>
+                  <div className="pt-4 border-t border-slate-100 mt-4">
+                    <button
+                      type="button"
+                      onClick={() => setVisionQuizClass(selected)}
+                      className="w-full flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 py-2.5 text-xs font-bold text-white shadow-md shadow-purple-600/25 transition hover:brightness-110"
+                    >
+                      🚀 Bắt đầu Đấu Trường AI
+                    </button>
+                  </div>
+                </div>
+
+                {/* 2. Kéo Co Tri Thức */}
                 <div className="group relative flex flex-col justify-between rounded-2xl border-2 border-indigo-500/30 bg-gradient-to-br from-blue-50 via-white to-rose-50 p-5 shadow-sm transition hover:shadow-md hover:border-indigo-500/60">
                   <div className="space-y-3">
                     <div className="flex items-center justify-between">
@@ -811,6 +856,13 @@ export function ClassRosterManager({ initialClasses }: ClassRosterManagerProps) 
         <CreateTugOfWarModal
           klass={tugOfWarClass}
           onClose={() => setTugOfWarClass(null)}
+        />
+      )}
+
+      {visionQuizClass && (
+        <CreateVisionQuizModal
+          klass={visionQuizClass}
+          onClose={() => setVisionQuizClass(null)}
         />
       )}
     </div>

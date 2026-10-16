@@ -371,6 +371,17 @@ const { buildModelOptions, CUSTOM_MODEL } = await import(
 const { generateDistinctQuestionOrders, createTugOfWarSession, shuffleQuestionOptions, buildTeamQuestions, resetTugOfWarController } = await import(
   new URL('../web/src/lib/tugOfWar.ts', import.meta.url).href
 );
+const {
+  countExtendedFingers,
+  countExtendedFingersRaw,
+  classifyBodyPose,
+  assignDetectionsToPlayers,
+  HoldConfirmationTracker,
+  buildVisionQuizQuestions,
+  shuffleQuestionOptions: shuffleVisionOptions,
+} = await import(
+  new URL('../web/src/lib/visionEngine.ts', import.meta.url).href
+);
 
 const TEACHER = { email: 'e2e.teacher@adqsexam.local', password: 'e2e-password-123' };
 const EXAM = {
@@ -9433,6 +9444,251 @@ async function main() {
     modIsUuid('a1b2c3d4-e5f6-4a5b-8c9d-0e1f2a3b4c5d') === true &&
     modIsUuid('not-a-uuid') === false,
     'isUuid validator failure');
+
+
+  /* --- Step 55: AI Vision Gesture Quiz Game Engine & Customization ------ */
+  console.log('\n--- Step 55: AI Vision Gesture Quiz Game Engine & Customization ---');
+
+  // 55a: Synthetic Hand Landmarks Accuracy (1-2-3-4 -> 0-1-2-3, 0 -> null)
+  function makeSyntheticHand(extendedFingers = []) {
+    const lms = Array.from({ length: 21 }, () => ({ x: 0.5, y: 0.8, z: 0 }));
+    lms[0] = { x: 0.5, y: 0.9, z: 0 };
+    lms[2] = { x: 0.4, y: 0.8, z: 0 };
+    lms[3] = { x: 0.35, y: 0.75, z: 0 };
+    lms[4] = extendedFingers.includes('thumb') ? { x: 0.25, y: 0.65, z: 0 } : { x: 0.38, y: 0.78, z: 0 };
+
+    lms[6] = { x: 0.45, y: 0.5, z: 0 };
+    lms[8] = extendedFingers.includes('index') ? { x: 0.45, y: 0.2, z: 0 } : { x: 0.45, y: 0.6, z: 0 };
+
+    lms[10] = { x: 0.5, y: 0.5, z: 0 };
+    lms[12] = extendedFingers.includes('middle') ? { x: 0.5, y: 0.18, z: 0 } : { x: 0.5, y: 0.6, z: 0 };
+
+    lms[14] = { x: 0.55, y: 0.5, z: 0 };
+    lms[16] = extendedFingers.includes('ring') ? { x: 0.55, y: 0.2, z: 0 } : { x: 0.55, y: 0.6, z: 0 };
+
+    lms[18] = { x: 0.6, y: 0.5, z: 0 };
+    lms[20] = extendedFingers.includes('pinky') ? { x: 0.6, y: 0.25, z: 0 } : { x: 0.6, y: 0.6, z: 0 };
+
+    return lms;
+  }
+
+  check('55a: countExtendedFingers identifies 0 fingers as null',
+    countExtendedFingers(makeSyntheticHand([])) === null,
+    'failed to return null for 0 fingers');
+
+  check('55a: countExtendedFingers maps 1 finger to Option 0 (A)',
+    countExtendedFingers(makeSyntheticHand(['index'])) === 0,
+    'failed to map 1 finger to 0 (A)');
+
+  check('55a: countExtendedFingers maps 2 fingers to Option 1 (B)',
+    countExtendedFingers(makeSyntheticHand(['index', 'middle'])) === 1,
+    'failed to map 2 fingers to 1 (B)');
+
+  check('55a: countExtendedFingers maps 3 fingers to Option 2 (C)',
+    countExtendedFingers(makeSyntheticHand(['index', 'middle', 'ring'])) === 2,
+    'failed to map 3 fingers to 2 (C)');
+
+  check('55a: countExtendedFingers maps 4 or 5 fingers to Option 3 (D)',
+    countExtendedFingers(makeSyntheticHand(['index', 'middle', 'ring', 'pinky'])) === 3 &&
+    countExtendedFingers(makeSyntheticHand(['thumb', 'index', 'middle', 'ring', 'pinky'])) === 3,
+    'failed to map 4/5 fingers to 3 (D)');
+
+  // 55b: Synthetic Upper-Body Pose Accuracy (Both hands up -> 0, Crossed -> 1, Left up -> 2, Right up -> 3)
+  function makeSyntheticPose(poseType) {
+    const lms = Array.from({ length: 17 }, () => ({ x: 0.5, y: 0.8 }));
+    lms[11] = { x: 0.4, y: 0.4 };
+    lms[12] = { x: 0.6, y: 0.4 };
+    lms[13] = { x: 0.35, y: 0.55 };
+    lms[14] = { x: 0.65, y: 0.55 };
+
+    if (poseType === 'BOTH_HANDS_UP') {
+      lms[15] = { x: 0.35, y: 0.15 };
+      lms[16] = { x: 0.65, y: 0.15 };
+    } else if (poseType === 'CROSSED_CHEST') {
+      lms[15] = { x: 0.52, y: 0.42 };
+      lms[16] = { x: 0.48, y: 0.42 };
+    } else if (poseType === 'LEFT_ARM_UP') {
+      lms[15] = { x: 0.35, y: 0.15 };
+      lms[16] = { x: 0.65, y: 0.7 };
+    } else if (poseType === 'RIGHT_ARM_UP') {
+      lms[15] = { x: 0.35, y: 0.7 };
+      lms[16] = { x: 0.65, y: 0.15 };
+    } else {
+      lms[15] = { x: 0.35, y: 0.75 };
+      lms[16] = { x: 0.65, y: 0.75 };
+    }
+    return lms;
+  }
+
+  check('55b: classifyBodyPose classifies both hands above head as Option 0 (A)',
+    classifyBodyPose(makeSyntheticPose('BOTH_HANDS_UP')) === 0,
+    'failed to classify both hands up');
+
+  check('55b: classifyBodyPose classifies hands crossed on chest as Option 1 (B)',
+    classifyBodyPose(makeSyntheticPose('CROSSED_CHEST')) === 1,
+    'failed to classify hands crossed on chest');
+
+  check('55b: classifyBodyPose classifies left arm raised as Option 2 (C)',
+    classifyBodyPose(makeSyntheticPose('LEFT_ARM_UP')) === 2,
+    'failed to classify left arm raised');
+
+  check('55b: classifyBodyPose classifies right arm raised as Option 3 (D)',
+    classifyBodyPose(makeSyntheticPose('RIGHT_ARM_UP')) === 3,
+    'failed to classify right arm raised');
+
+  check('55b: classifyBodyPose returns null for neutral posture',
+    classifyBodyPose(makeSyntheticPose('NEUTRAL')) === null,
+    'failed to return null for neutral pose');
+
+  // 55c: assignDetectionsToPlayers with custom splitRatio and swapSides
+  const dets55 = [{ x: 0.25, option: 0, confidence: 0.9 }, { x: 0.75, option: 1, confidence: 0.85 }];
+  const assigned55a = assignDetectionsToPlayers(dets55, { playerMode: 'DUEL', splitRatio: 0.5, swapSides: false });
+  check('55c: assignDetectionsToPlayers maps left to Blue and right to Red under default 0.5 split',
+    assigned55a.blue?.option === 0 && assigned55a.red?.option === 1,
+    'default split assignment failure');
+
+  const assigned55b = assignDetectionsToPlayers(dets55, { playerMode: 'DUEL', splitRatio: 0.5, swapSides: true });
+  check('55c: assignDetectionsToPlayers inverts player mapping when swapSides is true',
+    assigned55b.blue?.option === 1 && assigned55b.red?.option === 0,
+    'swapSides assignment failure');
+
+  const assigned55c = assignDetectionsToPlayers(
+    [{ x: 0.30, option: 2 }, { x: 0.40, option: 3 }],
+    { playerMode: 'DUEL', splitRatio: 0.35, swapSides: false }
+  );
+  check('55c: assignDetectionsToPlayers respects custom splitRatio boundary (0.35)',
+    assigned55c.blue?.option === 2 && assigned55c.red?.option === 3,
+    'custom splitRatio 0.35 failure');
+
+  const assigned55Single = assignDetectionsToPlayers(
+    [{ x: 0.2, option: 0, confidence: 0.7 }, { x: 0.8, option: 3, confidence: 0.95 }],
+    { playerMode: 'SINGLE', splitRatio: 0.5, swapSides: false }
+  );
+  check('55c: assignDetectionsToPlayers maps highest confidence to Blue in SINGLE mode',
+    assigned55Single.blue?.option === 3 && assigned55Single.red === null,
+    'SINGLE mode player assignment failure');
+
+  // 55d: HoldConfirmationTracker dwell time and grace window
+  let trackerLockEvent = null;
+  const tracker55 = new HoldConfirmationTracker({
+    holdDurationMs: 800,
+    graceWindowMs: 150,
+    onLockOption: (p, opt) => { trackerLockEvent = { player: p, option: opt }; },
+  });
+
+  tracker55.update('BLUE', 0, 1000);
+  check('55d: HoldConfirmationTracker initializes dwell progress at 0%',
+    tracker55.getState('BLUE').progress === 0 && tracker55.getState('BLUE').currentOption === 0,
+    'tracker initial progress mismatch');
+
+  tracker55.update('BLUE', 0, 1400);
+  check('55d: HoldConfirmationTracker scales progress linearly (400ms/800ms = 50%)',
+    Math.abs(tracker55.getState('BLUE').progress - 0.5) < 0.01,
+    `expected 0.5, got ${tracker55.getState('BLUE').progress}`);
+
+  tracker55.update('BLUE', null, 1480);
+  check('55d: HoldConfirmationTracker retains progress within grace window (80ms < 150ms)',
+    Math.abs(tracker55.getState('BLUE').progress - 0.5) < 0.01 && tracker55.getState('BLUE').currentOption === 0,
+    'grace window prematurely dropped option');
+
+  tracker55.update('BLUE', 0, 1800);
+  check('55d: HoldConfirmationTracker locks option and triggers onLock at 100% (800ms dwell)',
+    tracker55.getState('BLUE').isLocked === true &&
+    tracker55.getState('BLUE').progress === 1 &&
+    trackerLockEvent?.player === 'BLUE' &&
+    trackerLockEvent?.option === 0,
+    'tracker lock completion failure');
+
+  tracker55.reset('BLUE');
+  check('55d: HoldConfirmationTracker reset clears lock and resets progress',
+    tracker55.getState('BLUE').isLocked === false && tracker55.getState('BLUE').progress === 0,
+    'tracker reset failure');
+
+  // 55e: Question builders for SHARED_SYNC, SAME_EXAM_SHUFFLED, DUAL_EXAMS
+  const mockPool55A = [
+    { id: 'q1', question_text: 'Câu 1', options: ['A1', 'B1', 'C1', 'D1'], correct_option: 0 },
+    { id: 'q2', question_text: 'Câu 2', options: ['A2', 'B2', 'C2', 'D2'], correct_option: 1 },
+    { id: 'q3', question_text: 'Câu 3', options: ['A3', 'B3', 'C3', 'D3'], correct_option: 2 },
+    { id: 'q4', question_text: 'Câu 4', options: ['A4', 'B4', 'C4', 'D4'], correct_option: 3 },
+  ];
+  const mockPool55B = [
+    { id: 'qb1', question_text: 'Câu B1', options: ['1', '2', '3', '4'], correct_option: 0 },
+    { id: 'qb2', question_text: 'Câu B2', options: ['5', '6', '7', '8'], correct_option: 1 },
+  ];
+
+  const shared55 = buildVisionQuizQuestions({
+    mode: 'SHARED_SYNC',
+    primaryPool: mockPool55A,
+    questionCount: 3,
+    shuffleQuestions: false,
+    shuffleOptions: false,
+  });
+  check('55e: SHARED_SYNC delivers identical question sequences to Blue and Red',
+    shared55.blueQuestions.length === 3 &&
+    shared55.redQuestions.length === 3 &&
+    JSON.stringify(shared55.blueQuestions) === JSON.stringify(shared55.redQuestions),
+    'SHARED_SYNC sequence mismatch');
+
+  const dual55 = buildVisionQuizQuestions({
+    mode: 'DUAL_EXAMS',
+    primaryPool: mockPool55A,
+    secondaryPool: mockPool55B,
+    questionCount: 2,
+    shuffleQuestions: false,
+    shuffleOptions: false,
+  });
+  check('55e: DUAL_EXAMS partitions primary pool to Blue and secondary pool to Red',
+    dual55.blueQuestions[0].id === 'q1' && dual55.redQuestions[0].id === 'qb1',
+    'DUAL_EXAMS source partition failure');
+
+  const shuffledOpt55 = shuffleVisionOptions(mockPool55A[1]);
+  check('55e: shuffleQuestionOptions preserves correct answer value under option permutation',
+    shuffledOpt55.options[shuffledOpt55.correct_option] === mockPool55A[1].options[mockPool55A[1].correct_option],
+    'option shuffle corrupted correct answer');
+
+  // 55f: Game Hub and UI Components Wiring Checks
+  const rosterManagerSrc55 = _rawReadFileSync(
+    new URL('../web/src/components/ClassRosterManager.tsx', import.meta.url),
+    'utf8'
+  );
+  check('55f: ClassRosterManager defines Camera Quiz card and opens CreateVisionQuizModal',
+    rosterManagerSrc55.includes('📷 Đấu Trường Cử Chỉ AI (Camera Quiz)') &&
+    rosterManagerSrc55.includes('AI Camera • 1P / 2P Đối kháng') &&
+    rosterManagerSrc55.includes('CreateVisionQuizModal') &&
+    rosterManagerSrc55.includes('setVisionQuizClass'),
+    'missing Vision Quiz card in ClassRosterManager.tsx');
+
+  const modalFileSrc55 = _rawReadFileSync(
+    new URL('../web/src/components/games/vision-quiz/CreateVisionQuizModal.tsx', import.meta.url),
+    'utf8'
+  );
+  check('55f: CreateVisionQuizModal provides 1P/2P mode toggle, 3 distribution modes, and live sliders',
+    modalFileSrc55.includes('Chế độ người chơi & Chọn học sinh') &&
+    modalFileSrc55.includes('SHARED_SYNC') &&
+    modalFileSrc55.includes('SAME_EXAM_SHUFFLED') &&
+    modalFileSrc55.includes('DUAL_EXAMS') &&
+    modalFileSrc55.includes('holdDurationMs') &&
+    modalFileSrc55.includes('wrongPenaltySeconds'),
+    'CreateVisionQuizModal content mismatch');
+
+  const arenaFileSrc55 = _rawReadFileSync(
+    new URL('../web/src/components/games/vision-quiz/VisionQuizArena.tsx', import.meta.url),
+    'utf8'
+  );
+  check('55f: VisionQuizArena implements webcam AR overlay, live settings drawer, and knock-out check',
+    arenaFileSrc55.includes('drawVisionOverlay') &&
+    arenaFileSrc55.includes('HoldConfirmationTracker') &&
+    arenaFileSrc55.includes('Cài đặt nhanh trong trận') &&
+    arenaFileSrc55.includes('TRẬN ĐẤU KẾT THÚC'),
+    'VisionQuizArena content mismatch');
+
+  const pageFileSrc55 = _rawReadFileSync(
+    new URL('../web/src/app/games/vision-quiz/page.tsx', import.meta.url),
+    'utf8'
+  );
+  check('55f: web/src/app/games/vision-quiz/page.tsx serves VisionQuizArena with demo fallback',
+    pageFileSrc55.includes('VisionQuizArena') && pageFileSrc55.includes('adqs_vision_quiz_session'),
+    'vision-quiz page.tsx content mismatch');
 
 
   /* --- teardown --------------------------------------------------------- */
